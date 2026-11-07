@@ -66,6 +66,24 @@ function buildQuery(query: WebhookRequest["query"]): string {
   return serialized ? `?${serialized}` : "";
 }
 
+/**
+ * Diagnostics for failed calls: what we actually *sent*.
+ *
+ * Without it, a `VALIDATION_ERROR` from the target project is undebuggable —
+ * the log says "the query was invalid" but not which parameter was in it.
+ * `search` / `phone` / `email` / `name` are masked because they hold personal
+ * data (a staff phone number is not a log field).
+ */
+function redactQuery(query: WebhookRequest["query"]): Record<string, string | number | boolean> | undefined {
+  if (!query) return undefined;
+  const out: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === "") continue;
+    out[key] = /search|phone|email|name/i.test(key) ? "[redacted]" : value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Map the target project's error payload onto our own codes. */
 function errorFromPayload(status: number, payload: unknown): { code: string; message: string } {
   const asRecord = payload as { error?: { code?: string; message?: string }; message?: string } | null;
@@ -137,7 +155,20 @@ export async function callWebhook(request: WebhookRequest, options?: { timeoutMs
 
     if (!response.ok) {
       const { code, message } = errorFromPayload(response.status, payload);
-      logWarn("webhook.call_failed", { requestId, method: request.method, path: request.path, status: response.status, code, ms });
+      // NOTE: for a 400 the code/message are the *target project's* — e.g.
+      // VALIDATION_ERROR means its query/body schema rejected what we sent,
+      // so log the query (masked) and the target's message, not just the code.
+      logWarn("webhook.call_failed", {
+        requestId,
+        method: request.method,
+        path: request.path,
+        pathParams: request.pathParams,
+        query: redactQuery(request.query),
+        status: response.status,
+        code,
+        message,
+        ms,
+      });
       return { ok: false, status: response.status, code, message, requestId, ms };
     }
 
