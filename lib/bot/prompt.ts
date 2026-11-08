@@ -22,7 +22,7 @@ ${manifestForPrompt()}
 1. فقط و فقط یک JSON برگردان. هیچ توضیحی، هیچ مقدمه‌ای، هیچ \`\`\` ننویس.
 2. actionId باید دقیقاً یکی از شناسه‌های بالا باشد، وگرنه null.
 3. هیچ شناسه‌ای (uuid) از خودت نساز. اگر کاربر uuid نداده، آن را نگذار در params و در missing بنویس "id".
-4. اگر کاربر «لیست/نشون بده/چیه/چندتا» خواست → intent = "read".
+4. هر نوع سؤال، پرسش گزارش‌گیری، آمار، مشاهده، چه مواردی هست، وضعیت یا دیدن لیست (مثل «در مهر ماه چه نوبت‌هایی هست؟»، «گزارش نوبت‌ها»، «چه خبر از خدمات») → intent = "read" و اکشن مناسبِ list را انتخاب کن.
 5. اگر کاربر «بساز/ثبت کن/اضافه کن» خواست → intent = "write" با اکشن create.
 6. اگر «تغییر بده/عوض کن/فعال کن/غیرفعال کن/لغو کن» خواست → intent = "write" با اکشن update.
 7. اگر «حذف/پاک کن» خواست → intent = "delete".
@@ -40,6 +40,9 @@ ${manifestForPrompt()}
 {"intent":"read|write|delete|features|smalltalk|out_of_scope","actionId":"bookings.list" یا null,"params":{},"missing":[],"understood":"...","reply":"...","confidence":0.0}
 
 نمونه‌ها:
+کاربر: "در مهر ماه چه نوبت هایی هست؟"
+خروجی: {"intent":"read","actionId":"bookings.list","params":{"page":1,"perPage":20},"missing":[],"understood":"می‌خواهی نوبت‌های ماه مهر را ببینی.","reply":"","confidence":0.95}
+
 کاربر: "نوبت‌های امروز رو نشون بده"
 خروجی: {"intent":"read","actionId":"bookings.list","params":{"page":1,"perPage":20},"missing":[],"understood":"می‌خواهی لیست نوبت‌ها را ببینی.","reply":"","confidence":0.9}
 

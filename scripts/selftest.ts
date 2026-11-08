@@ -182,6 +182,18 @@ async function main(): Promise<void> {
     assertEqual(guess.intent, "read", "intent");
   });
 
+  await test("جملات گزارش‌گیری و محاوره‌ای («در مهر ماه چه نوبت هایی هست؟» و «گزارش نوبت‌ها») → read", () => {
+    const q1 = routeMessage("در مهر ماه چه نوبت هایی هست؟");
+    assertEqual(q1.feature?.id, "bookings", "feature");
+    assertEqual(q1.actionId, "bookings.list", "action");
+    assertEqual(q1.intent, "read", "intent");
+
+    const q2 = routeMessage("گزارش نوبت‌ها");
+    assertEqual(q2.feature?.id, "bookings", "feature");
+    assertEqual(q2.actionId, "bookings.list", "action");
+    assertEqual(q2.intent, "read", "intent");
+  });
+
   await test("«ساعت کاری شنبه چیه؟» → working-hours", () => {
     assertEqual(routeMessage("ساعت کاری شنبه‌ها چیه؟").feature?.id, "working-hours", "feature");
   });
@@ -719,6 +731,12 @@ async function main(): Promise<void> {
     assert(fallback.some((suggestion) => suggestion.command === "menu"), "menu included");
     for (const suggestion of fallback) {
       if (suggestion.actionId) assert(!suggestion.actionId.includes("delete"), "no destructive fallback");
+      assert(/[؟?]$/.test(suggestion.label), `label is a question: ${suggestion.label}`);
+    }
+
+    const enFallback = fallbackSuggestions({ actionId: "bookings.list", locale: "en" });
+    for (const suggestion of enFallback) {
+      assert(suggestion.label.endsWith("?"), `english label is a question: ${suggestion.label}`);
     }
   });
 
