@@ -43,8 +43,15 @@ function statusFa(value: unknown): string {
   return STATUS_FA[value] ?? value;
 }
 
-function pickArray(data: unknown): { rows: unknown[]; total: number | null } | null {
-  if (Array.isArray(data)) return { rows: data, total: data.length };
+export type PickedList = {
+  rows: unknown[];
+  total: number | null;
+  page: number;
+  perPage: number;
+};
+
+export function pickArray(data: unknown): PickedList | null {
+  if (Array.isArray(data)) return { rows: data, total: data.length, page: 1, perPage: 10 };
   if (data && typeof data === "object") {
     const record = data as Record<string, unknown>;
     for (const key of ["items", "rows", "results", "list", "data", "bookings", "services", "users"]) {
@@ -56,7 +63,9 @@ function pickArray(data: unknown): { rows: unknown[]; total: number | null } | n
             : typeof record.count === "number"
               ? record.count
               : value.length;
-        return { rows: value, total };
+        const page = typeof record.page === "number" && record.page > 0 ? record.page : 1;
+        const perPage = typeof record.perPage === "number" && record.perPage > 0 ? record.perPage : 10;
+        return { rows: value, total, page, perPage };
       }
     }
   }
@@ -170,10 +179,37 @@ export function fallbackAnswer(input: ExplainInput): string {
     if (list.rows.length === 0) {
       return "چیزی پیدا نشد. 🔍\nموردی با این مشخصات در سیستم ثبت نشده است.";
     }
-    const shown = list.rows.slice(0, 5).map(rowToOneLine).join("\n");
+    const page = list.page ?? 1;
+    const perPage = list.perPage ?? 10;
     const count = list.total ?? list.rows.length;
-    const more = count > 5 ? `\n…و ${count - 5} مورد دیگر هم هست.` : "";
-    return `بفرما، ${count} مورد پیدا کردم:\n${shown}${more}`;
+
+    let displayRows = list.rows;
+    let startIndex = (page - 1) * perPage;
+    if (list.rows.length > perPage) {
+      displayRows = list.rows.slice(startIndex, startIndex + perPage);
+      if (displayRows.length === 0 && list.rows.length > 0) {
+        displayRows = list.rows.slice(0, perPage);
+        startIndex = 0;
+      }
+    } else if (list.rows.length <= perPage && page === 1) {
+      startIndex = 0;
+    }
+
+    const shown = displayRows.map((row, i) => rowToOneLine(row, startIndex + i)).join("\n");
+    const remaining = count - (startIndex + displayRows.length);
+
+    let pageHeader = ":";
+    if (count > perPage) {
+      const totalPages = Math.ceil(count / perPage);
+      pageHeader = ` (صفحهٔ ${page} از ${totalPages}):`;
+    }
+
+    let more = "";
+    if (remaining > 0) {
+      more = `\n\n…و ${remaining} مورد دیگر هم هست (می‌توانید بنویسید «صفحه بعد» یا از دکمه‌های زیر استفاده کنید).`;
+    }
+
+    return `بفرما، ${count} مورد پیدا کردم${pageHeader}\n${shown}${more}`;
   }
 
   if (data && typeof data === "object") {

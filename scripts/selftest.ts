@@ -1175,6 +1175,102 @@ async function main(): Promise<void> {
     }
   });
 
+  console.log("\nط) ویرایش کامل، صفحه‌بندی و دسترسی آسان (بدون نیاز به شناسهٔ خام)");
+
+  await test("لیست ۷۱ موردی → ۱۰ مورد در صفحه + شماره صفحه + راهنمای ادامه", () => {
+    const dummyServices = Array.from({ length: 71 }, (_, i) => ({
+      id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      price: (i + 1) * 100_000,
+      translations: { fa: { title: `خدمت آزمایشی شماره ${i + 1}` } },
+    }));
+
+    const text = fallbackAnswer({
+      userMessage: "لیست خدمات",
+      actionId: "services.list",
+      outcome: "success",
+      data: { items: dummyServices, total: 71, page: 1, perPage: 10 },
+      locale: "fa",
+    });
+
+    assert(text.includes("صفحهٔ 1 از 8"), `missing page indicator: ${text}`);
+    assert(text.includes("10. خدمت آزمایشی شماره 10"), `10 items must be shown: ${text}`);
+    assert(!text.includes("11. خدمت آزمایشی شماره 11"), `item 11 should not be on page 1: ${text}`);
+    assert(text.includes("61 مورد دیگر هم هست"), `missing remaining count: ${text}`);
+    assert(text.includes("صفحه بعد"), `missing pagination tip: ${text}`);
+  });
+
+  await test("پیشنهادهای اکشن‌ها شامل ویرایش و ایجاد است (فقط‌خواندنی نیست)", () => {
+    const { fallbackSuggestions, defaultTip } = require("@/lib/telegram/suggest");
+    const suggestions = fallbackSuggestions({ actionId: "services.list", locale: "fa" });
+
+    const hasUpdate = suggestions.some((s: any) => s.actionId === "services.update");
+    const hasCreate = suggestions.some((s: any) => s.actionId === "services.create");
+    assert(hasUpdate, "services suggestions must include services.update");
+    assert(hasCreate, "services suggestions must include services.create");
+
+    const tip = defaultTip("services.list");
+    assert(tip.includes("برای تغییر قیمت"), `tip should be practical and helpful: ${tip}`);
+  });
+
+  await test("حل شناسه از حافظهٔ نشست و ویرایش آسان بدون uuid خام", async () => {
+    const { saveSessionItems, findSessionItem } = await import("@/lib/bot/session");
+
+    const dummyServices = [
+      { id: "11111111-2222-4333-8444-555555555555", fullName: "دی می (فیلر نقاط حساس)", price: 6190000 },
+      { id: "22222222-3333-4444-8555-666666666666", fullName: "فیورج (فیلر نقاط حساس)", price: 6390000 },
+      { id: "33333333-4444-4555-8666-777777777777", fullName: "اودری", price: 1890000 },
+    ];
+
+    saveSessionItems("session-edit-test", "services", dummyServices, 1, 10);
+
+    const matchByName = findSessionItem("session-edit-test", "قیمت دی می رو بکن ۷ میلیون");
+    assert(matchByName !== undefined, "must match item by title");
+    assertEqual(matchByName?.id, "11111111-2222-4333-8444-555555555555", "item 1 id");
+
+    const matchByNumber = findSessionItem("session-edit-test", "شماره ۱ رو بکن ۷ میلیون");
+    assert(matchByNumber !== undefined, "must match item by number 1");
+    assertEqual(matchByNumber?.id, "11111111-2222-4333-8444-555555555555", "item 1 id");
+
+    const matchByOrdinal = findSessionItem("session-edit-test", "مورد دوم رو غیرفعال کن");
+    assert(matchByOrdinal !== undefined, "must match item by ordinal دوم");
+    assertEqual(matchByOrdinal?.id, "22222222-3333-4444-8555-666666666666", "item 2 id");
+
+    nextPlannerJson = "{}"; // test offline router resolution
+    // Full flow: sentence -> edit plan -> confirmation card without asking for UUID
+    const res = await handleChat({
+      message: "قیمت دی می رو بکن ۷ میلیون",
+      sessionId: "session-edit-test",
+      locale: "fa",
+    });
+
+    assertEqual(res.status, "needs_confirmation", "ready for confirmation");
+    assertEqual(res.actionId, "services.update", "actionId is services.update");
+    assert(res.reply.includes("دی می"), `reply should reference item title: ${res.reply}`);
+    assert(res.reply.includes("۷٬۰۰۰٬۰۰۰"), `reply should reference new price: ${res.reply}`);
+  });
+
+  await test("صفحه‌بندی تلگرام و درخواست «صفحه بعد»", async () => {
+    const { parseCallback } = await import("@/lib/telegram/keyboard");
+    const parsed = parseCallback("p:services.list:2");
+    assertEqual(parsed.kind, "page", "callback parsed as page");
+    if (parsed.kind === "page") {
+      assertEqual(parsed.actionId, "services.list", "actionId");
+      assertEqual(parsed.page, 2, "page number");
+    }
+
+    // Text-based pagination command:
+    const { saveSessionItems } = await import("@/lib/bot/session");
+    saveSessionItems("session-page-chat", "services", [{ id: "uuid-1", name: "خدمت ۱" }], 1, 10);
+
+    const res = await handleChat({
+      message: "صفحه بعد",
+      sessionId: "session-page-chat",
+      locale: "fa",
+    });
+    assertEqual(res.status, "done", "status");
+    assertEqual(res.actionId, "services.list", "navigated to next page");
+  });
+
   console.log(`\n${failures.length === 0 ? "🎉" : "⚠️"}  ${passed} passed, ${failures.length} failed\n`);
   if (failures.length > 0) {
     for (const failure of failures) console.log(`  • ${failure}`);

@@ -17,6 +17,7 @@
 import { getConfig, type Locale } from "@/lib/config";
 import { handleChat, type ChatResult } from "@/lib/bot";
 import { featuresAnswer } from "@/lib/bot/features-answer";
+import { pickArray } from "@/lib/bot/explainer";
 import { getFeature } from "@/lib/features/manifest";
 import { logInfo, logWarn } from "@/lib/log";
 import { truncateAtSentence } from "@/lib/text";
@@ -45,7 +46,7 @@ import {
   setPending,
   verifyContact,
 } from "@/lib/telegram/identity";
-import { suggestNext, tipLine, type Suggestion } from "@/lib/telegram/suggest";
+import { defaultTip, suggestNext, tipLine, type Suggestion } from "@/lib/telegram/suggest";
 
 export type BridgeOutcome = {
   handled: boolean;
@@ -278,14 +279,41 @@ async function keyboardFor(
     hadError: result.status === "error",
   });
 
+  const list = [...suggestion.suggestions];
+
+  // If this was a list action and has multiple pages, add pagination controls
+  if (result.actionId?.endsWith(".list") && result.result?.data) {
+    const listData = pickArray(result.result.data);
+    if (listData && listData.total && listData.total > listData.perPage) {
+      const currentPage = listData.page ?? 1;
+      const totalPages = Math.ceil(listData.total / listData.perPage);
+      const paginationButtons: Suggestion[] = [];
+
+      if (currentPage < totalPages) {
+        paginationButtons.push({
+          label: input.locale === "en" ? `📄 Next page (${currentPage + 1}) ➡️` : `📄 صفحهٔ بعد (${currentPage + 1}) ➡️`,
+          page: { actionId: result.actionId, page: currentPage + 1 },
+        });
+      }
+      if (currentPage > 1) {
+        paginationButtons.push({
+          label: input.locale === "en" ? `⬅️ Prev page (${currentPage - 1})` : `⬅️ صفحهٔ قبل (${currentPage - 1})`,
+          page: { actionId: result.actionId, page: currentPage - 1 },
+        });
+      }
+
+      list.unshift(...paginationButtons);
+    }
+  }
+
   // When the bot is asking questions, fewer buttons = less confusion.
-  const list = result.status === "needs_info" ? suggestion.suggestions.slice(0, 3) : suggestion.suggestions;
+  const finalList = result.status === "needs_info" ? list.slice(0, 3) : list.slice(0, 5);
 
   return {
-    keyboard: suggestionsKeyboard(list, input.locale),
-    tip: suggestion.tip,
+    keyboard: suggestionsKeyboard(finalList, input.locale),
+    tip: suggestion.tip || defaultTip(result.actionId),
     engine: suggestion.engine,
-    count: list.length,
+    count: finalList.length,
   };
 }
 
@@ -377,6 +405,35 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         keyboard: featureKeyboard(feature.id, locale) ?? menuKeyboard(locale),
       });
       return { handled: true, chatId, status: "feature" };
+    }
+
+    if (parsed.kind === "page") {
+      await answerCallbackQuery({ callbackQueryId: query.id, text: `صفحهٔ ${parsed.page}` });
+      sendTyping(chatId);
+
+      let result: ChatResult;
+      try {
+        result = await handleChat({
+          message: `صفحه ${parsed.page}`,
+          sessionId,
+          locale,
+          direct: { actionId: parsed.actionId, params: { page: parsed.page } },
+        });
+      } catch (error) {
+        logWarn("telegram.handle_failed", { message: error instanceof Error ? error.message : "unknown" });
+        await sendMessage({ chatId, text: errorMessage(locale), keyboard: menuKeyboard(locale) });
+        return { handled: true, chatId, status: "error", reason: "exception" };
+      }
+
+      const ui = await keyboardFor(result, { userMessage: `صفحه ${parsed.page}`, locale });
+      await sendMessage({
+        chatId,
+        text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
+        keyboard: ui.keyboard,
+      });
+
+      logInfo("telegram.page", { chatId, actionId: result.actionId, page: parsed.page, status: result.status });
+      return { handled: true, chatId, status: result.status, actionId: result.actionId, suggestions: ui.count };
     }
 
     if (parsed.kind === "unknown" || parsed.kind === "action" || parsed.kind === "confirm") {

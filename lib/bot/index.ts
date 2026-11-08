@@ -9,13 +9,23 @@
 import { getConfig, type Locale } from "@/lib/config";
 import { FEATURES, getAction } from "@/lib/features/manifest";
 import { logInfo, logWarn } from "@/lib/log";
+import { slotsForAction } from "@/lib/features/extract";
+import { detectIntent } from "@/lib/features/router";
 
-import { confirmationText, clarifyText, explain } from "./explainer";
+import { confirmationText, clarifyText, explain, pickArray } from "./explainer";
 import { executeRequest, preparePlan, previewRequest, type PreparedRequest } from "./executor";
 import { featureTitleList, featuresAnswer } from "./features-answer";
 import { planRequest, type PlannerResult } from "./planner";
 import { validatePlan, type ValidatedPlan } from "./plan";
-import { previousTurn, rememberTurn, savePending, takePending } from "./session";
+import {
+  findSessionItem,
+  getLastPageInfo,
+  previousTurn,
+  rememberTurn,
+  savePending,
+  saveSessionItems,
+  takePending,
+} from "./session";
 
 export type ChatInput = {
   message: string;
@@ -98,6 +108,20 @@ async function runAndExplain(
 
   trace.writer = explanation.engine;
   trace.writerModel = explanation.model;
+
+  if (result.ok && result.data && request.actionId.endsWith(".list")) {
+    const featureId = request.actionId.split(".")[0] ?? "";
+    const list = pickArray(result.data);
+    if (list && list.rows.length > 0) {
+      saveSessionItems(
+        input.sessionId,
+        featureId,
+        list.rows,
+        typeof request.query.page === "number" ? Number(request.query.page) : list.page,
+        typeof request.query.perPage === "number" ? Number(request.query.perPage) : list.perPage,
+      );
+    }
+  }
 
   await rememberTurn(input.sessionId, {
     userMessage: input.message,
@@ -210,6 +234,24 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
     return { ...result, trace: { ...trace, ms: Date.now() - startedAt } };
   }
 
+  /* ── 1.5 Pagination requests ── */
+  const pageMatch = input.message.match(/(?:برو به\s*)?صفحه\s*(بعد|قبل|\d+)|(موارد\s*بیشتر|بقیه\s*موارد|ادامه)/);
+  if (pageMatch && !input.direct) {
+    const last = getLastPageInfo(input.sessionId);
+    if (last.actionId) {
+      const currentPage = last.page ?? 1;
+      let targetPage = currentPage;
+      if (pageMatch[1] === "بعد" || pageMatch[2]) targetPage = currentPage + 1;
+      else if (pageMatch[1] === "قبل") targetPage = Math.max(1, currentPage - 1);
+      else if (pageMatch[1]) targetPage = Math.max(1, Number(pageMatch[1]));
+
+      return await handleChat({
+        ...input,
+        direct: { actionId: last.actionId, params: { page: targetPage } },
+      });
+    }
+  }
+
   /* ── 2. Understand the sentence (or take the button's word for it) ── */
   const previous = await previousTurn(input.sessionId);
   const planned = input.direct
@@ -243,6 +285,33 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
     });
   }
 
+  if (plan.intent === "smalltalk" || plan.intent === "out_of_scope" || !plan.actionId) {
+    const matchedItem = findSessionItem(input.sessionId, input.message);
+    if (matchedItem) {
+      const slots = slotsForAction(input.message, undefined);
+      const intent = detectIntent(input.message);
+      const isWrite = intent === "write";
+      const isDelete = intent === "delete";
+
+      let resolvedActionId: string | null = null;
+      if (isDelete) {
+        resolvedActionId = `${matchedItem.featureId}.delete`;
+      } else if (isWrite || Object.keys(slots).length > 0) {
+        resolvedActionId = `${matchedItem.featureId}.update`;
+      }
+
+      if (resolvedActionId) {
+        plan.intent = isDelete ? "delete" : "write";
+        plan.actionId = resolvedActionId;
+        plan.actionValid = true;
+        plan.params = { ...slots, id: matchedItem.id, _itemTitle: matchedItem.name };
+        if (slots.status === "inactive") plan.params.isActive = false;
+        if (slots.status === "active") plan.params.isActive = true;
+        logInfo("bot.action_inferred_from_item", { actionId: resolvedActionId, id: matchedItem.id, name: matchedItem.name });
+      }
+    }
+  }
+
   if (plan.intent === "smalltalk" || plan.intent === "out_of_scope") {
     const featureCount = FEATURES.filter((feature) => feature.available).length;
     const reply =
@@ -263,6 +332,15 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
   }
 
   /* ── 4. Acting ────────────────────────────────────────────────────── */
+  if (plan.actionId && !plan.params.id) {
+    const matched = findSessionItem(input.sessionId, input.message);
+    if (matched) {
+      plan.params.id = matched.id;
+      plan.params._itemTitle = matched.name;
+      logInfo("bot.item_resolved_from_session", { id: matched.id, name: matched.name, actionId: plan.actionId });
+    }
+  }
+
   if (!plan.actionId || !plan.actionValid) {
     logWarn("bot.no_action", { intent: plan.intent, invalidActionId: plan.invalidActionId });
     return finish({
