@@ -28,6 +28,7 @@ export type ParsedCallback =
   | { kind: "action"; actionId: string }
   | { kind: "page"; actionId: string; page: number }
   | { kind: "confirm"; token: string; approve: boolean }
+  | { kind: "text"; text: string }
   | { kind: "unknown"; raw: string };
 
 function byteLength(value: string): number {
@@ -67,6 +68,7 @@ export function parseCallback(data: string): ParsedCallback {
   if (prefix === "a" && value) return { kind: "action", actionId: value };
   if (prefix === "c" && value) return { kind: "confirm", token: value, approve: true };
   if (prefix === "x" && value) return { kind: "confirm", token: value, approve: false };
+  if (prefix === "t" && value) return { kind: "text", text: value };
 
   return { kind: "unknown", raw };
 }
@@ -86,6 +88,8 @@ export function suggestionsKeyboard(suggestions: Suggestion[], locale: Locale): 
       buttons.push(button(cleanLabel, "m"));
     } else if (suggestion.command === "features") {
       buttons.push(button(cleanLabel, "h"));
+    } else if (cleanLabel) {
+      buttons.push(button(cleanLabel, `t:${cleanLabel}`));
     }
   }
 
