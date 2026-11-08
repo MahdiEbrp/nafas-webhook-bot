@@ -29,6 +29,11 @@ export type AppConfig = {
   allowedOrigins: string[];
   /** Real mutations need an explicit confirmation unless this is true */
   allowAutoWrite: boolean;
+  /**
+   * Use fast template-based replies ("بفرما، ... پیدا کردم") instead of
+   * waiting on an AI completion. Defaults to true for speed and reliability.
+   */
+  useTemplateExplainer: boolean;
   defaultLocale: Locale;
   /** Telegram bridge (optional) */
   telegram: {
@@ -121,6 +126,7 @@ export function getConfig(): AppConfig {
     },
     allowedOrigins: list(process.env.ALLOWED_ORIGINS, []),
     allowAutoWrite: bool(process.env.ALLOW_AUTO_WRITE, false),
+    useTemplateExplainer: bool(process.env.USE_TEMPLATE_EXPLAINER, true) && !bool(process.env.USE_AI_EXPLAINER, false),
     defaultLocale: (process.env.DEFAULT_LOCALE === "en" ? "en" : "fa") as Locale,
     telegram: {
       botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "",
