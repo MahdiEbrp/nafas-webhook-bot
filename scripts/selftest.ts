@@ -173,6 +173,7 @@ async function main(): Promise<void> {
   const { resetSessionsForTesting } = await import("@/lib/bot/session");
   const { parseJsonLoose } = await import("@/lib/openrouter/client");
   const { FEATURES } = await import("@/lib/features/manifest");
+  const { resetConfigCache } = await import("@/lib/config");
 
   console.log("\nالف) موتور کلمات کلیدی (بدون هوش مصنوعی)");
   await test("«نوبت‌های امروز رو نشون بده» → bookings.list", () => {
@@ -466,6 +467,8 @@ async function main(): Promise<void> {
   });
 
   console.log("\nه) کل مسیر با مدلِ تقلبی");
+  process.env.USE_AI_EXPLAINER = "true";
+  resetConfigCache();
   resetSessionsForTesting();
 
   await test("خواندن: فهمیدن → درخواست → توضیح", async () => {
@@ -924,7 +927,6 @@ async function main(): Promise<void> {
 
   console.log("\nز) ورود بدون رمز (هویت با شمارهٔ تلگرام)");
   const identity = await import("@/lib/telegram/identity");
-  const { resetConfigCache } = await import("@/lib/config");
 
   await test("شماره‌ها به یک شکل نرمال می‌شوند", () => {
     assertEqual(identity.normalisePhone("09121234567"), "09121234567", "local");
@@ -1135,6 +1137,30 @@ async function main(): Promise<void> {
     assert(String(sent?.payload.text).includes("خارج"), "logout message");
     delete process.env.TELEGRAM_REQUIRE_IDENTITY;
     resetConfigCache();
+  });
+
+  console.log("\nح) پاسخ‌های قالبی سریع (پیش‌فرض بدون هوش مصنوعی)");
+  await test("پیش‌فرض: پاسخ‌های قالبی «بفرما ... پیدا کردم» بدون تأخیر مدل", async () => {
+    delete process.env.USE_AI_EXPLAINER;
+    resetConfigCache();
+    resetSessionsForTesting();
+
+    nextPlannerJson = JSON.stringify({
+      intent: "read",
+      actionId: "bookings.list",
+      params: {},
+      missing: [],
+      understood: "نوبت‌ها",
+      reply: "",
+      confidence: 0.9,
+    });
+
+    const result = await handleChat({ message: "نوبت‌ها رو نشون بده", sessionId: "s-fast", locale: "fa" });
+    assertEqual(result.status, "done", "status");
+    assertEqual(result.trace.writer, "fallback", "writer is fast template/fallback");
+    assert(result.reply.startsWith("بفرما"), `starts with بفرما: ${result.reply}`);
+    assert(result.reply.includes("پیدا کردم"), `includes پیدا کردم: ${result.reply}`);
+    assert(result.reply.includes("مریم رضایی"), `includes data rows: ${result.reply}`);
   });
 
   await test("manifest سالم است (شناسه‌ها یکتا، آدرس‌ها منطقی)", () => {

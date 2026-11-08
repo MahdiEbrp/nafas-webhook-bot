@@ -8,7 +8,7 @@
  *   • tests run without an API key.
  */
 
-import type { Locale } from "@/lib/config";
+import { getConfig, type Locale } from "@/lib/config";
 import { logWarn } from "@/lib/log";
 import { complete } from "@/lib/openrouter/client";
 import { joinFa, softenJargon, truncate, truncateAtSentence } from "@/lib/text";
@@ -128,6 +128,19 @@ function rowToOneLine(row: unknown, index: number): string {
   return `${index + 1}. ${parts.join(" — ")}`;
 }
 
+const FEATURE_NAMES_FA: Record<string, string> = {
+  bookings: "نوبت",
+  "working-hours": "ساعت کاری",
+  services: "خدمت",
+  "service-categories": "دسته‌بندی",
+  "service-groups": "گروه خدمات",
+  users: "کاربر",
+  settings: "تنظیمات",
+  rules: "قانون",
+  "care-guides": "راهنمای مراقبت",
+  "care-guide-items": "آیتم راهنما",
+};
+
 /** Plain-Persian, zero-AI description of a result. Always available. */
 export function fallbackAnswer(input: ExplainInput): string {
   const { outcome, data, errorCode, errorMessage, actionId } = input;
@@ -147,7 +160,9 @@ export function fallbackAnswer(input: ExplainInput): string {
         : null;
 
   if (verb) {
-    return `انجام شد! ✅\nمورد مربوط به «${actionId?.split(".")[0]}» با موفقیت ${verb}.\nاگر بخواهی، الان فهرست را نشانت می‌دهم تا با چشم خودت ببینی.`;
+    const featureId = actionId?.split(".")[0] ?? "";
+    const itemName = FEATURE_NAMES_FA[featureId] ?? "مورد";
+    return `بفرما، ${itemName} با موفقیت ${verb}. ✅\nاگر بخواهی، فهرست را نشانت می‌دهم تا با چشم خودت ببینی.`;
   }
 
   const list = pickArray(data);
@@ -156,8 +171,9 @@ export function fallbackAnswer(input: ExplainInput): string {
       return "چیزی پیدا نشد. 🔍\nممکن است در این فیلتر هیچ موردی نباشد؛ فیلتر را بازتر کن یا نام دیگری را امتحان کن.";
     }
     const shown = list.rows.slice(0, 5).map(rowToOneLine).join("\n");
-    const more = (list.total ?? list.rows.length) > 5 ? `\n…و ${(list.total ?? 0) - 5} مورد دیگر هم هست.` : "";
-    return `بفرما، ${list.total ?? list.rows.length} مورد پیدا کردم:\n${shown}${more}`;
+    const count = list.total ?? list.rows.length;
+    const more = count > 5 ? `\n…و ${count - 5} مورد دیگر هم هست.` : "";
+    return `بفرما، ${count} مورد پیدا کردم:\n${shown}${more}`;
   }
 
   if (data && typeof data === "object") {
@@ -166,12 +182,12 @@ export function fallbackAnswer(input: ExplainInput): string {
       .slice(0, 8);
     if (entries.length > 0) {
       const lines = entries.map(([key, value]) => `• ${key}: ${value === null ? "—" : String(value)}`);
-      return `اطلاعات این مورد این است:\n${lines.join("\n")}`;
+      return `بفرما، اطلاعات این مورد را پیدا کردم:\n${lines.join("\n")}`;
     }
-    return "کار انجام شد، ولی جزئیات زیادی برای گفتن نبود.";
+    return "بفرما، کار با موفقیت انجام شد. ✅";
   }
 
-  return "انجام شد. ✅";
+  return "بفرما، کار انجام شد. ✅";
 }
 
 const JARGON = /\b(endpoint|payload|json|api|http|status code|webhook|schema|uuid|query|request|response)\b/i;
@@ -231,6 +247,13 @@ export type Explanation = {
 
 export async function explain(input: ExplainInput): Promise<Explanation> {
   const fallbackText = fallbackAnswer(input);
+  const config = getConfig();
+
+  // Fast templated mode: skip OpenRouter completely for instant, 100% reliable responses.
+  // Enabled by default ("instance of AI use Templated base like بفرما ... پیدا کردم its faster").
+  if (config.useTemplateExplainer) {
+    return { text: fallbackText, engine: "fallback", model: null, fallbackText };
+  }
 
   try {
     const result = await complete({
