@@ -22,7 +22,8 @@ const WRITE_WORDS = [
 const READ_WORDS = [
   "نشون", "نشان", "ببین", "لیست", "فهرست", "چند", "چیست", "چیا", "چیه", "کو", "کدام",
   "گزارش", "جستجو", "سرچ", "بگرد", "بیار", "بگیر", "وضعیت",
-  "show", "list", "get", "find", "search", "what", "how many",
+  "چه", "چی", "هست", "داریم", "داری", "آمار", "اطلاعات", "بررسی", "خبر",
+  "show", "list", "get", "find", "search", "what", "how many", "report",
 ];
 
 export type RouteGuess = {
@@ -44,7 +45,7 @@ export function detectIntent(message: string): Intent {
   if (includesAny(text, DELETE_WORDS).length > 0) return "delete";
   if (includesAny(text, WRITE_WORDS).length > 0) return "write";
   if (includesAny(text, READ_WORDS).length > 0) return "read";
-  return "unknown";
+  return "read";
 }
 
 function scoreFeature(text: string, feature: Feature): { score: number; matched: string[] } {
@@ -83,7 +84,7 @@ export function pickAction(feature: Feature, intent: Intent, message: string): s
     return feature.actions.find((a) => a.id.endsWith(".list"))?.id ?? byIntent("read")?.id ?? null;
   }
 
-  return feature.actions[0]?.id ?? null;
+  return feature.actions.find((a) => a.id.endsWith(".list"))?.id ?? feature.actions[0]?.id ?? null;
 }
 
 export function routeMessage(message: string): RouteGuess {

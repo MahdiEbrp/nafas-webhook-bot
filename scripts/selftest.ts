@@ -182,6 +182,18 @@ async function main(): Promise<void> {
     assertEqual(guess.intent, "read", "intent");
   });
 
+  await test("جملات گزارش‌گیری و محاوره‌ای («در مهر ماه چه نوبت هایی هست؟» و «گزارش نوبت‌ها») → read", () => {
+    const q1 = routeMessage("در مهر ماه چه نوبت هایی هست؟");
+    assertEqual(q1.feature?.id, "bookings", "feature");
+    assertEqual(q1.actionId, "bookings.list", "action");
+    assertEqual(q1.intent, "read", "intent");
+
+    const q2 = routeMessage("گزارش نوبت‌ها");
+    assertEqual(q2.feature?.id, "bookings", "feature");
+    assertEqual(q2.actionId, "bookings.list", "action");
+    assertEqual(q2.intent, "read", "intent");
+  });
+
   await test("«ساعت کاری شنبه چیه؟» → working-hours", () => {
     assertEqual(routeMessage("ساعت کاری شنبه‌ها چیه؟").feature?.id, "working-hours", "feature");
   });
@@ -719,6 +731,12 @@ async function main(): Promise<void> {
     assert(fallback.some((suggestion) => suggestion.command === "menu"), "menu included");
     for (const suggestion of fallback) {
       if (suggestion.actionId) assert(!suggestion.actionId.includes("delete"), "no destructive fallback");
+      assert(/[؟?]$/.test(suggestion.label), `label is a question: ${suggestion.label}`);
+    }
+
+    const enFallback = fallbackSuggestions({ actionId: "bookings.list", locale: "en" });
+    for (const suggestion of enFallback) {
+      assert(suggestion.label.endsWith("?"), `english label is a question: ${suggestion.label}`);
     }
   });
 
@@ -1044,7 +1062,7 @@ async function main(): Promise<void> {
     assertEqual(markup?.keyboard?.[0]?.[0]?.request_contact, true, "asks Telegram for the phone");
   });
 
-  await test("بعد از ارسال شمارهٔ معتبر، همان پیام اجرا می‌شود", async () => {
+  await test("بعد از ارسال شمارهٔ معتبر، همان پیام اولیه خودکار اجرا می‌شود", async () => {
     tgCalls.length = 0;
     calls.length = 0;
     nextPlannerJson = JSON.stringify({ intent: "read", actionId: "bookings.list", params: {}, missing: [], understood: "", reply: "", confidence: 0.9 });
@@ -1060,8 +1078,10 @@ async function main(): Promise<void> {
         contact: { phone_number: "09120000001", first_name: "نازنین", user_id: 777 },
       },
     });
-    assertEqual(login.status, "identity", "login handled");
+    assertEqual(login.status, "done", "pending message executed automatically upon login");
+    assertEqual(login.actionId, "bookings.list", "pending action");
     assertEqual(identity.isVerified(777), true, "now verified");
+    assert(calls.some((call) => call.url.includes("/bookings")), "clinic was called right after login");
 
     const after = await handleTelegramUpdate({
       update_id: 952,
@@ -1074,7 +1094,34 @@ async function main(): Promise<void> {
       },
     });
     assertEqual(after.status, "done", `after-login status (${JSON.stringify(after)})`);
-    assert(calls.some((call) => call.url.includes("/bookings")), "clinic was called after login");
+  });
+
+  await test("کاربر بدون پیام اولیه (مثلاً /start) بعد از لاگین منوی اصلی را می‌بیند", async () => {
+    identity.resetIdentitiesForTesting();
+    tgCalls.length = 0;
+    calls.length = 0;
+
+    // 1. User sends /start while unauthenticated
+    await handleTelegramUpdate({
+      update_id: 960,
+      message: { message_id: 70, from: { id: 777, is_bot: false, first_name: "نازنین" }, chat: { id: 777, type: "private" }, date: 0, text: "/start" },
+    });
+
+    // 2. Shares contact
+    const login = await handleTelegramUpdate({
+      update_id: 961,
+      message: {
+        message_id: 71,
+        from: { id: 777, is_bot: false, first_name: "نازنین" },
+        chat: { id: 777, type: "private" },
+        date: 0,
+        contact: { phone_number: "09120000001", first_name: "نازنین", user_id: 777 },
+      },
+    });
+
+    assertEqual(login.status, "identity", "identity status because no pending query");
+    const lastMsg = tgCalls.filter((c) => c.method === "sendMessage").pop();
+    assert(String(lastMsg?.payload.text).includes("حالا هر چه می‌خواهی بپرس"), "shows general welcome menu prompt");
   });
 
   await test("/logout دوباره قفل می‌کند", async () => {

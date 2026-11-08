@@ -29,13 +29,25 @@ export type Suggestion = {
 };
 
 const MAX_SUGGESTIONS = 4;
-const MAX_LABEL = 28;
+const MAX_LABEL = 32;
 
 function clean(label: unknown): string | null {
   if (typeof label !== "string") return null;
   const trimmed = label.replace(/\s+/g, " ").trim();
   if (trimmed.length < 2) return null;
   return trimmed.length > MAX_LABEL ? `${trimmed.slice(0, MAX_LABEL - 1)}…` : trimmed;
+}
+
+/** Formats a button label as a friendly question asking the user if they want this next. */
+export function ensureQuestion(label: string, locale: Locale): string {
+  let trimmed = label.trim();
+  if (/^(🏠\s*)?(منو|menu)$/i.test(trimmed)) {
+    return locale === "en" ? "🏠 Back to menu?" : "🏠 به منو برگردیم؟";
+  }
+  if (!/[؟?]$/.test(trimmed)) {
+    trimmed = locale === "en" ? `${trimmed}?` : `${trimmed}؟`;
+  }
+  return trimmed;
 }
 
 /** Only read-ish, non-destructive actions may become buttons. */
@@ -71,45 +83,45 @@ function isUsefulTip(tip: string): boolean {
 
 const FOLLOW_UPS: Record<string, Suggestion[]> = {
   bookings: [
-    { label: "📋 همهٔ نوبت‌ها", actionId: "bookings.list" },
+    { label: "📋 نوبت‌ها رو ببینم؟", actionId: "bookings.list" },
   ],
   services: [
-    { label: "🛍 لیست خدمات", actionId: "services.list" },
-    { label: "🗂 دسته‌بندی‌ها", actionId: "service-categories.list" },
+    { label: "🛍 لیست خدمات رو ببینم؟", actionId: "services.list" },
+    { label: "🗂 دسته‌بندی‌ها رو چک کنم؟", actionId: "service-categories.list" },
   ],
-  "working-hours": [{ label: "🕘 ساعت‌های کاری", actionId: "working-hours.list" }],
-  users: [{ label: "👥 کاربران", actionId: "users.list" }],
-  settings: [{ label: "⚙️ تنظیمات", actionId: "settings.list" }],
-  rules: [{ label: "📜 قوانین", actionId: "rules.list" }],
-  "care-guides": [{ label: "💚 راهنمای مراقبت", actionId: "care-guides.list" }],
-  "care-guide-items": [{ label: "📝 آیتم‌های راهنما", actionId: "care-guide-items.list" }],
-  "service-categories": [{ label: "🗂 دسته‌بندی‌ها", actionId: "service-categories.list" }],
-  "service-groups": [{ label: "📦 گروه‌های خدمات", actionId: "service-groups.list" }],
+  "working-hours": [{ label: "🕘 ساعت‌های کاری رو ببینم؟", actionId: "working-hours.list" }],
+  users: [{ label: "👥 کاربران رو ببینم؟", actionId: "users.list" }],
+  settings: [{ label: "⚙️ تنظیمات رو چک کنم؟", actionId: "settings.list" }],
+  rules: [{ label: "📜 قوانین رو ببینم؟", actionId: "rules.list" }],
+  "care-guides": [{ label: "💚 راهنمای مراقبت رو ببینم؟", actionId: "care-guides.list" }],
+  "care-guide-items": [{ label: "📝 آیتم‌های راهنما رو ببینم؟", actionId: "care-guide-items.list" }],
+  "service-categories": [{ label: "🗂 دسته‌بندی‌ها رو چک کنم؟", actionId: "service-categories.list" }],
+  "service-groups": [{ label: "📦 گروه‌های خدمات رو ببینم؟", actionId: "service-groups.list" }],
 };
 
 export function fallbackSuggestions(context: { actionId?: string | null; locale: Locale; hadError?: boolean }): Suggestion[] {
   if (context.locale === "en") {
     return [
-      { label: "📋 Bookings", actionId: "bookings.list" },
-      { label: "🛍 Services", actionId: "services.list" },
-      { label: "🏠 Menu", command: "menu" },
+      { label: "📋 View bookings?", actionId: "bookings.list" },
+      { label: "🛍 Check services?", actionId: "services.list" },
+      { label: "🏠 Back to menu?", command: "menu" },
     ];
   }
 
   if (context.hadError) {
     return [
-      { label: "🔄 دوباره امتحان کن", actionId: context.actionId ?? "bookings.list" },
-      { label: "🏠 منو", command: "menu" },
+      { label: "🔄 دوباره امتحان کنم؟", actionId: context.actionId ?? "bookings.list" },
+      { label: "🏠 به منو برگردیم؟", command: "menu" },
     ];
   }
 
   const featureId = context.actionId?.split(".")[0];
   const own = featureId ? FOLLOW_UPS[featureId] ?? [] : [];
   const generic: Suggestion[] = [
-    { label: "📋 نوبت‌ها", actionId: "bookings.list" },
-    { label: "🛍 خدمات", actionId: "services.list" },
-    { label: "🕘 ساعت کاری", actionId: "working-hours.list" },
-    { label: "🏠 منو", command: "menu" },
+    { label: "📋 نوبت‌ها رو ببینم؟", actionId: "bookings.list" },
+    { label: "🛍 خدمات رو بررسی کنم؟", actionId: "services.list" },
+    { label: "🕘 ساعت کاری رو چک کنم؟", actionId: "working-hours.list" },
+    { label: "🏠 به منو برگردیم؟", command: "menu" },
   ];
 
   // One button per actionId: two different labels for the same call is just noise.
@@ -124,7 +136,10 @@ export function fallbackSuggestions(context: { actionId?: string | null; locale:
 
   const limited = merged.slice(0, MAX_SUGGESTIONS);
   // A way back to the menu is never optional.
-  const home: Suggestion = { label: "🏠 منو", command: "menu" };
+  const home: Suggestion = {
+    label: "🏠 به منو برگردیم؟",
+    command: "menu",
+  };
   if (!limited.some((suggestion) => suggestion.command === "menu")) {
     return [...limited.slice(0, MAX_SUGGESTIONS - 1), home];
   }
@@ -140,7 +155,12 @@ const SYSTEM_FA = `تو کمک می‌کنی کاربرِ یک ربات ادار
 1. فقط JSON برگردان: {"suggestions":[{"label":"...","actionId":"..."}],"tip":"یک جملهٔ کوتاه"}
 2. actionId باید دقیقاً از این فهرست باشد و فقط اکشن‌های خواندن (read) مجازند:
 {FIELDS}
-3. label کوتاه، فارسیِ محاوره‌ای، حداکثر ۳ کلمه، با یک ایموجی در اول. مثال: "📋 همهٔ نوبت‌ها"
+3. label باید حتماً به صورت سؤالی/پرسشی باشد (با علامت سؤال ؟ در آخر)، محاوره‌ای، کوتاه (حداکثر ۴ کلمه) و با یک ایموجی در اول؛ انگار دستیار از کاربر می‌پرسد «می‌خواهی این کار را بکنم؟».
+مثال‌ها:
+- "📋 نوبت‌ها رو ببینم؟"
+- "🕘 ساعت کاری رو چک کنم؟"
+- "🛍 خدمات رو بررسی کنم؟"
+- "👥 لیست کاربران رو بیاورم؟"
 4. هیچ پیشنهاد حذف/تغییر نده. هیچ actionId از خودت نساز.
 5. اگر پیشنهاد خوبی نداری، آرایهٔ خالی بده.
 6. tip: اگر نکتهٔ مفیدی داری بگو، وگرنه رشتهٔ خالی.`;
@@ -148,7 +168,7 @@ const SYSTEM_FA = `تو کمک می‌کنی کاربرِ یک ربات ادار
 const SYSTEM_EN = `Suggest up to 3 useful next-step buttons for a clinic admin bot.
 Reply with JSON only: {"suggestions":[{"label":"...","actionId":"..."}],"tip":""}
 actionId must be one of these read-only actions: {FIELDS}
-Short labels with one emoji. Never suggest deletes or edits.`;
+Write labels as short, friendly questions ending with '?' (e.g. "📋 View bookings?", "🕘 Check hours?"). One emoji at the start. Never suggest deletes or edits.`;
 
 export function suggestableActionIds(): string[] {
   return FEATURES.flatMap((feature) => feature.actions)
@@ -197,9 +217,10 @@ export async function suggestNext(input: {
     for (const item of raw) {
       if (!item || typeof item !== "object") continue;
       const record = item as Record<string, unknown>;
-      const label = clean(record.label);
+      const rawLabel = clean(record.label);
       const actionId = typeof record.actionId === "string" ? record.actionId.trim() : "";
-      if (!label || !isSuggestable(actionId)) continue;
+      if (!rawLabel || !isSuggestable(actionId)) continue;
+      const label = ensureQuestion(rawLabel, input.locale);
       if (cleaned.some((suggestion) => suggestion.actionId === actionId && suggestion.label === label)) continue;
       cleaned.push({ label, actionId });
     }
@@ -210,7 +231,10 @@ export async function suggestNext(input: {
 
     // Always leave the user a way home.
     if (!cleaned.some((suggestion) => suggestion.command === "menu")) {
-      cleaned.push({ label: input.locale === "en" ? "🏠 Menu" : "🏠 منو", command: "menu" });
+      cleaned.push({
+        label: input.locale === "en" ? "🏠 Back to menu?" : "🏠 به منو برگردیم؟",
+        command: "menu",
+      });
     }
 
     const rawTip = typeof parsed.tip === "string" ? parsed.tip.trim().slice(0, 160) : "";
