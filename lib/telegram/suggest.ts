@@ -47,6 +47,26 @@ function isSuggestable(actionId: string): boolean {
   return !found.action.path.includes(":id");
 }
 
+/**
+ * Tips that only describe the keyboard the user is already looking at are
+ * noise — production once shipped "💡 برای دیدن اطلاعات بیشتر، می‌توانی روی هر
+ * کدام از این گزینه‌ها ضربه بزنی" right after a broken answer. Drop them.
+ */
+const BUTTON_FILLER: RegExp[] = [
+  /ضربه\s+بزن/,
+  /کلیک\s+کن/,
+  /روی\s+(هر\s+کدام|یکی)\s+از\s+(این\s+)?(گزینه|دکمه)/,
+  /(گزینه|دکمه)\s*های?\s+(زیر|بالا)/,
+  /\b(tap|click)\s+(one|any|a|the)\b/i,
+  /\bbuttons?\s+below\b/i,
+];
+
+function isUsefulTip(tip: string): boolean {
+  const trimmed = tip.trim();
+  if (trimmed.length <= 3) return false;
+  return !BUTTON_FILLER.some((pattern) => pattern.test(trimmed));
+}
+
 /* ───────────────────────── deterministic fallback ───────────────────── */
 
 const FOLLOW_UPS: Record<string, Suggestion[]> = {
@@ -193,8 +213,8 @@ export async function suggestNext(input: {
       cleaned.push({ label: input.locale === "en" ? "🏠 Menu" : "🏠 منو", command: "menu" });
     }
 
-    const tip = typeof parsed.tip === "string" && parsed.tip.trim().length > 3 ? parsed.tip.trim().slice(0, 160) : "";
-    return { suggestions: cleaned.slice(0, MAX_SUGGESTIONS), tip, engine: "ai" };
+    const rawTip = typeof parsed.tip === "string" ? parsed.tip.trim().slice(0, 160) : "";
+    return { suggestions: cleaned.slice(0, MAX_SUGGESTIONS), tip: isUsefulTip(rawTip) ? rawTip : "", engine: "ai" };
   } catch (error) {
     logWarn("telegram.suggest_fallback", { message: error instanceof Error ? error.message : "unknown" });
     return { suggestions: fallback, tip: "", engine: "fallback" };

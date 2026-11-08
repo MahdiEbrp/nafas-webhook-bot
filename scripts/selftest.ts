@@ -31,6 +31,8 @@ let nextPlannerJson: string | ((messages: Array<{ role: string; content: string 
 let plannerShouldFail = false;
 let explainerText = "نوبت‌ها را دیدم: سه تا هست.";
 let explainerShouldFail = false;
+/** what the fake model reports as finish_reason ("length" = cut off by max_tokens) */
+let explainerFinishReason: string | null = null;
 let webhookStatus = 200;
 let nextSuggestJson = "{}";
 /** Staff roster used by the identity tests — deliberately mixed phone formats. */
@@ -92,10 +94,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (explainerShouldFail) {
       return new Response(JSON.stringify({ error: { message: "upstream down" } }), { status: 503 });
     }
-    return new Response(JSON.stringify({ choices: [{ message: { content: explainerText } }] }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: explainerText }, finish_reason: explainerFinishReason }] }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
   }
 
   if (url.startsWith("http://clinic.test")) {
@@ -163,7 +165,9 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 async function main(): Promise<void> {
   const { routeMessage } = await import("@/lib/features/router");
   const { preparePlan } = await import("@/lib/bot/executor");
-  const { fallbackAnswer } = await import("@/lib/bot/explainer");
+  const { fallbackAnswer, explain, looksLikeReasoningDump } = await import("@/lib/bot/explainer");
+  const { truncateAtSentence } = await import("@/lib/text");
+  const { suggestNext } = await import("@/lib/telegram/suggest");
   const { validatePlan, planSchema } = await import("@/lib/bot/plan");
   const { handleChat } = await import("@/lib/bot");
   const { resetSessionsForTesting } = await import("@/lib/bot/session");
@@ -350,6 +354,103 @@ async function main(): Promise<void> {
     });
     assert(text.includes("اجازه"), `unexpected: ${text}`);
     assert(!text.includes("403"), "no raw code");
+  });
+
+  console.log("\nد-۲) جوابِ خرابِ مدل به کاربر نمی‌رسد");
+
+  await test("تحلیلِ مدل (Analyze the Request…) به کاربر نشان داده نمی‌شود", async () => {
+    // The exact failure shape from production, cut off mid-word by max_tokens.
+    explainerText = [
+      "Analyze the Request:",
+      "* Role: Friendly clinic assistant explaining the bot's output.",
+      "* Input Data:",
+      "* User asked: \"دیدن لیست ساعت‌های کاری\"",
+      "2. Drafting the Response (Iterative Process):",
+      "* Attempt 1: کاربر درخواست لیست ساعت‌های کاری کرد.",
+      "* Line 3: در این لیست ۵ روز تعیین شده که شنبه، یکشنبه، دوشنبه، سه‌شنبه و چهارشن",
+    ].join("\n");
+
+    const result = await explain({
+      userMessage: "ساعت‌های کاری رو ببین",
+      actionId: "working-hours.list",
+      outcome: "success",
+      data: { items: [{ day: "Saturday", opens: "13:15", closes: "17:45", capacity: 2 }], total: 1 },
+      locale: "fa",
+    });
+
+    assertEqual(result.engine, "fallback", "engine");
+    assert(!/Analyze|Role:|Attempt|Drafting/i.test(result.text), `leaked: ${result.text}`);
+    assert(result.text.includes("شنبه"), `fallback text: ${result.text}`);
+  });
+
+  await test("تشخیصِ سندِ استدلال در دو حالت روشن/تاریک", () => {
+    assert(looksLikeReasoningDump("Analyze the Request:\n* Role: bot"), "english scaffold");
+    assert(looksLikeReasoningDump("کاربر گفته بود: \"نوبت‌ها\"\nنتیجه: success"), "prompt echo");
+    assert(!looksLikeReasoningDump("۵ روز کاری داری؛ همه از ۱۳:۱۵ تا ۱۷:۴۵ باز است."), "normal answer");
+    assert(!looksLikeReasoningDump("نوبت‌ها را دیدم: سه تا هست."), "short answer");
+  });
+
+  await test("جوابِ بریده‌شده (finish_reason=length) کنار گذاشته می‌شود", async () => {
+    explainerText = "در این لیست ۵ روز تعیین شده که شنبه، یکشنبه، دوشنبه، سه‌شنبه و چهارشن";
+    explainerFinishReason = "length";
+
+    const result = await explain({
+      userMessage: "ساعت‌های کاری رو ببین",
+      actionId: "working-hours.list",
+      outcome: "success",
+      data: { items: [{ day: "Saturday", opens: "13:15", closes: "17:45" }], total: 1 },
+      locale: "fa",
+    });
+
+    explainerFinishReason = null;
+    assertEqual(result.engine, "fallback", "engine");
+    assert(!result.text.includes("چهارشن"), `cut mid-word: ${result.text}`);
+  });
+
+  await test("بریدنِ متن در مرزِ جمله، نه وسطِ کلمه", () => {
+    // sentence boundary available → cut there, keep one clean full stop
+    const sentences = "خط اول کوتاه است. خط دوم هم هست. خط سوم خیلی طولانی‌تر است و ادامه دارد و ادامه دارد";
+    const sentenceCut = truncateAtSentence(sentences, 45);
+    assert(!sentenceCut.includes("ادامه دارد"), `cut too late: ${sentenceCut}`);
+    assert(sentenceCut.includes("."), `cut too early: ${sentenceCut}`);
+    assert(!sentenceCut.endsWith(".…"), `double punctuation: ${sentenceCut}`);
+
+    // no sentence boundary → fall back to the last whole word, with an ellipsis
+    const words = "یک دو سه چهار پنج شش هفت هشت نه ده یازده دوازده سیزده";
+    const wordCut = truncateAtSentence(words, 22);
+    assert(wordCut.endsWith("…"), `ellipsis: ${wordCut}`);
+    assert(!/\s$/.test(wordCut), `trailing space: ${wordCut}`);
+    assertEqual(truncateAtSentence("کوتاه", 100), "کوتاه", "short text untouched");
+  });
+
+  await test("نکتهٔ «روی گزینه‌ها ضربه بزن» حذف می‌شود", async () => {
+    nextSuggestJson = JSON.stringify({
+      suggestions: [{ label: "📋 نوبت‌ها", actionId: "bookings.list" }],
+      tip: "برای دیدن اطلاعات بیشتر، می‌توانی روی هر کدام از این گزینه‌ها ضربه بزنی.",
+    });
+
+    const filled = await suggestNext({
+      userMessage: "ساعت کاری",
+      actionId: "working-hours.list",
+      status: "done",
+      replyPreview: "۵ روز کاری داری.",
+      locale: "fa",
+    });
+    assertEqual(filled.tip, "", "filler tip dropped");
+
+    nextSuggestJson = JSON.stringify({
+      suggestions: [{ label: "📋 نوبت‌ها", actionId: "bookings.list" }],
+      tip: "شنبه‌ها تعطیل است، پس نوبت صبح نگیر.",
+    });
+    const useful = await suggestNext({
+      userMessage: "ساعت کاری",
+      actionId: "working-hours.list",
+      status: "done",
+      replyPreview: "۵ روز کاری داری.",
+      locale: "fa",
+    });
+    assertEqual(useful.tip, "شنبه‌ها تعطیل است، پس نوبت صبح نگیر.", "useful tip kept");
+    nextSuggestJson = "{}";
   });
 
   console.log("\nه) کل مسیر با مدلِ تقلبی");
@@ -554,7 +655,7 @@ async function main(): Promise<void> {
   const { handleTelegramUpdate } = await import("@/lib/telegram/handler");
   const { parseCallback, menuKeyboard, confirmationKeyboard, suggestionsKeyboard } = await import("@/lib/telegram/keyboard");
   const { ensureWebhook } = await import("@/lib/telegram/setup");
-  const { suggestNext, fallbackSuggestions } = await import("@/lib/telegram/suggest");
+  const { fallbackSuggestions } = await import("@/lib/telegram/suggest"); // suggestNext imported earlier (used above)
 
   await test("پروتکل callback_data (زیر ۶۴ بایت، همهٔ حالت‌ها)", () => {
     assertEqual(parseCallback("m").kind, "menu", "menu");

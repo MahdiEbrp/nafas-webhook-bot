@@ -208,6 +208,9 @@ async function findUserByPhone(phone: string): Promise<LookupResult> {
     });
     if (!result.ok) {
       if (result.code === "WEBHOOK_FORBIDDEN") return { ok: false, reason: "lookup-forbidden" };
+      // If the clinic schema requires `search` on GET /users, an unscoped scan is
+      // not supported by the target API; stop scanning and report not found.
+      if (result.code === "VALIDATION_ERROR") break;
       return { ok: false, reason: `lookup-failed:${result.code}` };
     }
     const rows = extractRows(result.data);

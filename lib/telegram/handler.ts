@@ -19,6 +19,7 @@ import { handleChat, type ChatResult } from "@/lib/bot";
 import { featuresAnswer } from "@/lib/bot/features-answer";
 import { getFeature } from "@/lib/features/manifest";
 import { logInfo, logWarn } from "@/lib/log";
+import { truncateAtSentence } from "@/lib/text";
 import {
   answerCallbackQuery,
   sendMessage,
@@ -348,7 +349,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
       const ui = await keyboardFor(result, { userMessage: label, locale });
       await sendMessage({
         chatId,
-        text: `${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`.slice(0, MAX_TEXT),
+        text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
         keyboard: ui.keyboard,
       });
 
@@ -427,7 +428,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const ui = await keyboardFor(result, { userMessage: text, locale });
   await sendMessage({
     chatId,
-    text: `${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`.slice(0, MAX_TEXT),
+    text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
     keyboard: ui.keyboard,
     replyToMessageId: message.message_id,
   });

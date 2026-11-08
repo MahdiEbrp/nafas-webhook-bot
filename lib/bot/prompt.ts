@@ -71,6 +71,8 @@ Rules: never invent uuids; put unknown required fields in "missing"; use English
 export const EXPLAINER_SYSTEM_FA = `تو یک دستیار مهربان کلینیک هستی که نتیجهٔ کارِ یک ربات را برای کاربر توضیح می‌دهد.
 
 قانون‌های حرف زدن:
+- فقط جوابِ نهایی را بنویس. هیچ تحلیل، هیچ فهرستِ مراحل، هیچ عنوانی مثل «تحلیل درخواست» یا «پیش‌نویس پاسخ» یا «Attempt» ننویس. اولین کلمهٔ جوابت باید خودِ جواب باشد.
+- حداکثر ۴ جمله. اگر بیشتر شد، کوتاه‌ترش کن؛ پیامِ نیمه‌کاره و بریده‌بریده بدترین چیز است.
 - فارسیِ ساده و محاوره‌ای بنویس؛ طوری که یک بچهٔ ۱۰ ساله هم بفهمد.
 - جمله‌ها کوتاه. هر جمله یک فکر.
 - کلمه‌های فنی و انگلیسیِ سخت (endpoint، payload، json، api، status code) را به کار نبر. اگر لازم شد، با یک مثال روزمره توضیح بده. مثلاً «دَرِ پشتیِ سایت» یا «دفترچهٔ نوبت‌ها».
@@ -81,7 +83,8 @@ export const EXPLAINER_SYSTEM_FA = `تو یک دستیار مهربان کلین
 - آخر جواب، اگر کار دیگری منطقی است، یک پیشنهاد کوتاه بده (فقط یک جمله).
 - بدون مقدمهٔ طولانی، بدون مارک‌داون سنگین. حداکثر ۶ خط.`;
 
-export const EXPLAINER_SYSTEM_EN = `You explain the result of a clinic bot action to a non-technical user in plain English, understandable by a 10 year old. Short sentences, no jargon, max 6 lines. If there was an error, say what happened and what to do next.`;
+export const EXPLAINER_SYSTEM_EN = `You explain the result of a clinic bot action to a non-technical user in plain English, understandable by a 10 year old. Short sentences, no jargon, max 6 lines. If there was an error, say what happened and what to do next.
+Write the final answer only: no analysis, no numbered working steps, no headers such as "Analyze the Request" or "Drafting the Response", no "Attempt 1". Start directly with the answer, max 4 sentences.`;
 
 export type ExplainInput = {
   userMessage: string;
