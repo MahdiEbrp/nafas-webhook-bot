@@ -17,6 +17,7 @@ import { executeRequest, preparePlan, previewRequest, type PreparedRequest } fro
 import { featureTitleList, featuresAnswer } from "./features-answer";
 import { planRequest, type PlannerResult } from "./planner";
 import { validatePlan, type ValidatedPlan } from "./plan";
+import { handleStepByStepInput, startStepByStepEdit } from "./editing";
 import {
   findSessionItem,
   getLastPageInfo,
@@ -75,6 +76,8 @@ export type ChatResult = {
     plannerModel: string | null;
     writerModel: string | null;
     notice: string | null;
+    fromCache?: boolean;
+    timeTravel?: boolean;
     ms: number;
   };
 };
@@ -95,6 +98,9 @@ async function runAndExplain(
   trace: ChatResult["trace"],
 ): Promise<ChatResult> {
   const result = await executeRequest(request);
+
+  if ((result as { fromCache?: boolean }).fromCache) trace.fromCache = true;
+  if ((result as { timeTravel?: boolean }).timeTravel) trace.timeTravel = true;
 
   const explanation = await explain({
     userMessage: input.message,
@@ -190,6 +196,92 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
     notice: null,
     ms: 0,
   };
+
+  /* ── 0. Step-by-step editing in progress ───────────────────────────── */
+  if (!input.direct && !input.confirm) {
+    const editStep = handleStepByStepInput({
+      sessionId: input.sessionId,
+      message: input.message,
+    });
+
+    if (editStep.handled) {
+      if (editStep.cancelled || (!editStep.isComplete && editStep.reply)) {
+        return {
+          status: "answered",
+          reply: editStep.reply ?? "",
+          understood: "ویرایش مرحله‌به‌مرحله",
+          intent: "write",
+          actionId: null,
+          trace: { ...trace, ms: Date.now() - startedAt },
+        };
+      }
+
+      if (editStep.isComplete && editStep.finalParams && editStep.actionId) {
+        const prepared = preparePlan(editStep.actionId, editStep.finalParams);
+        if (prepared.kind === "ready") {
+          const autoAllowed = config.allowAutoWrite && prepared.request.danger === "write" && !input.dryRun;
+          if (autoAllowed) {
+            logInfo("bot.autowrite.step_by_step", { actionId: prepared.request.actionId });
+            const result = await runAndExplain(prepared.request, input, trace);
+            return { ...result, trace: { ...trace, ms: Date.now() - startedAt } };
+          }
+
+          const token = crypto.randomUUID();
+          const preview = previewRequest(prepared.request);
+          await savePending({
+            token,
+            sessionId: input.sessionId,
+            plan: {
+              actionId: editStep.actionId,
+              params: editStep.finalParams,
+              intent: "write",
+              missing: [],
+              understood: prepared.request.summaryFa,
+              reply: "",
+              confidence: 1,
+            },
+            userMessage: input.message,
+            summaryFa: prepared.request.summaryFa,
+          });
+
+          return {
+            status: "needs_confirmation",
+            reply: `مراحل ویرایش تکمیل شد! 🎯\n\n${confirmationText(prepared.request.summaryFa, prepared.request.danger, prepared.request.permission)}`,
+            understood: prepared.request.summaryFa,
+            intent: "write",
+            actionId: prepared.request.actionId,
+            confirmation: {
+              token,
+              summaryFa: prepared.request.summaryFa,
+              method: preview.method,
+              path: preview.path,
+              permission: preview.permission,
+              danger: preview.danger,
+              body: preview.body,
+            },
+            trace: { ...trace, ms: Date.now() - startedAt },
+          };
+        } else if (prepared.kind === "needs_info") {
+          return askForInfo(
+            {
+              actionId: editStep.actionId,
+              params: editStep.finalParams,
+              intent: "write",
+              actionValid: true,
+              invalidActionId: null,
+              missing: [],
+              understood: "ویرایش",
+              reply: "",
+              confidence: 1,
+              source: "router",
+            },
+            prepared.questions,
+            { ...trace, ms: Date.now() - startedAt },
+          );
+        }
+      }
+    }
+  }
 
   /* ── 1. Answering a confirmation card ─────────────────────────────── */
   if (input.confirm) {
@@ -351,6 +443,28 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
       actionId: null,
       trace,
     });
+  }
+
+  // Step-by-step editing trigger
+  if (plan.actionId && plan.actionId.endsWith(".update") && plan.params.id) {
+    const editKeys = Object.keys(plan.params).filter((k) => k !== "id" && !k.startsWith("_"));
+    const wantsStepByStep = input.message.includes("مرحله") || editKeys.length === 0;
+    if (wantsStepByStep) {
+      const stepEdit = startStepByStepEdit({
+        sessionId: input.sessionId,
+        actionId: plan.actionId,
+        itemId: String(plan.params.id),
+        itemTitle: typeof plan.params._itemTitle === "string" ? plan.params._itemTitle : undefined,
+      });
+      return finish({
+        status: "answered",
+        reply: stepEdit.reply,
+        understood: `آغاز ویرایش مرحله‌به‌مرحله ${plan.params._itemTitle ?? ""}`.trim(),
+        intent: "write",
+        actionId: plan.actionId,
+        trace,
+      });
+    }
   }
 
   const prepared = preparePlan(plan.actionId, plan.params);

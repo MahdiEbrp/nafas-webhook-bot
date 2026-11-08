@@ -171,6 +171,7 @@ async function main(): Promise<void> {
   const { validatePlan, planSchema } = await import("@/lib/bot/plan");
   const { handleChat } = await import("@/lib/bot");
   const { resetSessionsForTesting } = await import("@/lib/bot/session");
+  const { clearCacheForTesting } = await import("@/lib/bot/cache");
   const { parseJsonLoose } = await import("@/lib/openrouter/client");
   const { FEATURES } = await import("@/lib/features/manifest");
   const { resetConfigCache } = await import("@/lib/config");
@@ -734,12 +735,12 @@ async function main(): Promise<void> {
     assert(fallback.some((suggestion) => suggestion.command === "menu"), "menu included");
     for (const suggestion of fallback) {
       if (suggestion.actionId) assert(!suggestion.actionId.includes("delete"), "no destructive fallback");
-      assert(/[؟?]$/.test(suggestion.label), `label is a question: ${suggestion.label}`);
+      assert(!/[؟?]$/.test(suggestion.label), `label must not end with question mark: ${suggestion.label}`);
     }
 
     const enFallback = fallbackSuggestions({ actionId: "bookings.list", locale: "en" });
     for (const suggestion of enFallback) {
-      assert(suggestion.label.endsWith("?"), `english label is a question: ${suggestion.label}`);
+      assert(!suggestion.label.endsWith("?"), `english label must not end with question mark: ${suggestion.label}`);
     }
   });
 
@@ -1067,6 +1068,7 @@ async function main(): Promise<void> {
   await test("بعد از ارسال شمارهٔ معتبر، همان پیام اولیه خودکار اجرا می‌شود", async () => {
     tgCalls.length = 0;
     calls.length = 0;
+    clearCacheForTesting();
     nextPlannerJson = JSON.stringify({ intent: "read", actionId: "bookings.list", params: {}, missing: [], understood: "", reply: "", confidence: 0.9 });
     explainerText = "سه نوبت داری.";
 
@@ -1269,6 +1271,150 @@ async function main(): Promise<void> {
     });
     assertEqual(res.status, "done", "status");
     assertEqual(res.actionId, "services.list", "navigated to next page");
+  });
+
+  console.log("\nی) کشینگ پیشرفته، تایم تراول، ویرایش مرحله‌به‌مرحله و دکمه‌های بدون علامت سؤال");
+
+  await test("کشینگ پیشرفته: ذخیره، TTL، تخلیه و بازگردانی", async () => {
+    const { fetchWithCache, buildCacheKey, clearCacheForTesting, invalidateResource, setCache, getFromCache } = await import("@/lib/bot/cache");
+    clearCacheForTesting();
+
+    const req = { method: "GET" as const, path: "/api/v1/webhooks/services", query: { page: 1 } };
+    const mockRes = { ok: true as const, status: 200, data: [{ id: "s1" }], requestId: "req-1", ms: 5 };
+    const key = buildCacheKey(req);
+
+    // Manual set & get with short TTL
+    setCache(key, mockRes, ["services"], 5000);
+    const cached = getFromCache(key);
+    assert(cached !== null, "item retrieved from cache");
+    assertEqual(cached?.entry.status, 200, "status 200");
+
+    // Invalidation by resource tag
+    invalidateResource("services");
+    assert(getFromCache(key) === null, "item invalidated by tag");
+
+    // Test with fetchWithCache and coalescing
+    clearCacheForTesting();
+    const p1 = fetchWithCache(req);
+    const p2 = fetchWithCache(req);
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assertEqual(r1.ok, true, "r1 ok");
+    assertEqual(r2.ok, true, "r2 ok");
+  });
+
+  await test("تایم تراول: تشخیص پرامیس پیش‌نیاز، فچ زودهنگام و پاسخ آنی در کلیک", async () => {
+    const { prefetchPredictedActions, getCacheStats, clearCacheForTesting } = await import("@/lib/bot/cache");
+    clearCacheForTesting();
+
+    // Trigger Time Travel prefetch for predicted actions
+    await prefetchPredictedActions([
+      { actionId: "services.list", query: { page: 2 } },
+      { actionId: "bookings.list" },
+    ]);
+
+    const stats = getCacheStats();
+    assert(stats.prefetches >= 2, "time travel triggered prefetches");
+
+    // Immediate click: executeRequest should hit time travel cache with ms: 0
+    const { executeRequest } = await import("@/lib/bot/executor");
+    const clickRes = await executeRequest({
+      actionId: "services.list",
+      method: "GET",
+      path: "/api/v1/webhooks/services",
+      permission: "services.read",
+      danger: "read",
+      pathParams: {},
+      query: { page: 2 },
+      body: undefined,
+      summaryFa: "مشاهده خدمات",
+    });
+
+    assertEqual((clickRes as any).fromCache, true, "served from cache");
+    assertEqual((clickRes as any).timeTravel, true, "tagged as time travel hit");
+  });
+
+  await test("ویرایش مرحله‌به‌مرحله: شروع، پیشروی گام‌به‌گام، رد مرحله و تکمیل", async () => {
+    const { saveSessionItems, getActiveEdit, clearActiveEdit } = await import("@/lib/bot/session");
+    const sessionId = "step-edit-session";
+    clearActiveEdit(sessionId);
+
+    // Save item in session
+    saveSessionItems(sessionId, "services", [{ id: "11111111-2222-4333-8444-555555555555", name: "کاشت مو" }], 1, 10);
+
+    // 1. Initiate step-by-step edit
+    const step1 = await handleChat({
+      message: "ویرایش مرحله به مرحله کاشت مو",
+      sessionId,
+      locale: "fa",
+    });
+
+    assertEqual(step1.status, "answered", "step 1 answered");
+    assert(step1.reply.includes("مرحلهٔ ۱"), `must indicate step 1: ${step1.reply}`);
+    assert(step1.reply.includes("عنوان خدمت"), `asks for title: ${step1.reply}`);
+
+    const state = getActiveEdit(sessionId);
+    assert(state !== null, "active edit state stored");
+    assertEqual(state?.step, 1, "at step 1");
+
+    // 2. Provide new title -> advances to step 2 (price)
+    const step2 = await handleChat({
+      message: "کاشت موی حرفه‌ای",
+      sessionId,
+      locale: "fa",
+    });
+
+    assertEqual(step2.status, "answered", "step 2 answered");
+    assert(step2.reply.includes("مرحلهٔ ۲"), `must indicate step 2: ${step2.reply}`);
+    assert(step2.reply.includes("قیمت خدمت"), `asks for price: ${step2.reply}`);
+
+    // 3. Skip step 2 (price) -> advances to step 3 (durationMin)
+    const step3 = await handleChat({
+      message: "رد",
+      sessionId,
+      locale: "fa",
+    });
+
+    assertEqual(step3.status, "answered", "step 3 answered");
+    assert(step3.reply.includes("مرحلهٔ ۳"), `must indicate step 3: ${step3.reply}`);
+
+    // 4. Skip step 3 -> advances to step 4 (isActive)
+    const step4 = await handleChat({
+      message: "رد",
+      sessionId,
+      locale: "fa",
+    });
+
+    assertEqual(step4.status, "answered", "step 4 answered");
+    assert(step4.reply.includes("مرحلهٔ ۴"), `must indicate step 4: ${step4.reply}`);
+
+    // 5. Final step: set active -> finishes and produces confirmation card
+    const stepFinal = await handleChat({
+      message: "فعال",
+      sessionId,
+      locale: "fa",
+    });
+
+    assertEqual(stepFinal.status, "needs_confirmation", "ready for confirmation");
+    assert(stepFinal.reply.includes("مراحل ویرایش تکمیل شد"), `must indicate completion: ${stepFinal.reply}`);
+    assert(getActiveEdit(sessionId) === null, "active edit cleared on completion");
+  });
+
+  await test("دکمه‌های کیبورد و پیشنهادات فاقد هرگونه علامت سؤال (؟ یا ?) هستند", async () => {
+    const { fallbackSuggestions } = await import("@/lib/telegram/suggest");
+    const { suggestionsKeyboard } = await import("@/lib/telegram/keyboard");
+
+    const faSuggestions = fallbackSuggestions({ actionId: "services.list", locale: "fa" });
+    for (const s of faSuggestions) {
+      assert(!/[؟?]/.test(s.label), `label must not contain question mark: ${s.label}`);
+    }
+
+    const kb = suggestionsKeyboard(faSuggestions, "fa");
+    assert(kb !== undefined, "keyboard created");
+    for (const row of kb?.inline_keyboard ?? []) {
+      for (const btn of row) {
+        assert(!/[؟?]/.test(btn.text), `rendered button text must not contain question mark: ${btn.text}`);
+      }
+    }
   });
 
   console.log(`\n${failures.length === 0 ? "🎉" : "⚠️"}  ${passed} passed, ${failures.length} failed\n`);

@@ -40,17 +40,19 @@ function clean(label: unknown): string | null {
   return trimmed.length > MAX_LABEL ? `${trimmed.slice(0, MAX_LABEL - 1)}…` : trimmed;
 }
 
-/** Formats a button label as a friendly question asking the user if they want this next. */
-export function ensureQuestion(label: string, locale: Locale): string {
+/** Formats a clean button label: removes question marks and standardizes labels. */
+export function cleanButtonLabel(label: string, locale: Locale): string {
   let trimmed = label.trim();
   if (/^(🏠\s*)?(منو|menu)$/i.test(trimmed)) {
-    return locale === "en" ? "🏠 Back to menu?" : "🏠 به منو برگردیم؟";
+    return locale === "en" ? "🏠 Back to menu" : "🏠 بازگشت به منو";
   }
-  if (!/[؟?]$/.test(trimmed)) {
-    trimmed = locale === "en" ? `${trimmed}?` : `${trimmed}؟`;
-  }
+  // Strip trailing question marks (؟ and ?) as requested by user
+  trimmed = trimmed.replace(/[؟?]+$/, "").trim();
   return trimmed;
 }
+
+/** Backward compatibility alias */
+export const ensureQuestion = cleanButtonLabel;
 
 /** Non-destructive actions (reads and writes) may become buttons. Destructive actions (delete) are excluded. */
 function isSuggestable(actionId: string): boolean {
@@ -98,74 +100,74 @@ export function defaultTip(actionId?: string | null): string {
 
 const FOLLOW_UPS: Record<string, Suggestion[]> = {
   bookings: [
-    { label: "✏️ تغییر وضعیت نوبت؟", actionId: "bookings.update" },
-    { label: "➕ ثبت نوبت جدید؟", actionId: "bookings.create" },
-    { label: "📋 همهٔ نوبت‌ها؟", actionId: "bookings.list" },
+    { label: "✏️ تغییر وضعیت نوبت", actionId: "bookings.update" },
+    { label: "➕ ثبت نوبت جدید", actionId: "bookings.create" },
+    { label: "📋 همهٔ نوبت‌ها", actionId: "bookings.list" },
   ],
   services: [
-    { label: "✏️ ویرایش قیمت یا خدمت؟", actionId: "services.update" },
-    { label: "➕ ثبت خدمت جدید؟", actionId: "services.create" },
-    { label: "🛍 لیست کامل خدمات؟", actionId: "services.list" },
-    { label: "🗂 دسته‌بندی‌ها رو چک کنم؟", actionId: "service-categories.list" },
+    { label: "✏️ ویرایش قیمت یا خدمت", actionId: "services.update" },
+    { label: "➕ ثبت خدمت جدید", actionId: "services.create" },
+    { label: "🛍 لیست کامل خدمات", actionId: "services.list" },
+    { label: "🗂 بررسی دسته‌بندی‌ها", actionId: "service-categories.list" },
   ],
   "working-hours": [
-    { label: "✏️ تغییر ساعت یا ظرفیت؟", actionId: "working-hours.update" },
-    { label: "➕ ثبت شیفت جدید؟", actionId: "working-hours.create" },
-    { label: "🕘 ساعت‌های کاری؟", actionId: "working-hours.list" },
+    { label: "✏️ تغییر ساعت یا ظرفیت", actionId: "working-hours.update" },
+    { label: "➕ ثبت شیفت جدید", actionId: "working-hours.create" },
+    { label: "🕘 ساعت‌های کاری", actionId: "working-hours.list" },
   ],
   users: [
-    { label: "➕ ثبت کاربر جدید؟", actionId: "users.create" },
-    { label: "👥 لیست کاربران؟", actionId: "users.list" },
+    { label: "➕ ثبت کاربر جدید", actionId: "users.create" },
+    { label: "👥 لیست کاربران", actionId: "users.list" },
   ],
   settings: [
-    { label: "✏️ تغییر تنظیمات؟", actionId: "settings.update" },
-    { label: "⚙️ لیست تنظیمات؟", actionId: "settings.list" },
+    { label: "✏️ تغییر تنظیمات", actionId: "settings.update" },
+    { label: "⚙️ لیست تنظیمات", actionId: "settings.list" },
   ],
   rules: [
-    { label: "➕ ثبت قانون جدید؟", actionId: "rules.create" },
-    { label: "📜 قوانین کلینیک؟", actionId: "rules.list" },
+    { label: "➕ ثبت قانون جدید", actionId: "rules.create" },
+    { label: "📜 قوانین کلینیک", actionId: "rules.list" },
   ],
   "care-guides": [
-    { label: "➕ ثبت راهنمای مراقبت؟", actionId: "care-guides.create" },
-    { label: "💚 راهنماهای مراقبت؟", actionId: "care-guides.list" },
+    { label: "➕ ثبت راهنمای مراقبت", actionId: "care-guides.create" },
+    { label: "💚 راهنماهای مراقبت", actionId: "care-guides.list" },
   ],
   "care-guide-items": [
-    { label: "➕ ثبت آیتم راهنما؟", actionId: "care-guide-items.create" },
-    { label: "📝 آیتم‌های راهنما؟", actionId: "care-guide-items.list" },
+    { label: "➕ ثبت آیتم راهنما", actionId: "care-guide-items.create" },
+    { label: "📝 آیتم‌های راهنما", actionId: "care-guide-items.list" },
   ],
   "service-categories": [
-    { label: "➕ ثبت دسته‌بندی؟", actionId: "service-categories.create" },
-    { label: "🗂 لیست دسته‌بندی‌ها؟", actionId: "service-categories.list" },
+    { label: "➕ ثبت دسته‌بندی", actionId: "service-categories.create" },
+    { label: "🗂 لیست دسته‌بندی‌ها", actionId: "service-categories.list" },
   ],
   "service-groups": [
-    { label: "➕ ثبت گروه خدمات؟", actionId: "service-groups.create" },
-    { label: "📦 گروه‌های خدمات؟", actionId: "service-groups.list" },
+    { label: "➕ ثبت گروه خدمات", actionId: "service-groups.create" },
+    { label: "📦 گروه‌های خدمات", actionId: "service-groups.list" },
   ],
 };
 
 export function fallbackSuggestions(context: { actionId?: string | null; locale: Locale; hadError?: boolean }): Suggestion[] {
   if (context.locale === "en") {
     return [
-      { label: "📋 View bookings?", actionId: "bookings.list" },
-      { label: "🛍 Check services?", actionId: "services.list" },
-      { label: "🏠 Back to menu?", command: "menu" },
+      { label: "📋 View bookings", actionId: "bookings.list" },
+      { label: "🛍 Check services", actionId: "services.list" },
+      { label: "🏠 Back to menu", command: "menu" },
     ];
   }
 
   if (context.hadError) {
     return [
-      { label: "🔄 دوباره امتحان کنم؟", actionId: context.actionId ?? "bookings.list" },
-      { label: "🏠 به منو برگردیم؟", command: "menu" },
+      { label: "🔄 دوباره امتحان کنم", actionId: context.actionId ?? "bookings.list" },
+      { label: "🏠 بازگشت به منو", command: "menu" },
     ];
   }
 
   const featureId = context.actionId?.split(".")[0];
   const own = featureId ? FOLLOW_UPS[featureId] ?? [] : [];
   const generic: Suggestion[] = [
-    { label: "📋 نوبت‌ها رو ببینم؟", actionId: "bookings.list" },
-    { label: "🛍 خدمات رو بررسی کنم؟", actionId: "services.list" },
-    { label: "🕘 ساعت کاری رو چک کنم؟", actionId: "working-hours.list" },
-    { label: "🏠 به منو برگردیم؟", command: "menu" },
+    { label: "📋 مشاهدهٔ نوبت‌ها", actionId: "bookings.list" },
+    { label: "🛍 بررسی خدمات", actionId: "services.list" },
+    { label: "🕘 ساعت کاری کلینیک", actionId: "working-hours.list" },
+    { label: "🏠 بازگشت به منو", command: "menu" },
   ];
 
   // One button per actionId: two different labels for the same call is just noise.
@@ -181,7 +183,7 @@ export function fallbackSuggestions(context: { actionId?: string | null; locale:
   const limited = merged.slice(0, MAX_SUGGESTIONS);
   // A way back to the menu is never optional.
   const home: Suggestion = {
-    label: "🏠 به منو برگردیم؟",
+    label: "🏠 بازگشت به منو",
     command: "menu",
   };
   if (!limited.some((suggestion) => suggestion.command === "menu")) {
@@ -199,12 +201,12 @@ const SYSTEM_FA = `تو کمک می‌کنی کاربرِ یک ربات ادار
 1. فقط JSON برگردان: {"suggestions":[{"label":"...","actionId":"..."}],"tip":"یک راهنمای کوتاه"}
 2. actionId باید دقیقاً از این فهرست باشد:
 {FIELDS}
-3. label باید حتماً به صورت سؤالی/پرسشی باشد (با علامت سؤال ؟ در آخر)، محاوره‌ای، کوتاه (حداکثر ۴ کلمه) و با یک ایموجی در اول؛ انگار دستیار از کاربر می‌پرسد «می‌خواهی این کار را بکنم؟».
+3. عنوان دکمه‌ها (label) را حتماً بدون علامت سؤال (بدون ؟ یا ?) بنویس. عنوان‌ها باید خبری، کوتاه (حداکثر ۴ کلمه) و با یک ایموجی در اول باشد.
 مثال‌ها:
-- "✏️ ویرایش قیمت یا خدمت؟"
-- "➕ ثبت خدمت جدید؟"
-- "📋 نوبت‌ها رو ببینم؟"
-- "🕘 ساعت کاری رو چک کنم؟"
+- "✏️ ویرایش قیمت یا خدمت"
+- "➕ ثبت خدمت جدید"
+- "📋 مشاهدهٔ نوبت‌ها"
+- "🕘 ساعت‌های کاری"
 4. اکشن‌های مخرب مانند حذف (delete) پیشنهاد نده. هیچ actionId از خودت نساز.
 5. اگر پیشنهاد خوبی نداری، آرایهٔ خالی بده.
 6. tip: یک راهنمای کوتاه و کاربردی به پرسنل کلینیک بده (مثلاً: «برای ویرایش قیمت کافیست بنویسید: قیمت دی می رو ۷ میلیون کن»)، یا خالی بگذار.`;
@@ -212,7 +214,7 @@ const SYSTEM_FA = `تو کمک می‌کنی کاربرِ یک ربات ادار
 const SYSTEM_EN = `Suggest up to 3 useful next-step buttons for a clinic admin bot.
 Reply with JSON only: {"suggestions":[{"label":"...","actionId":"..."}],"tip":""}
 actionId must be one of these actions: {FIELDS}
-Write labels as short, friendly questions ending with '?' (e.g. "✏️ Edit service?", "➕ Add booking?", "📋 View bookings?"). One emoji at the start. Never suggest deletes.`;
+Write labels as short, clean phrases WITHOUT question marks (e.g. "✏️ Edit service", "➕ Add booking", "📋 View bookings"). One emoji at the start. Never suggest deletes.`;
 
 export function suggestableActionIds(): string[] {
   return FEATURES.flatMap((feature) => feature.actions)

@@ -21,6 +21,9 @@ import { pickArray } from "@/lib/bot/explainer";
 import { getFeature } from "@/lib/features/manifest";
 import { logInfo, logWarn } from "@/lib/log";
 import { truncateAtSentence } from "@/lib/text";
+import { prefetchPredictedActions } from "@/lib/bot/cache";
+import { getActiveEdit } from "@/lib/bot/session";
+import { getEditableFields } from "@/lib/bot/editing";
 import {
   answerCallbackQuery,
   sendMessage,
@@ -250,8 +253,9 @@ function welcomeText(locale: Locale, botName?: string): string {
 function statusLine(result: ChatResult, locale: Locale): string {
   const ms = result.trace.ms;
   const engine = result.trace.planner === "ai" ? "🧠" : "⚙️";
-  if (locale === "en") return `\n\n${engine} ${result.actionId ?? "chat"} · ${ms}ms`;
-  return `\n\n${engine} ${result.actionId ?? "گفت‌وگو"} · ${ms} میلی‌ثانیه`;
+  const fast = result.trace.timeTravel ? " ⚡️" : result.trace.fromCache ? " 📦" : "";
+  if (locale === "en") return `\n\n${engine}${fast} ${result.actionId ?? "chat"} · ${ms}ms`;
+  return `\n\n${engine}${fast} ${result.actionId ?? "گفت‌وگو"} · ${ms} میلی‌ثانیه`;
 }
 
 function errorMessage(locale: Locale): string {
@@ -263,11 +267,31 @@ function errorMessage(locale: Locale): string {
 /** The one place that decides which keyboard follows which answer. */
 async function keyboardFor(
   result: ChatResult,
-  input: { userMessage: string; locale: Locale },
+  input: { userMessage: string; locale: Locale; sessionId?: string },
 ): Promise<{ keyboard: InlineKeyboard | undefined; tip: string; engine: "ai" | "fallback" | "none"; count: number }> {
   // A write is waiting: the only sensible buttons are yes/no.
   if (result.status === "needs_confirmation" && result.confirmation?.token) {
     return { keyboard: confirmationKeyboard(result.confirmation.token, input.locale), tip: "", engine: "none", count: 2 };
+  }
+
+  // Active step-by-step editing controls
+  if (input.sessionId) {
+    const activeEdit = getActiveEdit(input.sessionId);
+    if (activeEdit) {
+      const editButtons: Suggestion[] = [];
+      const fields = getEditableFields(activeEdit.featureId);
+      const currentDef = fields.find((f) => f.key === activeEdit.currentField);
+      if (currentDef?.type === "boolean") {
+        editButtons.push({ label: "✅ فعال" }, { label: "⛔ غیرفعال" });
+      }
+      editButtons.push({ label: "⏭️ رد این مرحله" }, { label: "❌ لغو ویرایش" });
+      return {
+        keyboard: suggestionsKeyboard(editButtons, input.locale),
+        tip: "می‌توانید مقدار جدید را تایپ کنید یا از دکمه‌های بالا استفاده فرمایید.",
+        engine: "none",
+        count: editButtons.length,
+      };
+    }
   }
 
   const suggestion = await suggestNext({
@@ -281,7 +305,7 @@ async function keyboardFor(
 
   const list = [...suggestion.suggestions];
 
-  // If this was a list action and has multiple pages, add pagination controls
+  // If this was a list action and has multiple pages, add step-by-step pagination controls
   if (result.actionId?.endsWith(".list") && result.result?.data) {
     const listData = pickArray(result.result.data);
     if (listData && listData.total && listData.total > listData.perPage) {
@@ -291,13 +315,13 @@ async function keyboardFor(
 
       if (currentPage < totalPages) {
         paginationButtons.push({
-          label: input.locale === "en" ? `📄 Next page (${currentPage + 1}) ➡️` : `📄 صفحهٔ بعد (${currentPage + 1}) ➡️`,
+          label: input.locale === "en" ? `📄 Next step (${currentPage + 1}/${totalPages}) ➡️` : `📄 گام بعد: صفحهٔ ${currentPage + 1} از ${totalPages} ➡️`,
           page: { actionId: result.actionId, page: currentPage + 1 },
         });
       }
       if (currentPage > 1) {
         paginationButtons.push({
-          label: input.locale === "en" ? `⬅️ Prev page (${currentPage - 1})` : `⬅️ صفحهٔ قبل (${currentPage - 1})`,
+          label: input.locale === "en" ? `⬅️ Prev step (${currentPage - 1}/${totalPages})` : `⬅️ گام قبل: صفحهٔ ${currentPage - 1} از ${totalPages}`,
           page: { actionId: result.actionId, page: currentPage - 1 },
         });
       }
@@ -308,6 +332,40 @@ async function keyboardFor(
 
   // When the bot is asking questions, fewer buttons = less confusion.
   const finalList = result.status === "needs_info" ? list.slice(0, 3) : list.slice(0, 5);
+
+  // Time Travel predictive prefetching: anticipate next clicks and warm the cache
+  const predictions: Array<{
+    actionId: string;
+    query?: Record<string, string | number | boolean | undefined>;
+    pathParams?: Record<string, string>;
+  }> = [];
+
+  if (result.actionId?.endsWith(".list") && result.result?.data) {
+    const listData = pickArray(result.result.data);
+    if (listData && listData.total && listData.total > listData.perPage) {
+      const currentPage = listData.page ?? 1;
+      const totalPages = Math.ceil(listData.total / listData.perPage);
+      if (currentPage < totalPages) {
+        predictions.push({
+          actionId: result.actionId,
+          query: { page: currentPage + 1 },
+        });
+      }
+    }
+  }
+
+  for (const s of finalList) {
+    if (s.actionId) {
+      predictions.push({ actionId: s.actionId });
+    }
+    if (s.page) {
+      predictions.push({ actionId: s.page.actionId, query: { page: s.page.page } });
+    }
+  }
+
+  if (predictions.length > 0) {
+    void prefetchPredictedActions(predictions);
+  }
 
   return {
     keyboard: suggestionsKeyboard(finalList, input.locale),
@@ -335,7 +393,7 @@ async function processTextMessage(input: {
     return { handled: true, chatId, status: "error", reason: "exception" };
   }
 
-  const ui = await keyboardFor(result, { userMessage: text, locale });
+  const ui = await keyboardFor(result, { userMessage: text, locale, sessionId: sessionIdFor(chatId) });
   await sendMessage({
     chatId,
     text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
@@ -425,7 +483,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         return { handled: true, chatId, status: "error", reason: "exception" };
       }
 
-      const ui = await keyboardFor(result, { userMessage: `صفحه ${parsed.page}`, locale });
+      const ui = await keyboardFor(result, { userMessage: `صفحه ${parsed.page}`, locale, sessionId });
       await sendMessage({
         chatId,
         text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
@@ -463,7 +521,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         return { handled: true, chatId, status: "error", reason: "exception" };
       }
 
-      const ui = await keyboardFor(result, { userMessage: label, locale });
+      const ui = await keyboardFor(result, { userMessage: label, locale, sessionId });
       await sendMessage({
         chatId,
         text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
