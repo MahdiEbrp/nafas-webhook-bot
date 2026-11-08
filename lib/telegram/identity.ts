@@ -157,7 +157,7 @@ type LookupResult =
   | { ok: true; row: Record<string, unknown> | null }
   | { ok: false; reason: string };
 
-const SEARCH_PAGE_SIZE = 100;
+const SEARCH_PAGE_SIZE = 50; // clinic caps /api/v1/webhooks/users at perPage=50 (Zod max)
 const SCAN_PAGES = 3;
 
 /**
