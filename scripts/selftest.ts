@@ -196,7 +196,22 @@ async function main(): Promise<void> {
   const { clearCacheForTesting } = await import("@/lib/bot/cache");
   const { parseJsonLoose } = await import("@/lib/openrouter/client");
   const { FEATURES } = await import("@/lib/features/manifest");
-  const { resetConfigCache } = await import("@/lib/config");
+  const { DEFAULT_MODEL_CHAIN, getConfig, resetConfigCache } = await import("@/lib/config");
+
+  console.log("\nپیکربندی مدل پیش‌فرض");
+  await test("Liquid LFM is the first default model", () => {
+    const configuredModels = process.env.OPENROUTER_MODELS;
+    try {
+      delete process.env.OPENROUTER_MODELS;
+      resetConfigCache();
+      assertEqual(DEFAULT_MODEL_CHAIN[0], "liquid/lfm-3-1.7b:free", "default model");
+      assertEqual(getConfig().modelChain, DEFAULT_MODEL_CHAIN, "default model chain");
+    } finally {
+      if (configuredModels === undefined) delete process.env.OPENROUTER_MODELS;
+      else process.env.OPENROUTER_MODELS = configuredModels;
+      resetConfigCache();
+    }
+  });
 
   console.log("\nالف) موتور کلمات کلیدی (بدون هوش مصنوعی)");
   await test("«نوبت‌های امروز رو نشون بده» → bookings.list", () => {

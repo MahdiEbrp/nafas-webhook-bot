@@ -71,11 +71,11 @@ const FREE_SUFFIX = ":free";
 export const DEFAULT_WEBHOOK_BASE_URL = "https://nafasbeautyclinic.ir";
 
 export const DEFAULT_MODEL_CHAIN = [
+  "liquid/lfm-3-1.7b:free",
   "google/gemma-4-31b-it:free",
   "nvidia/nemotron-3.5-super-vl:free",
   "xingchen-agi/xing4.0-29b-a4b:free",
   "google/gemma-4-26b-a4b-it:free",
-  "liquid/lfm-3-1.7b:free",
 ];
 
 function normalisePublicUrl(value: string): string {

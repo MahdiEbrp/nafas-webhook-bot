@@ -182,7 +182,7 @@ curl -s -X POST http://127.0.0.1:3000/api/chat \
 | کلید | لازم؟ | توضیح |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | ✅ | کلید OpenRouter. خالی باشد → ربات با موتور کلمات کلیدی کار می‌کند. |
-| `OPENROUTER_MODELS` | – | زنجیرهٔ مدل‌های مجانی (با کاما). پیش‌فرض: ۵ مدل `:free`. کد خودش `:free` را تضمین می‌کند. |
+| `OPENROUTER_MODELS` | – | زنجیرهٔ مدل‌های مجانی (با کاما). پیش‌فرض: ۵ مدل `:free`، ابتدا `liquid/lfm-3-1.7b:free`. کد خودش `:free` را تضمین می‌کند. |
 | `WEBHOOK_BASE_URL` | ✅ | آدرس upstream. پیش‌فرض: `https://nafasbeautyclinic.ir` |
 | `WEBHOOK_USERNAME` | ✅ | ایمیل کاربر سرویس (Basic Auth). |
 | `WEBHOOK_PASSWORD` | ✅ | رمز آن کاربر. |
@@ -207,15 +207,15 @@ curl -s -X POST http://127.0.0.1:3000/api/chat \
 زنجیرهٔ پیش‌فرض (بر اساس `GET /api/v1/models` امروز، همه `:free` و همه با پشتیبانی `tools` + `response_format`):
 
 ```
+liquid/lfm-3-1.7b:free
 google/gemma-4-31b-it:free
 nvidia/nemotron-3.5-super-vl:free
 xingchen-agi/xing4.0-29b-a4b:free
 google/gemma-4-26b-a4b-it:free
-liquid/lfm-3-1.7b:free
 ```
 
 - مدل‌های مجانی **می‌آیند و می‌روند**. هر وقت خطا دیدی: `npm run models` → اگر مدلی «✗ gone» بود، جایگزین پیشنهادی را در `OPENROUTER_MODELS` بگذار.
-- ترتیب مهم است: مدل بزرگ‌تر اول (فهمِ فارسیِ بهتر)، مدل کوچک و سریع آخر (تأخیر کمتر، ولی همیشه یک جواب).
+- ترتیب مهم است: ابتدا `liquid/lfm-3-1.7b:free` امتحان می‌شود؛ اگر جواب ندهد، مدل‌های بعدی به‌ترتیب جایگزین می‌شوند. تنظیم `OPENROUTER_MODELS` این ترتیب پیش‌فرض را تغییر می‌دهد.
 - همه‌چیز فقط با `:free` کار می‌کند؛ `config.ts` اگر پسوند نداشته باشد خودش اضافه می‌کند تا اشتباهی پول خرج نشود.
 
 ---
@@ -244,7 +244,7 @@ liquid/lfm-3-1.7b:free
     "intent": "read",
     "actionId": "bookings.list",
     "result": { "ok": true, "httpStatus": 200, "data": { "items": [...] } },
-    "trace": { "planner": "ai", "writer": "ai", "plannerModel": "google/gemma-4-31b-it:free", "ms": 1840 }
+    "trace": { "planner": "ai", "writer": "ai", "plannerModel": "liquid/lfm-3-1.7b:free", "ms": 1840 }
   }
 }
 ```
