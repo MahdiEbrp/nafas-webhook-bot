@@ -59,6 +59,38 @@ export function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
 
+function withEllipsis(text: string): string {
+  return /[.!?؟…]$/.test(text) ? text : `${text}…`;
+}
+
+/**
+ * Cuts at a sentence boundary instead of a character boundary.
+ *
+ * `truncate` can end mid-word ("…سه‌شنبه و چهارشن"), which looks like a broken
+ * bot on a phone. This prefers the last full sentence inside `max`, then the
+ * last whole word, and only then a hard cut.
+ */
+export function truncateAtSentence(text: string, max: number): string {
+  if (text.length <= max) return text;
+
+  const window = text.slice(0, max);
+  let boundary = -1;
+  for (const mark of [". ", "! ", "? ", "؟ ", "… ", ".\n", "!\n", "?\n", "\n"]) {
+    const index = window.lastIndexOf(mark);
+    if (index === -1) continue;
+    const end = mark === "\n" ? index : index + 1;
+    if (end > boundary) boundary = end;
+  }
+
+  // Only trust a boundary in the second half, otherwise we would return a stub.
+  if (boundary > max * 0.5) return withEllipsis(window.slice(0, boundary).trimEnd());
+
+  const space = window.lastIndexOf(" ");
+  if (space > max * 0.5) return withEllipsis(window.slice(0, space).trimEnd());
+
+  return withEllipsis(window.trimEnd());
+}
+
 /** Formats a list of Persian items into "الف، ب و ج" */
 export function joinFa(items: string[]): string {
   if (items.length === 0) return "";

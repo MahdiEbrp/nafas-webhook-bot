@@ -36,6 +36,11 @@ export type CompletionOptions = {
 export type CompletionResult = {
   content: string;
   model: string;
+  /**
+   * The provider's `finish_reason`. `"length"` means max_tokens ran out and the
+   * answer stops mid-sentence — callers must not show that to a user.
+   */
+  finishReason: string | null;
   /** every model we tried, in order, with the reason it was skipped */
   attempts: Array<{ model: string; ok: boolean; ms: number; error?: string; status?: number }>;
   usage?: { promptTokens?: number; completionTokens?: number };
@@ -61,7 +66,7 @@ async function callOnce(
   model: string,
   options: CompletionOptions,
   timeoutMs: number,
-): Promise<{ content: string; usage?: CompletionResult["usage"] }> {
+): Promise<{ content: string; usage?: CompletionResult["usage"]; finishReason: string | null }> {
   const config = getConfig();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -95,7 +100,10 @@ async function callOnce(
     }
 
     const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string | null; reasoning?: string | null } }>;
+      choices?: Array<{
+        message?: { content?: string | null; reasoning?: string | null };
+        finish_reason?: string | null;
+      }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
       error?: { message?: string };
     };
@@ -104,13 +112,15 @@ async function callOnce(
       throw new ModelCallError(502, model, payload.error.message);
     }
 
-    const content = payload.choices?.[0]?.message?.content?.trim() ?? "";
+    const choice = payload.choices?.[0];
+    const content = choice?.message?.content?.trim() ?? "";
     if (!content) {
       throw new ModelCallError(502, model, "Empty completion (free model returned no content)");
     }
 
     return {
       content,
+      finishReason: choice?.finish_reason ?? null,
       usage: {
         promptTokens: payload.usage?.prompt_tokens,
         completionTokens: payload.usage?.completion_tokens,
@@ -143,9 +153,9 @@ export async function complete(options: CompletionOptions): Promise<CompletionRe
     for (let attempt = 0; attempt <= config.modelRetries; attempt += 1) {
       const startedAt = Date.now();
       try {
-        const { content, usage } = await callOnce(model, options, config.modelTimeoutMs);
+        const { content, usage, finishReason } = await callOnce(model, options, config.modelTimeoutMs);
         attempts.push({ model, ok: true, ms: Date.now() - startedAt });
-        return { content, model, attempts, usage };
+        return { content, model, finishReason, attempts, usage };
       } catch (error) {
         const status = error instanceof ModelCallError ? error.status : 0;
         const message = error instanceof Error ? error.message : String(error);

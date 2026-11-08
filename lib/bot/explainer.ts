@@ -11,7 +11,7 @@
 import type { Locale } from "@/lib/config";
 import { logWarn } from "@/lib/log";
 import { complete } from "@/lib/openrouter/client";
-import { joinFa, softenJargon, truncate } from "@/lib/text";
+import { joinFa, softenJargon, truncate, truncateAtSentence } from "@/lib/text";
 
 import { EXPLAINER_SYSTEM_EN, EXPLAINER_SYSTEM_FA, explainerUserPrompt, type ExplainInput } from "./prompt";
 
@@ -176,6 +176,51 @@ export function fallbackAnswer(input: ExplainInput): string {
 
 const JARGON = /\b(endpoint|payload|json|api|http|status code|webhook|schema|uuid|query|request|response)\b/i;
 
+/**
+ * Free models sometimes answer with their working-out instead of an answer:
+ *
+ *   Analyze the Request:
+ *   * Role: Friendly clinic assistant …
+ *   * Input Data: …
+ *   2. Drafting the Response (Iterative Process):
+ *   * Attempt 1 …
+ *
+ * A clinic's receptionist must never see that, and the text is usually cut off
+ * mid-token by `max_tokens` anyway. One strong marker — or several weak ones —
+ * means the whole answer is discarded and the deterministic text is used.
+ */
+const STRONG_REASONING_MARKERS: RegExp[] = [
+  /analy[sz]e the request/i,
+  /drafting the response/i,
+  /iterative process/i,
+  /chain[-\s]of[-\s]thought/i,
+  /تحلیل درخواست/,
+  /پیش‌نویس پاسخ/,
+  // echoes of our own prompt — the model talking to itself, not to the user
+  /کاربر گفته بود\s*[:"]/,
+  /اکشنی که اجرا شد/,
+  /دادهٔ خام/,
+];
+
+const WEAK_REASONING_MARKERS: RegExp[] = [
+  /input data/i,
+  /\battempt\s*\d+\b/i,
+  /\bstep\s*\d+\s*:/i,
+  /^\s*[-*•]\s*\*{0,2}(role|language|constraints|input data)\b/im,
+  /\*{0,2}(role|constraints)\*{0,2}\s*:\s*\S/i,
+  /^\s*\d+\.\s*(drafting|refining|analy[sz]ing)/im,
+];
+
+/** True when the model answered with its scaffolding rather than an answer. */
+export function looksLikeReasoningDump(text: string): boolean {
+  if (STRONG_REASONING_MARKERS.some((pattern) => pattern.test(text))) return true;
+  return WEAK_REASONING_MARKERS.filter((pattern) => pattern.test(text)).length >= 2;
+}
+
+/** An answer longer than this stops being a chat message and becomes a wall. */
+const MAX_REPLY_CHARS = 1200;
+
+
 export type Explanation = {
   text: string;
   engine: "ai" | "fallback";
@@ -199,6 +244,19 @@ export async function explain(input: ExplainInput): Promise<Explanation> {
 
     let text = softenJargon(result.content.trim());
 
+    // `finish_reason: "length"` means max_tokens ran out and the last word is
+    // half-written (production saw "…سه‌شنبه و چهارشن"). Not an answer → drop it.
+    if (result.finishReason === "length") {
+      logWarn("explainer.rejected", { reason: "truncated", model: result.model, chars: text.length });
+      return { text: fallbackText, engine: "fallback", model: result.model, fallbackText };
+    }
+
+    // The model answered with its own reasoning ("Analyze the Request: …").
+    if (looksLikeReasoningDump(text)) {
+      logWarn("explainer.rejected", { reason: "reasoning_dump", model: result.model, chars: text.length });
+      return { text: fallbackText, engine: "fallback", model: result.model, fallbackText };
+    }
+
     // Free models sometimes answer in English or drown the user in jargon.
     // The deterministic version is always correct, so use it when that happens.
     if (text.length < 8 || (input.locale === "fa" && JARGON.test(text) && !/[\u0600-\u06FF]/.test(text))) {
@@ -208,6 +266,9 @@ export async function explain(input: ExplainInput): Promise<Explanation> {
 
     // Strip a leading "خب،" style preamble and markdown bold, keep it clean.
     text = text.replace(/^\s*(خب|باشه)[،,]?\s*/u, "").replace(/\*\*/g, "");
+
+    // Keep a runaway monologue out of the chat, and never end mid-word.
+    text = truncateAtSentence(text, MAX_REPLY_CHARS).trim();
 
     return { text, engine: "ai", model: result.model, fallbackText };
   } catch (error) {
