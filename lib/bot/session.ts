@@ -38,11 +38,25 @@ export type StoredItem = {
   featureId: string;
 };
 
+export type ActiveEditState = {
+  actionId: string;
+  itemId: string;
+  itemTitle?: string;
+  featureId: string;
+  step: number;
+  totalSteps: number;
+  currentField: string;
+  pendingFields: string[];
+  collectedValues: Record<string, unknown>;
+  updatedAt: number;
+};
+
 export type SessionState = {
   turns: Turn[];
   items: StoredItem[];
   lastActionId?: string | null;
   lastPage?: number;
+  activeEdit?: ActiveEditState | null;
 };
 
 const PENDING_TTL_MS = 10 * 60 * 1000;
@@ -232,6 +246,27 @@ export function findSessionItem(sessionId: string, text: string): StoredItem | u
 export function getLastPageInfo(sessionId: string): { actionId?: string | null; page?: number } {
   const state = sessionStates.get(sessionId);
   return { actionId: state?.lastActionId, page: state?.lastPage };
+}
+
+export function getActiveEdit(sessionId: string): ActiveEditState | null {
+  const state = sessionStates.get(sessionId);
+  if (!state?.activeEdit) return null;
+  // Expire multi-step edits after 10 minutes
+  if (Date.now() - state.activeEdit.updatedAt > 10 * 60 * 1000) {
+    state.activeEdit = null;
+    return null;
+  }
+  return state.activeEdit;
+}
+
+export function setActiveEdit(sessionId: string, edit: ActiveEditState | null): void {
+  const state = getOrCreateState(sessionId);
+  state.activeEdit = edit;
+}
+
+export function clearActiveEdit(sessionId: string): void {
+  const state = sessionStates.get(sessionId);
+  if (state) state.activeEdit = null;
 }
 
 export function resetSessionsForTesting(): void {

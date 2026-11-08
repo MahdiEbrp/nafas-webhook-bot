@@ -10,6 +10,7 @@ import { getAction, type FeatureAction } from "@/lib/features/manifest";
 import { REQUIREMENTS, questionFor } from "@/lib/features/requirements";
 import { normalize } from "@/lib/text";
 import { callWebhook, type WebhookResult } from "@/lib/webhooks/client";
+import { fetchWithCache, invalidateResource } from "./cache";
 
 export type PreparedRequest = {
   actionId: string;
@@ -258,13 +259,31 @@ export function preparePlan(actionId: string, rawParams: Record<string, unknown>
 }
 
 export async function executeRequest(request: PreparedRequest): Promise<WebhookResult> {
-  return callWebhook({
-    method: request.method,
-    path: request.path,
-    pathParams: request.pathParams,
-    query: request.query,
-    body: request.body,
-  });
+  const resource = request.actionId.split(".")[0] ?? "";
+
+  if (request.method !== "GET") {
+    // Invalidate cached reads for this resource immediately when a write/delete executes
+    invalidateResource(resource);
+    return callWebhook({
+      method: request.method,
+      path: request.path,
+      pathParams: request.pathParams,
+      query: request.query,
+      body: request.body,
+    });
+  }
+
+  // GET requests use the advanced cache & coalescing layer
+  return fetchWithCache(
+    {
+      method: request.method,
+      path: request.path,
+      pathParams: request.pathParams,
+      query: request.query,
+      body: request.body,
+    },
+    { tags: [resource] },
+  );
 }
 
 /** Redacted view for confirmation cards / logs: never echo passwords back. */

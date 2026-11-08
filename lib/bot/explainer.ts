@@ -201,12 +201,12 @@ export function fallbackAnswer(input: ExplainInput): string {
     let pageHeader = ":";
     if (count > perPage) {
       const totalPages = Math.ceil(count / perPage);
-      pageHeader = ` (صفحهٔ ${page} از ${totalPages}):`;
+      pageHeader = ` (مرحلهٔ ${page} از ${totalPages} — صفحهٔ ${page} از ${totalPages}):`;
     }
 
     let more = "";
     if (remaining > 0) {
-      more = `\n\n…و ${remaining} مورد دیگر هم هست (می‌توانید بنویسید «صفحه بعد» یا از دکمه‌های زیر استفاده کنید).`;
+      more = `\n\n…و ${remaining} مورد دیگر هم هست (می‌توانید بنویسید «صفحه بعد» یا از دکمه‌های مرحلهٔ بعد استفاده کنید).`;
     }
 
     return `بفرما، ${count} مورد پیدا کردم${pageHeader}\n${shown}${more}`;

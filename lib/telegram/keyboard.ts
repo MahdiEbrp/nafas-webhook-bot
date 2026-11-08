@@ -77,14 +77,15 @@ export function suggestionsKeyboard(suggestions: Suggestion[], locale: Locale): 
   const buttons: Array<TelegramButton | null> = [];
 
   for (const suggestion of suggestions) {
+    const cleanLabel = suggestion.label.replace(/[؟?]+$/, "").trim();
     if (suggestion.page) {
-      buttons.push(button(suggestion.label, `p:${suggestion.page.actionId}:${suggestion.page.page}`));
+      buttons.push(button(cleanLabel, `p:${suggestion.page.actionId}:${suggestion.page.page}`));
     } else if (suggestion.actionId) {
-      buttons.push(button(suggestion.label, `a:${suggestion.actionId}`));
+      buttons.push(button(cleanLabel, `a:${suggestion.actionId}`));
     } else if (suggestion.command === "menu") {
-      buttons.push(button(suggestion.label, "m"));
+      buttons.push(button(cleanLabel, "m"));
     } else if (suggestion.command === "features") {
-      buttons.push(button(suggestion.label, "h"));
+      buttons.push(button(cleanLabel, "h"));
     }
   }
 
