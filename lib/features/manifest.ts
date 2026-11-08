@@ -367,6 +367,8 @@ export const FEATURES: Feature[] = [
     titleEn: "Users & staff",
     kid: "فهرست پرسنل، پزشکان و کاربران دارای دسترسی به سامانه، مدیریت نقش‌ها و وضعیت فعال بودن حساب‌ها.",
     userWants: [
+      "شماره تلفن کاربر شماره ۴ رو تغییر بده",
+      "کاربر شماره چهار رو عوض کن",
       "کاربرهای فعال رو لیست کن",
       "یه حساب برای منشی جدید بساز",
       "فلانی رو غیرفعال کن",
@@ -393,6 +395,17 @@ export const FEATURES: Feature[] = [
         fa: "ساختن کاربر جدید",
         en: "create a user",
         fields: ["fullName", "email", "phone", "password", "roleKey"],
+      },
+      {
+        id: "users.update",
+        method: "PATCH",
+        path: "/api/v1/webhooks/users/:id",
+        permission: "users.manage",
+        danger: "write",
+        needsConfirmation: true,
+        fa: "ویرایش مشخصات کاربر (شماره تلفن، نام و نقش)",
+        en: "update user details (phone, name, role)",
+        fields: ["id", "fullName", "phone", "email", "roleKey", "isActive", "isBanned"],
       },
       {
         id: "users.update-status",

@@ -424,7 +424,7 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
   }
 
   /* ── 4. Acting ────────────────────────────────────────────────────── */
-  if (plan.actionId && !plan.params.id) {
+  if (plan.actionId && !plan.actionId.endsWith(".list") && !plan.params.id) {
     const matched = findSessionItem(input.sessionId, input.message);
     if (matched) {
       plan.params.id = matched.id;
