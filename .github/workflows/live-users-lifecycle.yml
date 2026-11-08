@@ -1,0 +1,42 @@
+name: Live test-user lifecycle (writes)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type CREATE_UPDATE_DELETE_TEST_USER to authorize writes to a NEW test account'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-users-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  test-user:
+    if: github.event.inputs.confirmation == 'CREATE_UPDATE_DELETE_TEST_USER' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: live-users-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test lifecycle safety offline
+        run: node --test scripts/live-users-lifecycle.test.mjs
+      - name: Create, search, update and delete dedicated test user
+        run: node scripts/live-users-lifecycle.mjs
+        env:
+          CONFIRM_TEST_USER_WRITES: ${{ inputs.confirmation }}
+          WEBHOOK_BASE_URL: ${{ secrets.WEBHOOK_BASE_URL }}
+          WEBHOOK_USERNAME: ${{ secrets.WEBHOOK_USERNAME }}
+          WEBHOOK_PASSWORD: ${{ secrets.WEBHOOK_PASSWORD }}
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PHONE: ${{ secrets.TEST_USER_PHONE }}
+          TEST_USER_ROLE_KEY: ${{ secrets.TEST_USER_ROLE_KEY }}
