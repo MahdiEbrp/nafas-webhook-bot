@@ -25,14 +25,24 @@ const STATUS_WORDS: Array<[RegExp, string]> = [
   [/فعال\s*است|فعال|active/i, "active"],
 ];
 
+export const DAY_FA: Record<string, string> = {
+  Saturday: "شنبه",
+  Sunday: "یکشنبه",
+  Monday: "دوشنبه",
+  Tuesday: "سه‌شنبه",
+  Wednesday: "چهارشنبه",
+  Thursday: "پنج‌شنبه",
+  Friday: "جمعه",
+};
+
 const DAYS: Array<[RegExp, string]> = [
-  [/شنبه/, "Saturday"],
-  [/یک\s*شنبه|یکشنبه/, "Sunday"],
-  [/دوشنبه/, "Monday"],
-  [/سه\s*شنبه|سهشنبه/, "Tuesday"],
-  [/چهار\s*شنبه|چهارشنبه/, "Wednesday"],
-  [/پنج\s*شنبه|پنجشنبه/, "Thursday"],
+  [/یک[\s\u200c]*شنبه|یکشنبه/, "Sunday"],
+  [/دو[\s\u200c]*شنبه|دوشنبه/, "Monday"],
+  [/سه[\s\u200c]*شنبه|سهشنبه/, "Tuesday"],
+  [/چهار[\s\u200c]*شنبه|چهارشنبه/, "Wednesday"],
+  [/پنج[\s\u200c]*شنبه|پنجشنبه/, "Thursday"],
   [/جمعه/, "Friday"],
+  [/(?<!یک[\s\u200c]*|دو[\s\u200c]*|سه[\s\u200c]*|چهار[\s\u200c]*|پنج[\s\u200c]*)شنبه/, "Saturday"],
 ];
 
 const MULTIPLIERS: Array<[RegExp, number]> = [

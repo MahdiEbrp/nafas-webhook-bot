@@ -9,6 +9,7 @@
  */
 
 import { getConfig, type Locale } from "@/lib/config";
+import { DAY_FA, extractSlots } from "@/lib/features/extract";
 import { logWarn } from "@/lib/log";
 import { complete } from "@/lib/openrouter/client";
 import { joinFa, softenJargon, truncate, truncateAtSentence } from "@/lib/text";
@@ -72,15 +73,7 @@ export function pickArray(data: unknown): PickedList | null {
   return null;
 }
 
-const DAY_FA: Record<string, string> = {
-  Saturday: "شنبه",
-  Sunday: "یکشنبه",
-  Monday: "دوشنبه",
-  Tuesday: "سه‌شنبه",
-  Wednesday: "چهارشنبه",
-  Thursday: "پنجشنبه",
-  Friday: "جمعه",
-};
+
 
 /** Reads `translations.fa.title` / `.name` without trusting the shape. */
 function faText(value: unknown): string | null {
@@ -176,6 +169,26 @@ export function fallbackAnswer(input: ExplainInput): string {
 
   const list = pickArray(data);
   if (list) {
+    const extractedDay = extractSlots(input.userMessage).day;
+    if (actionId?.startsWith("working-hours") && extractedDay) {
+      const dayFa = DAY_FA[extractedDay] ?? extractedDay;
+      const matching = list.rows.find((r) => {
+        if (!r || typeof r !== "object") return false;
+        const rowDay = (r as Record<string, unknown>).day;
+        return typeof rowDay === "string" && rowDay.toLowerCase() === extractedDay.toLowerCase();
+      }) as Record<string, unknown> | undefined;
+
+      if (matching) {
+        const opens = typeof matching.opens === "string" ? matching.opens : "نامشخص";
+        const closes = typeof matching.closes === "string" ? matching.closes : "نامشخص";
+        const capacity = typeof matching.capacity === "number" ? ` با ظرفیت پذیرش ${matching.capacity} نفر` : "";
+        const active = matching.isActive === false ? " (در حال حاضر غیرفعال/تعطیل)" : "";
+        return `ساعت کاری کلینیک در روزهای ${dayFa} از ساعت ${opens} تا ${closes} است${capacity}.${active} 🕘`;
+      } else {
+        return `برای روز ${dayFa} ساعت کاری فعالی در سیستم ثبت نشده است. 🔍`;
+      }
+    }
+
     if (list.rows.length === 0) {
       return "چیزی پیدا نشد. 🔍\nموردی با این مشخصات در سیستم ثبت نشده است.";
     }
@@ -213,7 +226,17 @@ export function fallbackAnswer(input: ExplainInput): string {
   }
 
   if (data && typeof data === "object") {
-    const entries = Object.entries(data as Record<string, unknown>)
+    const record = data as Record<string, unknown>;
+    if (actionId?.startsWith("working-hours") && typeof record.day === "string") {
+      const dayFa = DAY_FA[record.day] ?? record.day;
+      const opens = typeof record.opens === "string" ? record.opens : "نامشخص";
+      const closes = typeof record.closes === "string" ? record.closes : "نامشخص";
+      const capacity = typeof record.capacity === "number" ? ` با ظرفیت پذیرش ${record.capacity} نفر` : "";
+      const active = record.isActive === false ? " (در حال حاضر غیرفعال/تعطیل)" : "";
+      return `ساعت کاری کلینیک در روزهای ${dayFa} از ساعت ${opens} تا ${closes} است${capacity}.${active} 🕘`;
+    }
+
+    const entries = Object.entries(record)
       .filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value))
       .slice(0, 8);
     if (entries.length > 0) {

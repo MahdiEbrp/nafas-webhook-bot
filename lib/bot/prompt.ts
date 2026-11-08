@@ -10,6 +10,7 @@
  */
 
 import { FEATURES, manifestForPrompt } from "@/lib/features/manifest";
+import { DAY_FA, extractSlots } from "@/lib/features/extract";
 import type { Locale } from "@/lib/config";
 
 export const PLANNER_SYSTEM_FA = `تو «مغزِ برنامه‌ریزِ» یک ربات اداری هستی که به API کلینیک وصل است.
@@ -76,6 +77,8 @@ export const EXPLAINER_SYSTEM_FA = `تو یک دستیار هوشمند و هم�
 قانون‌های حرف زدن:
 - فقط جوابِ نهایی را بنویس. هیچ تحلیل، هیچ فهرستِ مراحل، هیچ عنوانی مثل «تحلیل درخواست» یا «پیش‌نویس پاسخ» یا «Attempt» ننویس. اولین کلمهٔ جوابت باید خودِ جواب باشد.
 - لحن دوستانه، محترمانه و حرفه‌ای مناسب محیط کاری و پرسنل کلینیک باشد؛ از لحن بچه‌گانه یا تشبیه‌های کودکانه پرهیز کن.
+- پاسخ دقیق به مورد درخواستی: اگر کاربر دربارهٔ یک مورد خاص سؤال کرده است (مثلاً ساعت کاری یک روز معین مانند «شنبه‌ها»، نوبت یک شخص خاص، یا یک خدمت مشخص)، فقط و فقط پاسخ دقیق مربوط به همان مورد را بده و از ردیف کردن کل جدول یا سایر روزها/موارد نامربوط خودداری کن.
+- برای سؤالات ساعت کاری: اگر کاربر ساعت کاری یک روز خاص (مثلاً شنبه) را پرسیده، مستقیماً ساعت شروع، پایان، ظرفیت و وضعیت همان روز را اعلام کن و روزهای دیگر را نام نبر.
 - حداکثر ۴ جمله. جمله‌ها کوتاه، شفاف و کاربردی باشند.
 - اصطلاحات فنی مهندسی نرم‌افزار (endpoint، payload، json، api، status code) را به کار نبر، اما اصطلاحات روزمرهٔ مدیریت کلینیک (نوبت، شیفت، وضعیت پذیرش، پرداخت) را کاملاً دقیق بنویس.
 - اعداد و مبالغ را واضح بنویس: «۵ نوبت»، «۲ میلیون تومان».
@@ -107,6 +110,15 @@ export function explainerUserPrompt(input: ExplainInput): string {
   if (input.errorCode) parts.push(`کد خطا: ${input.errorCode}`);
   if (input.errorMessage) parts.push(`پیام خطای سیستم: ${input.errorMessage}`);
   if (input.data !== undefined && input.data !== null) parts.push(`دادهٔ خام (JSON):\n${payload}`);
+
+  if (input.actionId?.startsWith("working-hours")) {
+    const extractedDay = extractSlots(input.userMessage).day;
+    if (extractedDay) {
+      const dayFa = DAY_FA[extractedDay] ?? extractedDay;
+      parts.push(`نکته بسیار مهم برای پاسخ: کاربر مشخصاً دربارهٔ ساعت کاری روز «${dayFa}» پرسیده است. فقط و فقط اطلاعات مربوط به همین روز را در پاسخ اعلام کن و روزهای دیگر هفته را نیاور.`);
+    }
+  }
+
   parts.push("حالا نتیجه را برای کاربر توضیح بده.");
   return parts.join("\n");
 }
