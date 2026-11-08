@@ -1123,7 +1123,7 @@ async function main(): Promise<void> {
 
     assertEqual(login.status, "identity", "identity status because no pending query");
     const lastMsg = tgCalls.filter((c) => c.method === "sendMessage").pop();
-    assert(String(lastMsg?.payload.text).includes("حالا هر چه می‌خواهی بپرس"), "shows general welcome menu prompt");
+    assert(String(lastMsg?.payload.text).includes("می‌توانید درخواست خود را بفرمایید"), "shows general welcome menu prompt");
   });
 
   await test("/logout دوباره قفل می‌کند", async () => {

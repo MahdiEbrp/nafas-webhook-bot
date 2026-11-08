@@ -121,8 +121,8 @@ async function runAndExplain(
 function askForInfo(plan: ValidatedPlan, questions: string[], trace: ChatResult["trace"]): ChatResult {
   const intro =
     plan.actionValid && plan.actionId
-      ? "برای اینکه این کار را انجام دهم، فقط این‌ها را لازم دارم:"
-      : "برای این کار به اطلاعات بیشتری نیاز دارم:";
+      ? "برای ثبت و تکمیل این درخواست، این اطلاعات را لازم دارم:"
+      : "برای انجام این کار به اطلاعات بیشتری نیاز دارم:";
   return {
     status: "needs_info",
     reply: [intro, ...questions.map((question) => `• ${question}`)].join("\n"),
@@ -187,7 +187,7 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
       await rememberTurn(input.sessionId, { userMessage: input.message, actionId: pending.plan.actionId ?? null, summary: "کاربر لغو کرد" });
       return {
         status: "answered",
-        reply: "باشه، انجام ندادم. 👍\nهر وقت خواستی بگو تا آماده‌اش کنم.",
+        reply: "درخواست لغو شد و انجام ندادم. 👍\nهر زمان نیاز داشتید، بفرمایید تا اقدام کنم.",
         understood: pending.summaryFa,
         intent: pending.plan.intent,
         actionId: pending.plan.actionId ?? null,
@@ -250,7 +250,7 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
         ? plan.reply
         : input.locale === "en"
           ? `Hi! I can work with ${featureCount} parts of the clinic system (bookings, services, staff, settings…). Ask me something like "show today's bookings".`
-          : `سلام! 🙂 من دستیار کلینیک هستم و روی ${featureCount} بخش از سیستم کار می‌کنم: نوبت‌ها، خدمات، ساعت کاری، کاربران، تنظیمات و چند بخش دیگر.\nمثلاً بگو: «نوبت‌های امروز را نشان بده» یا «قوانین را ببین».`;
+          : `سلام! وقت بخیر 🙂\nمن دستیار کلینیک هستم و در بخش‌های نوبت‌ها، خدمات، ساعات کاری، پرسنل و تنظیمات سیستم می‌توانم به شما کمک کنم.\nبرای نمونه می‌توانید بفرمایید: «نوبت‌های امروز را نشان بده» یا «ساعت کاری شنبه‌ها».`;
     await rememberTurn(input.sessionId, { userMessage: input.message, actionId: null, summary: "گفت‌وگوی عمومی" });
     return finish({
       status: "answered",

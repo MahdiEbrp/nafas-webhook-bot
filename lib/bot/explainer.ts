@@ -27,15 +27,15 @@ const STATUS_FA: Record<string, string> = {
 };
 
 const ERROR_FA: Record<string, string> = {
-  WEBHOOK_UNAUTHORIZED: "کارتِ ورودِ ربات به سیستم قبول نشد. باید نام کاربری و رمز وب‌هوک را در تنظیمات درست کنیم.",
-  WEBHOOK_FORBIDDEN: "این کار را برای ربات باز نکرده‌اند. یعنی حسابش اجازهٔ «تغییر دادن» این بخش را ندارد.",
-  WEBHOOK_RATE_LIMITED: "الان خیلی درخواست فرستادیم و سیستم گفت یک‌کم صبر کن. چند دقیقه بعد دوباره امتحان کن.",
-  WEBHOOK_TIMEOUT: "سیستم اصلی جواب نداد و ما منتظر ماندیم تا وقت تمام شد. یک‌بار دیگر امتحان کن.",
-  WEBHOOK_UNREACHABLE: "به سیستم اصلی نرسیدیم. مثل این است که تلفن را گرفته باشیم و کسی گوشی را برندارد.",
-  WEBHOOK_NOT_CONFIGURED: "آدرس سیستم اصلی در تنظیمات ربات خالی است؛ اول باید آن را پر کنیم.",
-  NOT_FOUND: "چنین چیزی در سیستم نبود. شاید شناسه اشتباه است یا قبلاً پاک شده.",
-  VALIDATION_ERROR: "اطلاعاتی که فرستادیم شکل درستی نداشت؛ سیستم قبولش نکرد.",
-  WEBHOOK_HTTP_400: "اطلاعات ناقص یا نادرست بود و سیستم قبولش نکرد.",
+  WEBHOOK_UNAUTHORIZED: "اعتبارنامهٔ دسترسی به سیستم تأیید نشد. لطفاً نام کاربری و رمز وب‌هوک را بررسی کنید.",
+  WEBHOOK_FORBIDDEN: "حساب ربات اجازهٔ دسترسی به این بخش را ندارد. لطفاً با مدیر کلینیک هماهنگ کنید تا مجوز لازم را فعال کند.",
+  WEBHOOK_RATE_LIMITED: "تعداد درخواست‌ها بیشتر از حد مجاز است. لطفاً چند لحظه بعد مجدداً امتحان کنید.",
+  WEBHOOK_TIMEOUT: "پاسخی از سرور کلینیک دریافت نشد و مهلت درخواست به پایان رسید. لطفاً مجدداً تلاش کنید.",
+  WEBHOOK_UNREACHABLE: "امکان برقراری ارتباط با سرور کلینیک وجود ندارد. لطفاً اتصال سرور را بررسی کنید.",
+  WEBHOOK_NOT_CONFIGURED: "آدرس سرور کلینیک در تنظیمات سیستم مشخص نشده است.",
+  NOT_FOUND: "موردی با این مشخصات در سیستم یافت نشد.",
+  VALIDATION_ERROR: "اطلاعات ارسالی با فرمت مورد انتظار سیستم همخوانی نداشت.",
+  WEBHOOK_HTTP_400: "اطلاعات ارسالی ناقص یا نامعتبر بود و توسط سیستم پذیرفته نشد.",
 };
 
 function statusFa(value: unknown): string {
@@ -148,27 +148,27 @@ export function fallbackAnswer(input: ExplainInput): string {
   if (outcome === "error") {
     const friendly = errorCode ? ERROR_FA[errorCode] : undefined;
     const detail = errorMessage ? ` (پیام سیستم: ${truncate(errorMessage, 160)})` : "";
-    return `${friendly ?? "یک مشکل پیش آمد و کار انجام نشد."}${detail}\nاگر بخواهی، دوباره امتحان می‌کنم.`;
+    return `${friendly ?? "عملیات با خطا مواجه شد."}${detail}\nدر صورت تمایل می‌توانید دوباره امتحان کنید.`;
   }
 
   const verb = actionId?.endsWith(".delete")
-    ? "پاک شد"
+    ? "حذف شد"
     : actionId?.endsWith(".create")
-      ? "ساخته شد"
+      ? "ثبت شد"
       : actionId?.endsWith(".update") || actionId?.endsWith(".update-status")
-        ? "به‌روز شد"
+        ? "به‌روزرسانی شد"
         : null;
 
   if (verb) {
     const featureId = actionId?.split(".")[0] ?? "";
     const itemName = FEATURE_NAMES_FA[featureId] ?? "مورد";
-    return `بفرما، ${itemName} با موفقیت ${verb}. ✅\nاگر بخواهی، فهرست را نشانت می‌دهم تا با چشم خودت ببینی.`;
+    return `بفرما، ${itemName} با موفقیت ${verb}. ✅`;
   }
 
   const list = pickArray(data);
   if (list) {
     if (list.rows.length === 0) {
-      return "چیزی پیدا نشد. 🔍\nممکن است در این فیلتر هیچ موردی نباشد؛ فیلتر را بازتر کن یا نام دیگری را امتحان کن.";
+      return "چیزی پیدا نشد. 🔍\nموردی با این مشخصات در سیستم ثبت نشده است.";
     }
     const shown = list.rows.slice(0, 5).map(rowToOneLine).join("\n");
     const count = list.total ?? list.rows.length;
@@ -184,10 +184,10 @@ export function fallbackAnswer(input: ExplainInput): string {
       const lines = entries.map(([key, value]) => `• ${key}: ${value === null ? "—" : String(value)}`);
       return `بفرما، اطلاعات این مورد را پیدا کردم:\n${lines.join("\n")}`;
     }
-    return "بفرما، کار با موفقیت انجام شد. ✅";
+    return "بفرما، عملیات با موفقیت انجام شد. ✅";
   }
 
-  return "بفرما، کار انجام شد. ✅";
+  return "بفرما، عملیات انجام شد. ✅";
 }
 
 const JARGON = /\b(endpoint|payload|json|api|http|status code|webhook|schema|uuid|query|request|response)\b/i;
@@ -304,18 +304,22 @@ export async function explain(input: ExplainInput): Promise<Explanation> {
 export function confirmationText(summaryFa: string, danger: string, permission: string): string {
   const risk =
     danger === "destructive"
-      ? "این کار پاک‌کردنی است و برگشتن ندارد."
-      : "این کار اطلاعات را تغییر می‌دهد.";
-  return [`می‌خواهم این کار را انجام دهم:`, `«${summaryFa}»`, risk, `دسترسی لازم: ${permission}`, "اجازه می‌دهی؟ (بله / نه)"].join("\n");
+      ? "⚠️ توجه: این عملیات اطلاعات را حذف می‌کند و قابل بازگشت نیست."
+      : "ℹ️ این عملیات اطلاعات ثبت‌شده در سیستم را تغییر می‌دهد.";
+  return [
+    "درخواست ثبت تغییرات:",
+    `«${summaryFa}»`,
+    risk,
+    `دسترسی لازم: ${permission}`,
+    "آیا این مورد تأیید است؟ (بله / نه)",
+  ].join("\n");
 }
 
 /** Used when the bot genuinely does not know what the user wants. */
 export function clarifyText(featureTitles: string[]): string {
   return [
-    "دقیقاً نفهمیدم چه کاری می‌خواهی. 🙂",
-    "می‌توانم این کارها را انجام دهم:",
+    "درخواست شما دقیقاً مشخص نبود. لطفاً بفرمایید کدام بخش را می‌خواهید بررسی کنیم: 🙂",
     ...featureTitles.map((title) => `• ${title}`),
-    "مثلاً بگو: «نوبت‌های امروز را نشان بده» یا «ساعت کاری شنبه را ببین».",
-    `اگر منظورت چیز دیگری بود، با کلمه‌های ${joinFa(["نوبت", "خدمت", "کاربر", "تنظیمات"])} شروع کن.`,
+    "برای نمونه می‌توانید بنویسید: «نوبت‌های امروز را نشان بده» یا «ساعت کاری شنبه‌ها».",
   ].join("\n");
 }
