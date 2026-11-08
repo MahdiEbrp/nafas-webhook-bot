@@ -26,6 +26,7 @@ export type ParsedCallback =
   | { kind: "help" }
   | { kind: "feature"; featureId: string }
   | { kind: "action"; actionId: string }
+  | { kind: "page"; actionId: string; page: number }
   | { kind: "confirm"; token: string; approve: boolean }
   | { kind: "unknown"; raw: string };
 
@@ -58,6 +59,10 @@ export function parseCallback(data: string): ParsedCallback {
   const [prefix, ...rest] = raw.split(":");
   const value = rest.join(":");
 
+  if (prefix === "p" && value) {
+    const parts = value.split(":");
+    return { kind: "page", actionId: parts[0] ?? "", page: Math.max(1, Number(parts[1] ?? 1)) };
+  }
   if (prefix === "f" && value) return { kind: "feature", featureId: value };
   if (prefix === "a" && value) return { kind: "action", actionId: value };
   if (prefix === "c" && value) return { kind: "confirm", token: value, approve: true };
@@ -72,12 +77,18 @@ export function suggestionsKeyboard(suggestions: Suggestion[], locale: Locale): 
   const buttons: Array<TelegramButton | null> = [];
 
   for (const suggestion of suggestions) {
-    if (suggestion.actionId) buttons.push(button(suggestion.label, `a:${suggestion.actionId}`));
-    else if (suggestion.command === "menu") buttons.push(button(suggestion.label, "m"));
-    else if (suggestion.command === "features") buttons.push(button(suggestion.label, "h"));
+    if (suggestion.page) {
+      buttons.push(button(suggestion.label, `p:${suggestion.page.actionId}:${suggestion.page.page}`));
+    } else if (suggestion.actionId) {
+      buttons.push(button(suggestion.label, `a:${suggestion.actionId}`));
+    } else if (suggestion.command === "menu") {
+      buttons.push(button(suggestion.label, "m"));
+    } else if (suggestion.command === "features") {
+      buttons.push(button(suggestion.label, "h"));
+    }
   }
 
-  const rows = grid(buttons);
+  const rows = grid(buttons, 2);
   return rows.length > 0 ? { inline_keyboard: rows } : undefined;
 }
 
@@ -122,10 +133,14 @@ export function featureKeyboard(featureId: string, locale: Locale): InlineKeyboa
   const feature = getFeature(featureId);
   if (!feature) return undefined;
 
-  const actions = feature.actions.filter((action) => action.danger === "read" && !action.path.includes(":id"));
-  const buttons: Array<TelegramButton | null> = actions.map((action) =>
-    button(`▫️ ${t(locale, action.fa, action.en)}`, `a:${action.id}`),
+  // Include reads and non-destructive writes (create, update) so staff can directly view or edit/create!
+  const actions = feature.actions.filter(
+    (action) => action.danger !== "destructive" && (!action.path.includes(":id") || action.id.endsWith(".update")),
   );
+  const buttons: Array<TelegramButton | null> = actions.map((action) => {
+    const prefix = action.id.endsWith(".update") ? "✏️ " : action.id.endsWith(".create") ? "➕ " : "▫️ ";
+    return button(`${prefix}${t(locale, action.fa, action.en)}`, `a:${action.id}`);
+  });
   buttons.push(button(t(locale, "⬅️ منو", "⬅️ Menu"), "m"));
 
   const rows = grid(buttons, 1);

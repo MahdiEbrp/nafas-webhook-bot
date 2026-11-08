@@ -125,6 +125,9 @@ function pickAllowed(action: FeatureAction, params: Record<string, unknown>): Re
     if (key.includes(".") || key.includes("[")) setDeep(out, key, cleaned);
     else out[key] = cleaned;
   }
+  if (typeof params._itemTitle === "string" && params._itemTitle) {
+    out._itemTitle = params._itemTitle;
+  }
   return out;
 }
 
@@ -135,16 +138,26 @@ function describe(action: FeatureAction, values: Record<string, unknown>): strin
     if (value !== undefined && value !== null && value !== "") bits.push(`${label}: ${String(value)}`);
   };
 
+  if (typeof values._itemTitle === "string" && values._itemTitle) {
+    bits.push(`مورد: ${values._itemTitle}`);
+  }
+
   push("نام", "fullName");
   push("تلفن", "phone");
   push("ایمیل", "email");
   push("وضعیت", "status");
-  push("قیمت", "price");
+  if (typeof values.price === "number") {
+    bits.push(`قیمت: ${values.price.toLocaleString("fa-IR")} تومان`);
+  } else if (values.price !== undefined && values.price !== null && values.price !== "") {
+    bits.push(`قیمت: ${String(values.price)}`);
+  }
   push("روز", "day");
   push("از ساعت", "opens");
   push("تا ساعت", "closes");
   push("ظرفیت", "capacity");
-  push("شناسه", "id");
+  if (!values._itemTitle) {
+    push("شناسه", "id");
+  }
   push("کلید", "key");
   push("نقش", "roleKey");
 
@@ -185,7 +198,7 @@ export function preparePlan(actionId: string, rawParams: Record<string, unknown>
     if (params[key] === undefined) missing.push(key);
   }
   for (const [key, value] of Object.entries(params)) {
-    if (key in pathParams) continue;
+    if (key in pathParams || key.startsWith("_")) continue;
     const root = key.split(/[.[]/)[0] as string;
     if ((requirements.query ?? []).includes(key)) continue;
     if (requirements.body && requirements.body.length > 0 && ![...requirements.body, ...(action.fields ?? [])].some((field) => field.split(/[.[]/)[0] === root)) {

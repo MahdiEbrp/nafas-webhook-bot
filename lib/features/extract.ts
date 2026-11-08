@@ -198,9 +198,11 @@ export function extractSlots(message: string): Extracted {
 }
 
 /** Keeps only the keys the chosen action can accept. */
-export function slotsForAction(message: string, allowedFields: string[] | undefined): Record<string, unknown> {
+export function slotsForAction(message: string, allowedFields?: string[]): Record<string, unknown> {
   const slots = extractSlots(message) as Record<string, unknown>;
-  const allowed = new Set((allowedFields ?? []).map((field) => field.split(/[.[]/)[0] as string));
+  if (!allowedFields) return slots;
+
+  const allowed = new Set(allowedFields.map((field) => field.split(/[.[]/)[0] as string));
   allowed.add("id");
 
   const out: Record<string, unknown> = {};

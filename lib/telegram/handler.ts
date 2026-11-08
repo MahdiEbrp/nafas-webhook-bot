@@ -17,6 +17,7 @@
 import { getConfig, type Locale } from "@/lib/config";
 import { handleChat, type ChatResult } from "@/lib/bot";
 import { featuresAnswer } from "@/lib/bot/features-answer";
+import { pickArray } from "@/lib/bot/explainer";
 import { getFeature } from "@/lib/features/manifest";
 import { logInfo, logWarn } from "@/lib/log";
 import { truncateAtSentence } from "@/lib/text";
@@ -45,7 +46,7 @@ import {
   setPending,
   verifyContact,
 } from "@/lib/telegram/identity";
-import { suggestNext, tipLine, type Suggestion } from "@/lib/telegram/suggest";
+import { defaultTip, suggestNext, tipLine, type Suggestion } from "@/lib/telegram/suggest";
 
 export type BridgeOutcome = {
   handled: boolean;
@@ -71,12 +72,9 @@ function sessionIdFor(chatId: number): string {
 
 const LOGIN_PROMPT: Record<"fa" | "en", string> = {
   fa: [
-    "برای اینکه مطمئن شوم واقعاً از کارمندان کلینیک هستی، یک کار کوچک لازم است. 🔐",
+    "همکار گرامی، جهت احراز هویت پرسنل کلینیک لطفاً روی دکمهٔ «📱 ارسال شمارهٔ من» ضربه بزنید. 🔐",
     "",
-    "دکمهٔ «📱 ارسال شمارهٔ من» را بزن. تلگرام شماره‌ای را می‌فرستد که خودش قبلاً با پیامک تأییدش کرده — یعنی همان شمارهٔ اصلی تو.",
-    "",
-    "بعد از آن، شماره‌ات را در فهرست کارمندان سایت کلینیک نگاه می‌کنم. اگر آنجا باشی، وارد می‌شوی.",
-    "هیچ رمزی لازم نیست.",
+    "شمارهٔ تلگرام شما با فهرست کارکنان سامانهٔ کلینیک بررسی می‌شود و پس از تأیید، بدون نیاز به رمز عبور وارد خواهید شد.",
   ].join("\n"),
   en: [
     "To confirm you are clinic staff, one small step is needed. 🔐",
@@ -90,27 +88,27 @@ const LOGIN_PROMPT: Record<"fa" | "en", string> = {
 const LOGIN_DENIED: Record<"fa" | "en", (reason: string) => string> = {
   fa: (reason) =>
     [
-      "نتوانستم شماره‌ات را قبول کنم. 🙏",
+      "امکان احراز هویت در سامانه فراهم نشد. 🙏",
       "",
-      `دلیل: ${reason}`,
+      `علت: ${reason}`,
       "",
-      "چه کار کنی:",
-      "• مطمئن شو شماره‌ات در بخش «کاربران» سایت کلینیک ثبت شده و فعال است.",
-      "• دوباره دکمهٔ ارسال شماره را بزن (بعضی‌ها شمارهٔ دیگری را فوروارد می‌کنند؛ باید شمارهٔ خودت باشد).",
-      "• اگر تازه اضافه شده‌ای، مدیر باید اول حسابت را فعال کند.",
+      "راهنما:",
+      "• بررسی کنید این شماره تماس در سامانهٔ پرسنل کلینیک ثبت و فعال باشد.",
+      "• جهت ورود حتماً از دکمهٔ «ارسال شمارهٔ من» استفاده فرمایید.",
+      "• در صورت نیاز، با مدیر سیستم جهت فعال‌سازی حساب کاربری هماهنگ کنید.",
     ].join("\n"),
   en: (reason) =>
     ["I could not verify your number. 🙏", "", `Reason: ${reason}`, "", "Check that your number is an active user in the clinic admin, then try again."].join("\n"),
 };
 
 const REASON_FA: Record<string, string> = {
-  "not-own-contact": "این شمارهٔ خودت نبود. حتماً از دکمهٔ «ارسال شمارهٔ من» استفاده کن، نه فوروارد کردن کارت کسی دیگر.",
-  "bad-phone": "شمارهٔ ارسالی معتبر نبود.",
-  "foreign-number": "این شماره ایرانی نیست. فعلاً فقط شماره‌های ایران (‎+98) پذیرفته می‌شوند.",
-  "phone-not-registered": "این شماره در فهرست کاربران کلینیک نیست.",
-  "user-inactive": "حساب تو غیرفعال است.",
-  "user-banned": "حساب تو مسدود شده است.",
-  "lookup-forbidden": "ربات اجازهٔ خواندن فهرست کاربران را ندارد؛ به مدیر بگو دسترسی users.read را بدهد.",
+  "not-own-contact": "شمارهٔ ارسالی متعلق به این حساب تلگرام نیست. لطفاً فقط از دکمهٔ «ارسال شمارهٔ من» استفاده کنید.",
+  "bad-phone": "شمارهٔ ارسالی معتبر نیست.",
+  "foreign-number": "فعلاً فقط شماره‌های ایران (‎+98) در سامانه پذیرفته می‌شوند.",
+  "phone-not-registered": "این شماره در فهرست کارکنان کلینیک ثبت نشده است.",
+  "user-inactive": "حساب کاربری شما در سامانهٔ کلینیک غیرفعال است.",
+  "user-banned": "حساب کاربری مسدود شده است.",
+  "lookup-forbidden": "حساب ربات مجوز دسترسی به فهرست کاربران (users.read) را ندارد؛ با مدیر سیستم هماهنگ کنید.",
 };
 
 function reasonFa(reason: string | undefined): string {
@@ -143,7 +141,7 @@ async function identityGate(input: {
       chatId: input.chatId,
       text: identity
         ? `وضعیت ورود: ${identity.status === "verified" ? "✅ تأییدشده" : "⛔ تأییدنشده"}\n${identitySummary(identity)}`
-        : "هنوز وارد نشده‌ای. دکمهٔ «📱 ارسال شمارهٔ من» را بزن.",
+        : "هنوز وارد نشده‌اید. لطفاً دکمهٔ «📱 ارسال شمارهٔ من» را بزنید.",
       removeKeyboard: true,
     });
     return { consumed: true };
@@ -153,7 +151,7 @@ async function identityGate(input: {
     clearIdentity(input.chatId);
     await sendMessage({
       chatId: input.chatId,
-      text: input.locale === "en" ? "You are signed out." : "از حساب خارج شدی. هر وقت خواستی دوباره شماره‌ات را بفرست.",
+      text: input.locale === "en" ? "You are signed out." : "از حساب کاربری خارج شدید. هر زمان مایل بودید، می‌توانید مجدداً شماره‌تان را ارسال کنید.",
       removeKeyboard: true,
     });
     return { consumed: true };
@@ -173,7 +171,7 @@ async function identityGate(input: {
       text:
         input.locale === "en"
           ? "Please share your phone number using the button below to sign in."
-          : "هنوز شماره‌ات را نفرستاده‌ای؛ لطفاً دکمهٔ «📱 ارسال شمارهٔ من» در پایین صفحه را لمس کن تا وارد شوی.",
+          : "هنوز شماره‌تان را ارسال نکرده‌اید؛ لطفاً دکمهٔ «📱 ارسال شمارهٔ من» در پایین صفحه را بزنید تا وارد شوید.",
     });
     return { consumed: true };
   }
@@ -186,14 +184,14 @@ async function identityGate(input: {
       if (!pendingText) {
         await sendMessage({
           chatId: input.chatId,
-          text: `خوش آمدی ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}\n\nحالا هر چه می‌خواهی بپرس، یا از منو انتخاب کن.`,
+          text: `خوش آمدید ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}\n\nمی‌توانید درخواست خود را بفرمایید یا از منو انتخاب کنید.`,
           keyboard: menuKeyboard(input.locale),
           removeKeyboard: true,
         });
       } else {
         await sendMessage({
           chatId: input.chatId,
-          text: `خوش آمدی ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}`,
+          text: `خوش آمدید ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}`,
           removeKeyboard: true,
         });
       }
@@ -236,16 +234,16 @@ function welcomeText(locale: Locale, botName?: string): string {
   }
 
   return [
-    `سلام${botName ? ` ${botName}` : ""}! 👋`,
-    "من دستیار کلینیک هستم.",
+    `سلام${botName ? ` ${botName}` : ""}! وقت بخیر 👋`,
+    "من دستیار کلینیک هستم و برای بررسی و مدیریت نوبت‌ها، خدمات، ساعات کاری، پرسنل و تنظیمات در خدمت شما هستم.",
     "",
-    "هر چه می‌خواهی با زبان خودت بنویس؛ مثلاً:",
+    "می‌توانید درخواست خود را محاوره‌ای بنویسید یا از گزینه‌های زیر استفاده کنید:",
     "• نوبت‌های امروز رو نشون بده",
     "• ساعت کاری شنبه‌ها چیه؟",
     "• خدمات فعال رو لیست کن",
     "",
-    "همه‌چیز را ساده توضیح می‌دهم و هیچ‌وقت بدون اجازهٔ تو چیزی را تغییر نمی‌دهم.",
-    "از دکمه‌های زیر استفاده کن، یا خودت بنویس.",
+    "پاسخ‌ها سریع و مشخص ارائه می‌شوند و هیچ تغییری بدون تأیید شما ثبت نمی‌شود.",
+    "می‌توانید از منو و دکمه‌های زیر هم استفاده کنید.",
   ].join("\n");
 }
 
@@ -281,14 +279,41 @@ async function keyboardFor(
     hadError: result.status === "error",
   });
 
+  const list = [...suggestion.suggestions];
+
+  // If this was a list action and has multiple pages, add pagination controls
+  if (result.actionId?.endsWith(".list") && result.result?.data) {
+    const listData = pickArray(result.result.data);
+    if (listData && listData.total && listData.total > listData.perPage) {
+      const currentPage = listData.page ?? 1;
+      const totalPages = Math.ceil(listData.total / listData.perPage);
+      const paginationButtons: Suggestion[] = [];
+
+      if (currentPage < totalPages) {
+        paginationButtons.push({
+          label: input.locale === "en" ? `📄 Next page (${currentPage + 1}) ➡️` : `📄 صفحهٔ بعد (${currentPage + 1}) ➡️`,
+          page: { actionId: result.actionId, page: currentPage + 1 },
+        });
+      }
+      if (currentPage > 1) {
+        paginationButtons.push({
+          label: input.locale === "en" ? `⬅️ Prev page (${currentPage - 1})` : `⬅️ صفحهٔ قبل (${currentPage - 1})`,
+          page: { actionId: result.actionId, page: currentPage - 1 },
+        });
+      }
+
+      list.unshift(...paginationButtons);
+    }
+  }
+
   // When the bot is asking questions, fewer buttons = less confusion.
-  const list = result.status === "needs_info" ? suggestion.suggestions.slice(0, 3) : suggestion.suggestions;
+  const finalList = result.status === "needs_info" ? list.slice(0, 3) : list.slice(0, 5);
 
   return {
-    keyboard: suggestionsKeyboard(list, input.locale),
-    tip: suggestion.tip,
+    keyboard: suggestionsKeyboard(finalList, input.locale),
+    tip: suggestion.tip || defaultTip(result.actionId),
     engine: suggestion.engine,
-    count: list.length,
+    count: finalList.length,
   };
 }
 
@@ -355,7 +380,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
       await answerCallbackQuery({ callbackQueryId: query.id });
       await sendMessage({
         chatId,
-        text: locale === "en" ? "What should I work on?" : "روی کدام بخش کار کنم؟ 👇",
+        text: locale === "en" ? "What should I work on?" : "لطفاً بخش مورد نظر خود را انتخاب کنید: 👇",
         keyboard: menuKeyboard(locale),
       });
       return { handled: true, chatId, status: "menu" };
@@ -380,6 +405,35 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         keyboard: featureKeyboard(feature.id, locale) ?? menuKeyboard(locale),
       });
       return { handled: true, chatId, status: "feature" };
+    }
+
+    if (parsed.kind === "page") {
+      await answerCallbackQuery({ callbackQueryId: query.id, text: `صفحهٔ ${parsed.page}` });
+      sendTyping(chatId);
+
+      let result: ChatResult;
+      try {
+        result = await handleChat({
+          message: `صفحه ${parsed.page}`,
+          sessionId,
+          locale,
+          direct: { actionId: parsed.actionId, params: { page: parsed.page } },
+        });
+      } catch (error) {
+        logWarn("telegram.handle_failed", { message: error instanceof Error ? error.message : "unknown" });
+        await sendMessage({ chatId, text: errorMessage(locale), keyboard: menuKeyboard(locale) });
+        return { handled: true, chatId, status: "error", reason: "exception" };
+      }
+
+      const ui = await keyboardFor(result, { userMessage: `صفحه ${parsed.page}`, locale });
+      await sendMessage({
+        chatId,
+        text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
+        keyboard: ui.keyboard,
+      });
+
+      logInfo("telegram.page", { chatId, actionId: result.actionId, page: parsed.page, status: result.status });
+      return { handled: true, chatId, status: result.status, actionId: result.actionId, suggestions: ui.count };
     }
 
     if (parsed.kind === "unknown" || parsed.kind === "action" || parsed.kind === "confirm") {

@@ -24,6 +24,8 @@ export type Suggestion = {
   actionId?: string;
   /** OR a built-in command: menu | features | cancel */
   command?: "menu" | "features" | "cancel";
+  /** pagination command */
+  page?: { actionId: string; page: number };
   /** why the bot offers this (shown as a hint line) */
   reason?: string;
 };
@@ -50,13 +52,12 @@ export function ensureQuestion(label: string, locale: Locale): string {
   return trimmed;
 }
 
-/** Only read-ish, non-destructive actions may become buttons. */
+/** Non-destructive actions (reads and writes) may become buttons. Destructive actions (delete) are excluded. */
 function isSuggestable(actionId: string): boolean {
   const found = getAction(actionId);
   if (!found) return false;
-  if (found.action.danger !== "read") return false;
-  // "get one by id" makes a poor button: the user has no id to give.
-  return !found.action.path.includes(":id");
+  if (found.action.danger === "destructive") return false;
+  return true;
 }
 
 /**
@@ -79,24 +80,67 @@ function isUsefulTip(tip: string): boolean {
   return !BUTTON_FILLER.some((pattern) => pattern.test(trimmed));
 }
 
+export function defaultTip(actionId?: string | null): string {
+  if (!actionId) return "";
+  if (actionId.startsWith("services")) {
+    return "برای تغییر قیمت یا مشخصات هر مورد، کافیست نام یا شمارهٔ آن را بنویسید (مثلاً: «قیمت دی می رو ۷ میلیون کن» یا «شماره ۱ رو غیرفعال کن»).";
+  }
+  if (actionId.startsWith("bookings")) {
+    return "برای تغییر هر نوبت، کافیست نام یا شمارهٔ آن را بگویید (مثلاً: «نوبت مریم رو انجام‌شده کن» یا «شماره ۲ رو لغو کن»).";
+  }
+  if (actionId.startsWith("working-hours")) {
+    return "برای تغییر ساعت یا ظرفیت هر روز، کافیست بنویسید (مثلاً: «ساعت شنبه از ۹ تا ۱۹ باشه»).";
+  }
+  return "";
+}
+
 /* ───────────────────────── deterministic fallback ───────────────────── */
 
 const FOLLOW_UPS: Record<string, Suggestion[]> = {
   bookings: [
-    { label: "📋 نوبت‌ها رو ببینم؟", actionId: "bookings.list" },
+    { label: "✏️ تغییر وضعیت نوبت؟", actionId: "bookings.update" },
+    { label: "➕ ثبت نوبت جدید؟", actionId: "bookings.create" },
+    { label: "📋 همهٔ نوبت‌ها؟", actionId: "bookings.list" },
   ],
   services: [
-    { label: "🛍 لیست خدمات رو ببینم؟", actionId: "services.list" },
+    { label: "✏️ ویرایش قیمت یا خدمت؟", actionId: "services.update" },
+    { label: "➕ ثبت خدمت جدید؟", actionId: "services.create" },
+    { label: "🛍 لیست کامل خدمات؟", actionId: "services.list" },
     { label: "🗂 دسته‌بندی‌ها رو چک کنم؟", actionId: "service-categories.list" },
   ],
-  "working-hours": [{ label: "🕘 ساعت‌های کاری رو ببینم؟", actionId: "working-hours.list" }],
-  users: [{ label: "👥 کاربران رو ببینم؟", actionId: "users.list" }],
-  settings: [{ label: "⚙️ تنظیمات رو چک کنم؟", actionId: "settings.list" }],
-  rules: [{ label: "📜 قوانین رو ببینم؟", actionId: "rules.list" }],
-  "care-guides": [{ label: "💚 راهنمای مراقبت رو ببینم؟", actionId: "care-guides.list" }],
-  "care-guide-items": [{ label: "📝 آیتم‌های راهنما رو ببینم؟", actionId: "care-guide-items.list" }],
-  "service-categories": [{ label: "🗂 دسته‌بندی‌ها رو چک کنم؟", actionId: "service-categories.list" }],
-  "service-groups": [{ label: "📦 گروه‌های خدمات رو ببینم؟", actionId: "service-groups.list" }],
+  "working-hours": [
+    { label: "✏️ تغییر ساعت یا ظرفیت؟", actionId: "working-hours.update" },
+    { label: "➕ ثبت شیفت جدید؟", actionId: "working-hours.create" },
+    { label: "🕘 ساعت‌های کاری؟", actionId: "working-hours.list" },
+  ],
+  users: [
+    { label: "➕ ثبت کاربر جدید؟", actionId: "users.create" },
+    { label: "👥 لیست کاربران؟", actionId: "users.list" },
+  ],
+  settings: [
+    { label: "✏️ تغییر تنظیمات؟", actionId: "settings.update" },
+    { label: "⚙️ لیست تنظیمات؟", actionId: "settings.list" },
+  ],
+  rules: [
+    { label: "➕ ثبت قانون جدید؟", actionId: "rules.create" },
+    { label: "📜 قوانین کلینیک؟", actionId: "rules.list" },
+  ],
+  "care-guides": [
+    { label: "➕ ثبت راهنمای مراقبت؟", actionId: "care-guides.create" },
+    { label: "💚 راهنماهای مراقبت؟", actionId: "care-guides.list" },
+  ],
+  "care-guide-items": [
+    { label: "➕ ثبت آیتم راهنما؟", actionId: "care-guide-items.create" },
+    { label: "📝 آیتم‌های راهنما؟", actionId: "care-guide-items.list" },
+  ],
+  "service-categories": [
+    { label: "➕ ثبت دسته‌بندی؟", actionId: "service-categories.create" },
+    { label: "🗂 لیست دسته‌بندی‌ها؟", actionId: "service-categories.list" },
+  ],
+  "service-groups": [
+    { label: "➕ ثبت گروه خدمات؟", actionId: "service-groups.create" },
+    { label: "📦 گروه‌های خدمات؟", actionId: "service-groups.list" },
+  ],
 };
 
 export function fallbackSuggestions(context: { actionId?: string | null; locale: Locale; hadError?: boolean }): Suggestion[] {
@@ -149,26 +193,26 @@ export function fallbackSuggestions(context: { actionId?: string | null; locale:
 /* ────────────────────────────── AI version ──────────────────────────── */
 
 const SYSTEM_FA = `تو کمک می‌کنی کاربرِ یک ربات اداری کلینیک، قدم بعدی را انتخاب کند.
-بر اساس «آنچه کاربر گفت» و «نتیجه‌ای که گرفت»، حداکثر ۳ دکمهٔ مفید پیشنهاد بده.
+بر اساس «آنچه کاربر گفت» و «نتیجه‌ای که گرفت»، حداکثر ۳ دکمهٔ مفید پیشنهاد بده (هم مشاهده و هم ویرایش/ثبت مجاز است).
 
 قواعد:
-1. فقط JSON برگردان: {"suggestions":[{"label":"...","actionId":"..."}],"tip":"یک جملهٔ کوتاه"}
-2. actionId باید دقیقاً از این فهرست باشد و فقط اکشن‌های خواندن (read) مجازند:
+1. فقط JSON برگردان: {"suggestions":[{"label":"...","actionId":"..."}],"tip":"یک راهنمای کوتاه"}
+2. actionId باید دقیقاً از این فهرست باشد:
 {FIELDS}
 3. label باید حتماً به صورت سؤالی/پرسشی باشد (با علامت سؤال ؟ در آخر)، محاوره‌ای، کوتاه (حداکثر ۴ کلمه) و با یک ایموجی در اول؛ انگار دستیار از کاربر می‌پرسد «می‌خواهی این کار را بکنم؟».
 مثال‌ها:
+- "✏️ ویرایش قیمت یا خدمت؟"
+- "➕ ثبت خدمت جدید؟"
 - "📋 نوبت‌ها رو ببینم؟"
 - "🕘 ساعت کاری رو چک کنم؟"
-- "🛍 خدمات رو بررسی کنم؟"
-- "👥 لیست کاربران رو بیاورم؟"
-4. هیچ پیشنهاد حذف/تغییر نده. هیچ actionId از خودت نساز.
+4. اکشن‌های مخرب مانند حذف (delete) پیشنهاد نده. هیچ actionId از خودت نساز.
 5. اگر پیشنهاد خوبی نداری، آرایهٔ خالی بده.
-6. tip: اگر نکتهٔ مفیدی داری بگو، وگرنه رشتهٔ خالی.`;
+6. tip: یک راهنمای کوتاه و کاربردی به پرسنل کلینیک بده (مثلاً: «برای ویرایش قیمت کافیست بنویسید: قیمت دی می رو ۷ میلیون کن»)، یا خالی بگذار.`;
 
 const SYSTEM_EN = `Suggest up to 3 useful next-step buttons for a clinic admin bot.
 Reply with JSON only: {"suggestions":[{"label":"...","actionId":"..."}],"tip":""}
-actionId must be one of these read-only actions: {FIELDS}
-Write labels as short, friendly questions ending with '?' (e.g. "📋 View bookings?", "🕘 Check hours?"). One emoji at the start. Never suggest deletes or edits.`;
+actionId must be one of these actions: {FIELDS}
+Write labels as short, friendly questions ending with '?' (e.g. "✏️ Edit service?", "➕ Add booking?", "📋 View bookings?"). One emoji at the start. Never suggest deletes.`;
 
 export function suggestableActionIds(): string[] {
   return FEATURES.flatMap((feature) => feature.actions)
@@ -185,10 +229,11 @@ export async function suggestNext(input: {
   hadError?: boolean;
 }): Promise<{ suggestions: Suggestion[]; tip: string; engine: "ai" | "fallback" }> {
   const fallback = fallbackSuggestions({ actionId: input.actionId, locale: input.locale, hadError: input.hadError });
+  const fallbackTip = defaultTip(input.actionId);
 
   // Never spend a model call on an obvious dead end.
   if (!getConfig().openrouterApiKey) {
-    return { suggestions: fallback, tip: "", engine: "fallback" };
+    return { suggestions: fallback, tip: fallbackTip, engine: "fallback" };
   }
 
   const system = (input.locale === "en" ? SYSTEM_EN : SYSTEM_FA).replace("{FIELDS}", suggestableActionIds().join(", "));
@@ -226,7 +271,7 @@ export async function suggestNext(input: {
     }
 
     if (cleaned.length === 0) {
-      return { suggestions: fallback, tip: "", engine: "fallback" };
+      return { suggestions: fallback, tip: fallbackTip, engine: "fallback" };
     }
 
     // Always leave the user a way home.
@@ -241,7 +286,7 @@ export async function suggestNext(input: {
     return { suggestions: cleaned.slice(0, MAX_SUGGESTIONS), tip: isUsefulTip(rawTip) ? rawTip : "", engine: "ai" };
   } catch (error) {
     logWarn("telegram.suggest_fallback", { message: error instanceof Error ? error.message : "unknown" });
-    return { suggestions: fallback, tip: "", engine: "fallback" };
+    return { suggestions: fallback, tip: fallbackTip, engine: "fallback" };
   }
 }
 
