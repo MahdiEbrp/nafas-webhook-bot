@@ -1437,6 +1437,46 @@ async function main(): Promise<void> {
     assert(elapsed < 200, `button click must be fast (<200ms), took ${elapsed}ms`);
   });
 
+  await test("پیش‌بارگذاری منوها (Menu Prefetch): به محض لود منو، اکشن‌های بعدی فچ شده و کلیک از کش خوانده می‌شود", async () => {
+    clearCacheForTesting();
+    calls.length = 0;
+
+    // 1. User opens the main menu
+    const menuOutcome = await handleTelegramUpdate({
+      update_id: 1002,
+      callback_query: {
+        id: "cb-menu-1",
+        from: { id: 777, is_bot: false, first_name: "نازنین" },
+        data: "m",
+        message: { message_id: 102, chat: { id: 777, type: "private" }, date: 0 },
+      },
+    });
+    assertEqual(menuOutcome.status, "menu", "menu shown");
+
+    // Wait microtask tick for prefetch promises
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Calls for bookings.list should have been made during menu load
+    const bookingsCallCount = calls.filter((c) => c.url.includes("/bookings")).length;
+    assert(bookingsCallCount > 0, "bookings.list was prefetched in background on menu load");
+
+    // 2. User clicks "مشاهده نوبت‌ها" (bookings.list)
+    const bookingsCallsBefore = calls.filter((c) => c.url.includes("/bookings")).length;
+    const clickOutcome = await handleTelegramUpdate({
+      update_id: 1003,
+      callback_query: {
+        id: "cb-click-bookings",
+        from: { id: 777, is_bot: false, first_name: "نازنین" },
+        data: "a:bookings.list",
+        message: { message_id: 103, chat: { id: 777, type: "private" }, date: 0 },
+      },
+    });
+
+    assertEqual(clickOutcome.status, "done", "click outcome done");
+    const bookingsCallsAfter = calls.filter((c) => c.url.includes("/bookings")).length;
+    assertEqual(bookingsCallsAfter, bookingsCallsBefore, "no new HTTP call for bookings because it hit cache directly");
+  });
+
   console.log(`\n${failures.length === 0 ? "🎉" : "⚠️"}  ${passed} passed, ${failures.length} failed\n`);
   if (failures.length > 0) {
     for (const failure of failures) console.log(`  • ${failure}`);

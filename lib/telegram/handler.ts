@@ -21,7 +21,7 @@ import { pickArray } from "@/lib/bot/explainer";
 import { getFeature } from "@/lib/features/manifest";
 import { logInfo, logWarn } from "@/lib/log";
 import { truncateAtSentence } from "@/lib/text";
-import { prefetchPredictedActions } from "@/lib/bot/cache";
+import { prefetchPredictedActions, prefetchMenuActions } from "@/lib/bot/cache";
 import { getActiveEdit } from "@/lib/bot/session";
 import { getEditableFields } from "@/lib/bot/editing";
 import {
@@ -185,6 +185,7 @@ async function identityGate(input: {
     const identity = await verifyContact({ chatId: input.chatId, fromId: input.fromId, contact: input.contact });
     if (identity.status === "verified") {
       if (!pendingText) {
+        void prefetchMenuActions("main");
         await sendMessage({
           chatId: input.chatId,
           text: `خوش آمدید ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}\n\nمی‌توانید درخواست خود را بفرمایید یا از منو انتخاب کنید.`,
@@ -436,7 +437,8 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
 
     // Pure navigation: no AI, no HTTP, instant.
     if (parsed.kind === "menu") {
-      await answerCallbackQuery({ callbackQueryId: query.id });
+      void answerCallbackQuery({ callbackQueryId: query.id });
+      void prefetchMenuActions("main");
       await sendMessage({
         chatId,
         text: locale === "en" ? "What should I work on?" : "لطفاً بخش مورد نظر خود را انتخاب کنید: 👇",
@@ -446,18 +448,19 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     }
 
     if (parsed.kind === "help") {
-      await answerCallbackQuery({ callbackQueryId: query.id });
+      void answerCallbackQuery({ callbackQueryId: query.id });
       await sendMessage({ chatId, text: featuresAnswer(locale), keyboard: menuKeyboard(locale) });
       return { handled: true, chatId, status: "help" };
     }
 
     if (parsed.kind === "feature") {
       const feature = getFeature(parsed.featureId);
-      await answerCallbackQuery({ callbackQueryId: query.id });
+      void answerCallbackQuery({ callbackQueryId: query.id });
       if (!feature) {
         await sendMessage({ chatId, text: locale === "en" ? "Unknown section." : "این بخش را نمی‌شناسم.", keyboard: menuKeyboard(locale) });
         return { handled: true, chatId, status: "unknown-feature" };
       }
+      void prefetchMenuActions(feature.id);
       await sendMessage({
         chatId,
         text: `${feature.titleFa}\n\n${feature.kid}`,
@@ -581,6 +584,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const firstName = message.from?.first_name;
 
   if (/^\/(start|menu)\b/.test(text)) {
+    void prefetchMenuActions("main");
     await sendMessage({
       chatId,
       text: welcomeText(locale, firstName),
