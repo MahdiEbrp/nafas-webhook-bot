@@ -1,0 +1,32 @@
+name: Live read-only checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-readonly
+  cancel-in-progress: false
+
+jobs:
+  live-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: live-readonly
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # No npm install or third-party runtime dependencies are needed.
+      - name: Test users read access, synthetic search and Liquid completion
+        run: node scripts/live-readonly.mjs
+        env:
+          WEBHOOK_BASE_URL: ${{ secrets.WEBHOOK_BASE_URL }}
+          WEBHOOK_USERNAME: ${{ secrets.WEBHOOK_USERNAME }}
+          WEBHOOK_PASSWORD: ${{ secrets.WEBHOOK_PASSWORD }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
