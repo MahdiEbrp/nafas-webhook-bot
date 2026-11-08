@@ -155,6 +155,20 @@ async function identityGate(input: {
 
   if (!requireIdentity || isVerified(input.chatId)) return false;
 
+  // Already waiting on a contact share (or a previous check) → don't nag again.
+  // The user asked: "keep asking the phone number check only once".
+  const existing = input.contact ? undefined : getIdentity(input.chatId);
+  if (existing?.status === "pending") {
+    await sendMessage({
+      chatId: input.chatId,
+      text:
+        input.locale === "en"
+          ? "Your number was already sent — I’m checking it now."
+          : "شمارهٔ تو از قبل فرستادتی و در حال بررسی است.",
+    });
+    return true;
+  }
+
   // A shared contact → try to verify.
   if (input.contact) {
     const identity = await verifyContact({ chatId: input.chatId, fromId: input.fromId, contact: input.contact });
