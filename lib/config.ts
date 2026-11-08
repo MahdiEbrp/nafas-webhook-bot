@@ -117,7 +117,7 @@ export function getConfig(): AppConfig {
     webhookPassword: process.env.WEBHOOK_PASSWORD ?? "",
     openrouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
     modelChain: safeChain,
-    modelTimeoutMs: int(process.env.MODEL_TIMEOUT_MS, 45_000),
+    modelTimeoutMs: int(process.env.MODEL_TIMEOUT_MS, 15_000),
     modelRetries: int(process.env.MODEL_RETRIES, 2),
     botApiKey: process.env.BOT_API_KEY?.trim() || null,
     chatRateLimit: {

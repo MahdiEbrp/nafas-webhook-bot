@@ -1417,6 +1417,26 @@ async function main(): Promise<void> {
     }
   });
 
+  await test("کلیک دکمه‌های تلگرام آنی (بدون معطلی برای هوش مصنوعی) است", async () => {
+    tgCalls.length = 0;
+    calls.length = 0;
+
+    const started = Date.now();
+    const outcome = await handleTelegramUpdate({
+      update_id: 1001,
+      callback_query: {
+        id: "cb-fast-1",
+        from: { id: 777, is_bot: false, first_name: "نازنین" },
+        data: "a:services.list",
+        message: { message_id: 101, chat: { id: 777, type: "private" }, date: 0 },
+      },
+    });
+    const elapsed = Date.now() - started;
+
+    assertEqual(outcome.status, "done", "status is done");
+    assert(elapsed < 200, `button click must be fast (<200ms), took ${elapsed}ms`);
+  });
+
   console.log(`\n${failures.length === 0 ? "🎉" : "⚠️"}  ${passed} passed, ${failures.length} failed\n`);
   if (failures.length > 0) {
     for (const failure of failures) console.log(`  • ${failure}`);

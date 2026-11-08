@@ -229,12 +229,13 @@ export async function suggestNext(input: {
   replyPreview: string;
   locale: Locale;
   hadError?: boolean;
+  fast?: boolean;
 }): Promise<{ suggestions: Suggestion[]; tip: string; engine: "ai" | "fallback" }> {
   const fallback = fallbackSuggestions({ actionId: input.actionId, locale: input.locale, hadError: input.hadError });
   const fallbackTip = defaultTip(input.actionId);
 
-  // Never spend a model call on an obvious dead end.
-  if (!getConfig().openrouterApiKey) {
+  // Fast mode: immediately return deterministic suggestions in 0ms without waiting for OpenRouter
+  if (input.fast || !getConfig().openrouterApiKey) {
     return { suggestions: fallback, tip: fallbackTip, engine: "fallback" };
   }
 
@@ -247,7 +248,11 @@ export async function suggestNext(input: {
   ].join("\n");
 
   try {
-    const result = await complete({
+    // 1500ms cap on suggestions so AI never delays responses by 5-7 seconds
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("suggest_timeout")), 1500),
+    );
+    const modelPromise = complete({
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -256,6 +261,7 @@ export async function suggestNext(input: {
       temperature: 0.3,
       maxTokens: 300,
     });
+    const result = await Promise.race([modelPromise, timeoutPromise]);
 
     const parsed = parseJsonLoose<{ suggestions?: unknown[]; tip?: unknown }>(result.content);
     const raw = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];

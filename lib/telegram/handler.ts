@@ -267,7 +267,7 @@ function errorMessage(locale: Locale): string {
 /** The one place that decides which keyboard follows which answer. */
 async function keyboardFor(
   result: ChatResult,
-  input: { userMessage: string; locale: Locale; sessionId?: string },
+  input: { userMessage: string; locale: Locale; sessionId?: string; fast?: boolean },
 ): Promise<{ keyboard: InlineKeyboard | undefined; tip: string; engine: "ai" | "fallback" | "none"; count: number }> {
   // A write is waiting: the only sensible buttons are yes/no.
   if (result.status === "needs_confirmation" && result.confirmation?.token) {
@@ -301,6 +301,7 @@ async function keyboardFor(
     replyPreview: result.reply,
     locale: input.locale,
     hadError: result.status === "error",
+    fast: input.fast,
   });
 
   const list = [...suggestion.suggestions];
@@ -465,8 +466,13 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
       return { handled: true, chatId, status: "feature" };
     }
 
+    if (parsed.kind === "text") {
+      void answerCallbackQuery({ callbackQueryId: query.id, text: parsed.text });
+      return await processTextMessage({ chatId, text: parsed.text, locale });
+    }
+
     if (parsed.kind === "page") {
-      await answerCallbackQuery({ callbackQueryId: query.id, text: `صفحهٔ ${parsed.page}` });
+      void answerCallbackQuery({ callbackQueryId: query.id, text: `صفحهٔ ${parsed.page}` });
       sendTyping(chatId);
 
       let result: ChatResult;
@@ -483,7 +489,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         return { handled: true, chatId, status: "error", reason: "exception" };
       }
 
-      const ui = await keyboardFor(result, { userMessage: `صفحه ${parsed.page}`, locale, sessionId });
+      const ui = await keyboardFor(result, { userMessage: `صفحه ${parsed.page}`, locale, sessionId, fast: true });
       await sendMessage({
         chatId,
         text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
@@ -504,7 +510,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
               : "لغو"
             : "دکمهٔ ناشناس";
 
-      await answerCallbackQuery({ callbackQueryId: query.id, text: label });
+      void answerCallbackQuery({ callbackQueryId: query.id, text: label });
       sendTyping(chatId);
 
       let result: ChatResult;
@@ -521,7 +527,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         return { handled: true, chatId, status: "error", reason: "exception" };
       }
 
-      const ui = await keyboardFor(result, { userMessage: label, locale, sessionId });
+      const ui = await keyboardFor(result, { userMessage: label, locale, sessionId, fast: true });
       await sendMessage({
         chatId,
         text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
