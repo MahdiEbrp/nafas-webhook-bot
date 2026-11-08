@@ -123,7 +123,15 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     const payload = url.includes("bookings")
       ? { items: [{ id: "11111111-1111-4111-8111-111111111111", fullName: "مریم رضایی", phone: "09121234567", status: "paid" }], total: 1 }
-      : { id: "11111111-1111-4111-8111-111111111111", created: true };
+      : url.includes("working-hours") && method === "GET"
+        ? {
+            items: [
+              { id: "44444444-4444-4444-8444-444444444444", day: "Saturday", opens: "09:00", closes: "18:00", capacity: 4, isActive: true },
+              { id: "55555555-5555-4555-8555-555555555555", day: "Monday", opens: "10:00", closes: "16:00", capacity: 2, isActive: true },
+            ],
+            total: 2,
+          }
+        : { id: "11111111-1111-4111-8111-111111111111", created: true };
     return new Response(JSON.stringify({ ok: true, data: payload }), {
       status: method === "POST" ? 201 : 200,
       headers: { "Content-Type": "application/json" },
@@ -229,6 +237,16 @@ async function main(): Promise<void> {
     assertEqual(extractSlots("قیمت خدمت لیزر رو ۲ میلیون کن").price, 2000000, "price");
     assertEqual(extractSlots("نوبت‌های پرداخت‌نشده رو نشون بده").status, "pending", "status");
     assertEqual(extractSlots("ظرفیت ساعت ۱۰ رو ۵ نفر کن").capacity, 5, "capacity (not the clock)");
+    // تفکیک دقیق تمام روزهای هفته
+    assertEqual(extractSlots("ساعات کاری شنبه ها چیه").day, "Saturday", "Saturday");
+    assertEqual(extractSlots("ساعت کاری یکشنبه چیه").day, "Sunday", "Sunday");
+    assertEqual(extractSlots("ساعت کاری دوشنبه ها").day, "Monday", "Monday");
+    assertEqual(extractSlots("ساعت کاری سه شنبه").day, "Tuesday", "Tuesday");
+    assertEqual(extractSlots("ساعت کاری سه‌شنبه").day, "Tuesday", "Tuesday (with zwnj)");
+    assertEqual(extractSlots("ساعت کاری چهارشنبه").day, "Wednesday", "Wednesday");
+    assertEqual(extractSlots("ساعت کاری پنجشنبه").day, "Thursday", "Thursday");
+    assertEqual(extractSlots("ساعت کاری پنج‌شنبه").day, "Thursday", "Thursday (with zwnj)");
+    assertEqual(extractSlots("ساعات کاری جمعه").day, "Friday", "Friday");
     // a uuid must never be mistaken for a price
     assertEqual(extractSlots("نوبت 22222222-2222-4222-8222-222222222222").price, undefined, "no price from uuid");
   });
@@ -606,14 +624,29 @@ async function main(): Promise<void> {
     resetSessionsForTesting();
 
     const result = await handleChat({ message: "ساعت کاری شنبه‌ها رو نشون بده", sessionId: "s7", locale: "fa" });
-    plannerShouldFail = false;
-    explainerShouldFail = false;
 
     assertEqual(result.trace.planner, "router", "planner engine");
     assertEqual(result.trace.writer, "fallback", "writer engine");
     assert(result.trace.notice?.includes("کلمات کلیدی"), `notice: ${result.trace.notice}`);
     assertEqual(result.status, "done", `status (${result.reply})`);
     assertEqual(result.actionId, "working-hours.list", "actionId");
+    // پاسخ فقط باید شامل ساعت کاری شنبه باشد و روزهای دیگر را لیست نکند
+    assert(result.reply.includes("روزهای شنبه"), "includes Saturday");
+    assert(result.reply.includes("09:00"), "includes opens time");
+    assert(!result.reply.includes("روزهای دوشنبه"), "does not list Monday");
+    assert(!result.reply.includes("۲ مورد پیدا کردم"), "does not treat as full list dump");
+
+    // پرسیدن دربارهٔ دوشنبه فقط دوشنبه را می‌دهد
+    const monResult = await handleChat({ message: "ساعات کاری دوشنبه چیه", sessionId: "s7-mon", locale: "fa" });
+    assert(monResult.reply.includes("روزهای دوشنبه"), "includes Monday");
+    assert(!monResult.reply.includes("روزهای شنبه"), "does not include Saturday");
+
+    // پرسیدن دربارهٔ روزی که ساعت کاری ندارد
+    const friResult = await handleChat({ message: "ساعت کاری جمعه چیه؟", sessionId: "s7-fri", locale: "fa" });
+    assert(friResult.reply.includes("ثبت نشده"), "indicates no working hours for Friday");
+
+    plannerShouldFail = false;
+    explainerShouldFail = false;
   });
 
   await test("کاملاً بدون مدل: حذف با uuid → تأیید → DELETE واقعی", async () => {

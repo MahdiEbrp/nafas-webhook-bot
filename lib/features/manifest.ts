@@ -155,7 +155,7 @@ export const FEATURES: Feature[] = [
         ...read("working-hours.list", "/api/v1/webhooks/working-hours", "appointments.read"),
         fa: "دیدن لیست ساعت‌های کاری",
         en: "list working hours",
-        fields: ["page", "perPage", "search", "status"],
+        fields: ["page", "perPage", "search", "status", "day"],
       },
       {
         ...read("working-hours.get", "/api/v1/webhooks/working-hours/:id", "appointments.read"),

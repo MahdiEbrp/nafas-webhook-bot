@@ -110,10 +110,12 @@ function paginate(items, url) {
   const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get("perPage") || 20)));
   const search = (url.searchParams.get("search") || "").toLowerCase();
   const status = url.searchParams.get("status") || "all";
+  const day = (url.searchParams.get("day") || "").toLowerCase();
 
   let rows = items;
   if (search) rows = rows.filter((row) => JSON.stringify(row).toLowerCase().includes(search));
   if (status !== "all") rows = rows.filter((row) => row.status === status || (status === "active" && row.isActive));
+  if (day) rows = rows.filter((row) => row.day && row.day.toLowerCase() === day);
 
   return {
     items: rows.slice((page - 1) * perPage, page * perPage),
