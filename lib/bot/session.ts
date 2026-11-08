@@ -222,7 +222,7 @@ export function findSessionItem(sessionId: string, text: string): StoredItem | u
 
     // 2b. Full title or cleaned title
     const cleanItName = itName.replace(/[()]/g, "").trim();
-    if (cleanItName.length >= 2 && (normalized.includes(cleanItName) || cleanItName.includes(normalized))) {
+    if (cleanItName.length >= 2 && normalized.includes(cleanItName)) {
       if (cleanItName.length > bestLength) {
         bestMatch = it;
         bestLength = cleanItName.length;
@@ -230,9 +230,9 @@ export function findSessionItem(sessionId: string, text: string): StoredItem | u
       continue;
     }
 
-    // 2c. Check if primary words match
+    // 2c. Check if primary words match as whole tokens
     const words = (mainTitle || cleanItName).split(/\s+/).filter((w) => w.length >= 2);
-    if (words.length > 0 && words[0] && normalized.includes(words[0])) {
+    if (words.length > 0 && words[0] && tokens.includes(words[0])) {
       if (words[0].length > bestLength) {
         bestMatch = it;
         bestLength = words[0].length;

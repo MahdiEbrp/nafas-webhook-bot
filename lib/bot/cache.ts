@@ -167,6 +167,8 @@ export function invalidateTags(tags: string[]): number {
 
 /** Invalidate by resource name, e.g. "services", "bookings". */
 export function invalidateResource(resource: string): number {
+  resourceDataMap.delete(resource);
+  void ensureResourceLoaded(resource, true);
   return invalidateTags([resource]);
 }
 
@@ -308,9 +310,195 @@ export function getCacheStats(): CacheStats {
   return { ...stats };
 }
 
+/* ───────────────────── RESOURCE CACHE STORE & AUTO-REFRESH ───────────────────── */
+
+export const CORE_CACHE_RESOURCES = [
+  "users",
+  "services",
+  "working-hours",
+  "bookings",
+  "settings",
+  "rules",
+] as const;
+
+export type CoreResourceName = (typeof CORE_CACHE_RESOURCES)[number];
+
+type ResourceCacheEntry = {
+  rows: unknown[];
+  fetchedAt: number;
+  expiresAt: number;
+};
+
+const resourceDataMap = new Map<string, ResourceCacheEntry>();
+
+function extractRowsFromData(data: unknown): unknown[] {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    const rec = data as Record<string, unknown>;
+    if (Array.isArray(rec.items)) return rec.items;
+    if (Array.isArray(rec.rows)) return rec.rows;
+    if (Array.isArray(rec.data)) return rec.data;
+  }
+  return [];
+}
+
+/**
+ * Checks cache first: if already loaded and fresh, returns from cache immediately.
+ * If not loaded or expired, fetches from the webhook API and stores in cache.
+ */
+export async function ensureResourceLoaded(resource: string, force = false): Promise<unknown[]> {
+  const now = Date.now();
+  const existing = resourceDataMap.get(resource);
+  if (!force && existing && now < existing.expiresAt) {
+    return existing.rows;
+  }
+
+  const req: WebhookRequest = {
+    method: "GET",
+    path: `/api/v1/webhooks/${resource}`,
+    query: { perPage: 100 },
+  };
+
+  try {
+    const result = await fetchWithCache(req, { tags: [resource], ttlMs: DEFAULT_TTL_MS });
+    if (result.ok && result.data) {
+      const rows = extractRowsFromData(result.data);
+      resourceDataMap.set(resource, {
+        rows,
+        fetchedAt: now,
+        expiresAt: now + DEFAULT_TTL_MS,
+      });
+      return rows;
+    }
+  } catch {
+    // Non-critical fetch failure, fallback to existing or empty
+  }
+
+  return existing?.rows ?? [];
+}
+
+/**
+ * Eagerly loads all core clinic resources into memory concurrently.
+ */
+export async function ensureAllCoreResourcesLoaded(force = false): Promise<Record<string, unknown[]>> {
+  const result: Record<string, unknown[]> = {};
+  await Promise.all(
+    CORE_CACHE_RESOURCES.map(async (res) => {
+      const rows = await ensureResourceLoaded(res, force);
+      result[res] = rows;
+    }),
+  );
+  return result;
+}
+
+export function getCachedResourceRows(resource: string): unknown[] {
+  return resourceDataMap.get(resource)?.rows ?? [];
+}
+
+/**
+ * Formats a clean Persian snapshot of the cached clinic entities to supply to the AI planner.
+ * This empowers the AI to resolve queries like "شماره تلفن کاربر شماره ۴ رو تغییر بده" naturally
+ * without brittle regexes!
+ */
+export function formatCachedContextForAi(): string {
+  const lines: string[] = ["اطلاعات کش‌شدهٔ فعلی سامانه کلینیک (برای شناخت دقیق اشخاص، خدمات، ساعات و نوبت‌ها):"];
+
+  // 1. Users
+  const users = getCachedResourceRows("users");
+  if (users.length > 0) {
+    lines.push("\n[کاربران و پرسنل (users)]:");
+    users.slice(0, 15).forEach((u, i) => {
+      if (!u || typeof u !== "object") return;
+      const rec = u as Record<string, unknown>;
+      const name = rec.fullName || rec.name || "بدون نام";
+      const id = rec.id || "";
+      const phone = rec.phone || "—";
+      const role = rec.roleKey || "—";
+      lines.push(`${i + 1}. ${name} (شناسه: ${id}، تلفن: ${phone}، نقش: ${role})`);
+    });
+  }
+
+  // 2. Services
+  const services = getCachedResourceRows("services");
+  if (services.length > 0) {
+    lines.push("\n[خدمات کلینیک (services)]:");
+    services.slice(0, 15).forEach((s, i) => {
+      if (!s || typeof s !== "object") return;
+      const rec = s as Record<string, unknown>;
+      const translations = rec.translations as { fa?: { title?: string; name?: string } } | undefined;
+      const title = translations?.fa?.title || translations?.fa?.name || rec.title || rec.slug || "بدون عنوان";
+      const id = rec.id || "";
+      const price = typeof rec.price === "number" ? `${rec.price} تومان` : "—";
+      lines.push(`${i + 1}. ${title} (شناسه: ${id}، قیمت: ${price})`);
+    });
+  }
+
+  // 3. Working Hours
+  const workingHours = getCachedResourceRows("working-hours");
+  if (workingHours.length > 0) {
+    lines.push("\n[ساعت‌های کاری کلینیک (working-hours)]:");
+    const DAY_MAP: Record<string, string> = {
+      Saturday: "شنبه",
+      Sunday: "یکشنبه",
+      Monday: "دوشنبه",
+      Tuesday: "سه‌شنبه",
+      Wednesday: "چهارشنبه",
+      Thursday: "پنج‌شنبه",
+      Friday: "جمعه",
+    };
+    workingHours.slice(0, 7).forEach((w, i) => {
+      if (!w || typeof w !== "object") return;
+      const rec = w as Record<string, unknown>;
+      const dayFa = typeof rec.day === "string" ? DAY_MAP[rec.day] ?? rec.day : "روز";
+      const opens = rec.opens || "—";
+      const closes = rec.closes || "—";
+      const cap = rec.capacity !== undefined ? `، ظرفیت: ${rec.capacity} نفر` : "";
+      lines.push(`${i + 1}. ${dayFa}: از ${opens} تا ${closes}${cap} (شناسه: ${rec.id})`);
+    });
+  }
+
+  // 4. Bookings
+  const bookings = getCachedResourceRows("bookings");
+  if (bookings.length > 0) {
+    lines.push("\n[نوبت‌های کلینیک (bookings)]:");
+    bookings.slice(0, 10).forEach((b, i) => {
+      if (!b || typeof b !== "object") return;
+      const rec = b as Record<string, unknown>;
+      const name = rec.fullName || "بدون نام";
+      const id = rec.id || "";
+      const phone = rec.phone || "—";
+      const status = rec.status || "—";
+      lines.push(`${i + 1}. ${name} (شناسه: ${id}، تلفن: ${phone}، وضعیت: ${status})`);
+    });
+  }
+
+  return lines.join("\n");
+}
+
+let autoRefreshTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Periodically refreshes the cached clinic resources in the background.
+ */
+export function startAutoCacheRefresher(intervalMs = 2 * 60 * 1000): void {
+  if (autoRefreshTimer) return;
+  autoRefreshTimer = setInterval(() => {
+    void ensureAllCoreResourcesLoaded(true);
+  }, intervalMs);
+  if (autoRefreshTimer.unref) autoRefreshTimer.unref();
+}
+
+export function stopAutoCacheRefresher(): void {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+}
+
 export function clearCacheForTesting(): void {
   cache.clear();
   inFlight.clear();
+  resourceDataMap.clear();
   stats.hits = 0;
   stats.misses = 0;
   stats.prefetches = 0;

@@ -56,6 +56,7 @@ export const REQUIREMENTS: Record<string, Requirements> = {
 
   "users.list": {},
   "users.create": { body: ["fullName", "email", "phone", "password", "roleKey"] },
+  "users.update": { path: ["id"], anyOf: [["phone", "fullName", "email", "roleKey", "isActive", "isBanned"]] },
   "users.update-status": { path: ["id"], anyOf: [["isActive", "isBanned"]] },
   "users.delete": { path: ["id"] },
 

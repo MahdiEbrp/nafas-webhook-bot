@@ -108,6 +108,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       });
     }
     if (url.includes("/users")) {
+      if (method === "PATCH") {
+        return new Response(JSON.stringify({ ok: true, data: { id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", phone: "09129998877", updated: true } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       // Identity lookup. Staff phones are stored in *different* formats on
       // purpose — that is the real-world situation we must survive.
       const params = new URL(url).searchParams;
@@ -123,6 +129,14 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     const payload = url.includes("bookings")
       ? { items: [{ id: "11111111-1111-4111-8111-111111111111", fullName: "مریم رضایی", phone: "09121234567", status: "paid" }], total: 1 }
+      : url.includes("services") && method === "GET"
+        ? {
+            items: [
+              { id: "11111111-2222-4333-8444-555555555555", title: "کاشت مو", price: 15000000, isActive: true },
+              { id: "22222222-3333-4444-8555-666666666666", title: "دی می", price: 5000000, isActive: true },
+            ],
+            total: 2,
+          }
       : url.includes("working-hours") && method === "GET"
         ? {
             items: [
@@ -808,7 +822,7 @@ async function main(): Promise<void> {
     },
   };
 
-  await test("تلگرام: /start → خوش‌آمد + دکمه‌های منو", async () => {
+  await test("تلگرام: /start → خوش‌آمد محاوره‌ای بدون منوی استاتیک", async () => {
     tgCalls.length = 0;
     const outcome = await handleTelegramUpdate({
       ...baseUpdate,
@@ -817,9 +831,9 @@ async function main(): Promise<void> {
     assertEqual(outcome.handled, true, "handled");
     const sent = tgCalls.find((call) => call.method === "sendMessage");
     assert(sent, "sendMessage called");
-    assert(String(sent?.payload.text).includes("دستیار کلینیک"), "welcome text");
+    assert(String(sent?.payload.text).includes("دستیار"), "welcome text");
     const markup = sent?.payload.reply_markup as { inline_keyboard: unknown[][] } | undefined;
-    assert(markup && markup.inline_keyboard.length >= 5, "menu keyboard attached");
+    assert(!markup?.inline_keyboard || markup.inline_keyboard.length === 0, "no static menu keyboard attached");
   });
 
   await test("تلگرام: پیام فارسی → جواب + دکمه‌های پیشنهادی هوش مصنوعی", async () => {
@@ -1508,6 +1522,103 @@ async function main(): Promise<void> {
     assertEqual(clickOutcome.status, "done", "click outcome done");
     const bookingsCallsAfter = calls.filter((c) => c.url.includes("/bookings")).length;
     assertEqual(bookingsCallsAfter, bookingsCallsBefore, "no new HTTP call for bookings because it hit cache directly");
+  });
+
+  console.log("\nک) هوش مصنوعی محاوره‌ای بدون منو، کش کامل و تغییر هوشمند کاربر شماره ۴");
+  await test("کش امکانات و به‌روزرسانی خودکار کش", async () => {
+    const {
+      ensureAllCoreResourcesLoaded,
+      ensureResourceLoaded,
+      formatCachedContextForAi,
+      startAutoCacheRefresher,
+      stopAutoCacheRefresher,
+      getCachedResourceRows,
+    } = await import("@/lib/bot/cache");
+
+    // اول از کش بخون اگر نیست لود کن
+    const loaded = await ensureAllCoreResourcesLoaded(true);
+    assert(Array.isArray(loaded.users) && loaded.users.length > 0, "users cached");
+    assert(Array.isArray(loaded.services) && loaded.services.length > 0, "services cached");
+
+    // بار دوم مستقیماً از حافظه خوانده می‌شود
+    const cachedUsers = await ensureResourceLoaded("users");
+    assertEqual(cachedUsers.length, loaded.users?.length ?? 0, "read directly from cache");
+
+    // فرمت اطلاعات کش‌شده برای پرامپت هوش مصنوعی
+    const context = formatCachedContextForAi();
+    assert(context.includes("کاربران"), "includes users in AI context");
+    assert(context.includes("خدمات"), "includes services in AI context");
+
+    // تایمر خودکار به‌روزرسانی کش
+    startAutoCacheRefresher(10_000);
+    stopAutoCacheRefresher();
+  });
+
+  await test("شناسایی هوشمند کاربر شماره ۴ و تغییر شماره تلفن بدون regex", async () => {
+    resetSessionsForTesting();
+    calls.length = 0;
+
+    // مدل هوش مصنوعی از طریق کانتکست کش‌شده هوشمندانه شناسه را می‌بیند و پلن را می‌سازد
+    nextPlannerJson = (messages) => {
+      const userMsg = messages.find((m) => m.role === "user")?.content ?? "";
+      assert(userMsg.includes("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), "cached user 4 UUID present in AI prompt context");
+      return JSON.stringify({
+        intent: "write",
+        actionId: "users.update",
+        params: { id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", phone: "09129998877" },
+        missing: [],
+        understood: "می‌خواهی شماره تلفن کاربر شماره ۴ را تغییر دهی.",
+        reply: "",
+        confidence: 0.95,
+      });
+    };
+
+    // ۱. هوش مصنوعی اطلاعات کش‌شده را دارد و وقتی می‌پرسیم شماره کاربر شماره ۴ رو عوض کن، هوشمندانه شناسه را پیدا می‌کند
+    const changeResult = await handleChat({
+      message: "شماره تلفن کاربر شماره 4 تغییر بده به 09129998877",
+      sessionId: "s-user4",
+      locale: "fa",
+    });
+
+    assertEqual(changeResult.status, "needs_confirmation", "prepared confirmation for updating user 4");
+    assertEqual(changeResult.actionId, "users.update", "users.update action");
+    // کاربر شماره ۴ در لیست آزمایشی (staffRows[3])
+    assert(changeResult.reply.includes("تغییرات"), "confirmation card presented");
+
+    // ۲. تأیید تغییر و اجرای نهایی PATCH
+    const approved = await handleChat({
+      message: "بله",
+      sessionId: "s-user4",
+      locale: "fa",
+      confirm: { token: changeResult.confirmation?.token as string, approve: true },
+    });
+
+    assertEqual(approved.status, "done", "update executed");
+    const patchCall = calls.find((c) => c.method === "PATCH" && c.url.includes("/users/"));
+    assert(patchCall, "PATCH request sent to clinic users webhook");
+  });
+
+  await test("پیشنهاد محاوره‌ای امکانات (چه کارهایی بلدی) بدون منوی دکمه‌ای", async () => {
+    resetSessionsForTesting();
+    nextPlannerJson = JSON.stringify({
+      intent: "features",
+      actionId: null,
+      params: {},
+      missing: [],
+      understood: "می‌خواهی بدانی چه کارهایی بلدم.",
+      reply: "",
+      confidence: 0.95,
+    });
+
+    const result = await handleChat({
+      message: "پیشنهاد بده چه کارهایی بلدی؟",
+      sessionId: "s-features-conv",
+      locale: "fa",
+    });
+
+    assertEqual(result.status, "answered", "answered directly");
+    assert(result.reply.includes("دستیار"), "friendly conversational response");
+    assert(result.reply.includes("نوبت") || result.reply.includes("کاربر"), "suggests features conversationally");
   });
 
   console.log(`\n${failures.length === 0 ? "🎉" : "⚠️"}  ${passed} passed, ${failures.length} failed\n`);

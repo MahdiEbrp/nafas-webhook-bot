@@ -185,11 +185,9 @@ async function identityGate(input: {
     const identity = await verifyContact({ chatId: input.chatId, fromId: input.fromId, contact: input.contact });
     if (identity.status === "verified") {
       if (!pendingText) {
-        void prefetchMenuActions("main");
         await sendMessage({
           chatId: input.chatId,
           text: `خوش آمدید ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}\n\nمی‌توانید درخواست خود را بفرمایید یا از منو انتخاب کنید.`,
-          keyboard: menuKeyboard(input.locale),
           removeKeyboard: true,
         });
       } else {
@@ -227,27 +225,28 @@ function welcomeText(locale: Locale, botName?: string): string {
     return [
       `Hi${botName ? ` ${botName}` : ""}! I am the clinic assistant. 👋`,
       "",
-      "Tell me what you need in plain words — for example:",
-      "• show today's bookings",
+      "Everything is conversational with AI — no button menus needed!",
+      "Just talk to me in plain words, for example:",
+      "• change phone number of user #4",
       "• what are Saturday's working hours?",
-      "• list active services",
+      "• show today's bookings",
+      "• what can you do?",
       "",
       "I always explain things simply, and I never change anything without your OK.",
-      "Use the buttons below, or just type.",
     ].join("\n");
   }
 
   return [
     `سلام${botName ? ` ${botName}` : ""}! وقت بخیر 👋`,
-    "من دستیار کلینیک هستم و برای بررسی و مدیریت نوبت‌ها، خدمات، ساعات کاری، پرسنل و تنظیمات در خدمت شما هستم.",
+    "من دستیار هوشمند کلینیک هستم و تمام کارها به‌صورت کاملاً گفت‌وگومحور و با هوش مصنوعی انجام می‌شود (نیازی به منوهای دکمه‌ای نیست).",
     "",
-    "می‌توانید درخواست خود را محاوره‌ای بنویسید یا از گزینه‌های زیر استفاده کنید:",
-    "• نوبت‌های امروز رو نشون بده",
-    "• ساعت کاری شنبه‌ها چیه؟",
-    "• خدمات فعال رو لیست کن",
+    "کافیست درخواست خود را به زبان ساده بنویسید؛ مثلاً:",
+    "• «شماره تلفن کاربر شماره ۴ رو تغییر بده»",
+    "• «ساعت کاری شنبه‌ها چیه؟»",
+    "• «نوبت‌های امروز رو نشون بده»",
+    "• «پیشنهاد بده چه کارهایی بلدی»",
     "",
-    "پاسخ‌ها سریع و مشخص ارائه می‌شوند و هیچ تغییری بدون تأیید شما ثبت نمی‌شود.",
-    "می‌توانید از منو و دکمه‌های زیر هم استفاده کنید.",
+    "تمام اطلاعات سامانه آماده است و هیچ تغییری بدون تأیید شما ثبت نمی‌شود. چطور می‌توانم کمکتان کنم؟ 🙂",
   ].join("\n");
 }
 
@@ -391,7 +390,7 @@ async function processTextMessage(input: {
     result = await handleChat({ message: text, sessionId: sessionIdFor(chatId), locale });
   } catch (error) {
     logWarn("telegram.chat_failed", { chatId, message: error instanceof Error ? error.message : "unknown" });
-    await sendMessage({ chatId, text: errorMessage(locale), keyboard: menuKeyboard(locale) });
+    await sendMessage({ chatId, text: errorMessage(locale) });
     return { handled: true, chatId, status: "error", reason: "exception" };
   }
 
@@ -435,21 +434,23 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     const parsed = parseCallback(query.data ?? "");
     const sessionId = sessionIdFor(chatId);
 
-    // Pure navigation: no AI, no HTTP, instant.
+    // Pure navigation: conversational, no static menu keyboard
     if (parsed.kind === "menu") {
       void answerCallbackQuery({ callbackQueryId: query.id });
       void prefetchMenuActions("main");
       await sendMessage({
         chatId,
-        text: locale === "en" ? "What should I work on?" : "لطفاً بخش مورد نظر خود را انتخاب کنید: 👇",
-        keyboard: menuKeyboard(locale),
+        text:
+          locale === "en"
+            ? "Button menus have been removed in favor of pure conversational AI! Just talk to me naturally."
+            : "منوهای دکمه‌ای حذف شده و همهٔ کارها به‌صورت کاملاً گفت‌وگومحور با هوش مصنوعی انجام می‌شود. 🙂\nمی‌توانید هر درخواستی دارید را به زبان ساده بنویسید (مثلاً: «لیست کاربران»، «ساعت کاری شنبه‌ها» یا «چه کارهایی بلدی»).",
       });
       return { handled: true, chatId, status: "menu" };
     }
 
     if (parsed.kind === "help") {
       void answerCallbackQuery({ callbackQueryId: query.id });
-      await sendMessage({ chatId, text: featuresAnswer(locale), keyboard: menuKeyboard(locale) });
+      await sendMessage({ chatId, text: featuresAnswer(locale) });
       return { handled: true, chatId, status: "help" };
     }
 
@@ -457,14 +458,12 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
       const feature = getFeature(parsed.featureId);
       void answerCallbackQuery({ callbackQueryId: query.id });
       if (!feature) {
-        await sendMessage({ chatId, text: locale === "en" ? "Unknown section." : "این بخش را نمی‌شناسم.", keyboard: menuKeyboard(locale) });
+        await sendMessage({ chatId, text: locale === "en" ? "Unknown section." : "این بخش را نمی‌شناسم." });
         return { handled: true, chatId, status: "unknown-feature" };
       }
-      void prefetchMenuActions(feature.id);
       await sendMessage({
         chatId,
         text: `${feature.titleFa}\n\n${feature.kid}`,
-        keyboard: featureKeyboard(feature.id, locale) ?? menuKeyboard(locale),
       });
       return { handled: true, chatId, status: "feature" };
     }
@@ -488,7 +487,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         });
       } catch (error) {
         logWarn("telegram.handle_failed", { message: error instanceof Error ? error.message : "unknown" });
-        await sendMessage({ chatId, text: errorMessage(locale), keyboard: menuKeyboard(locale) });
+        await sendMessage({ chatId, text: errorMessage(locale) });
         return { handled: true, chatId, status: "error", reason: "exception" };
       }
 
@@ -526,7 +525,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
               : await handleChat({ message: parsed.raw, sessionId, locale });
       } catch (error) {
         logWarn("telegram.handle_failed", { message: error instanceof Error ? error.message : "unknown" });
-        await sendMessage({ chatId, text: errorMessage(locale), keyboard: menuKeyboard(locale) });
+        await sendMessage({ chatId, text: errorMessage(locale) });
         return { handled: true, chatId, status: "error", reason: "exception" };
       }
 
@@ -584,11 +583,9 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const firstName = message.from?.first_name;
 
   if (/^\/(start|menu)\b/.test(text)) {
-    void prefetchMenuActions("main");
     await sendMessage({
       chatId,
       text: welcomeText(locale, firstName),
-      keyboard: menuKeyboard(locale),
       replyToMessageId: message.message_id,
     });
     logInfo("telegram.start", { chatId });
@@ -596,7 +593,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
 
   if (/^\/(help|features)\b/.test(text)) {
-    await sendMessage({ chatId, text: featuresAnswer(locale), keyboard: menuKeyboard(locale) });
+    await sendMessage({ chatId, text: featuresAnswer(locale) });
     return { handled: true, chatId, status: "help" };
   }
 

@@ -12,6 +12,7 @@
  */
 
 import { getConfig, type Locale } from "@/lib/config";
+import { ensureAllCoreResourcesLoaded, ensureResourceLoaded, formatCachedContextForAi, getCachedResourceRows } from "@/lib/bot/cache";
 import { extractSlots, slotsForAction } from "@/lib/features/extract";
 import { getFeature } from "@/lib/features/manifest";
 import { routeMessage } from "@/lib/features/router";
@@ -40,6 +41,9 @@ const FEATURE_QUESTION_PATTERNS = [
   /می ?تونی/,
   /بلدی/,
   /دستت/i,
+  /پیشنهاد/,
+  /راهنما/,
+  /چطور/,
   /help|capabilit|what can you/i,
 ];
 
@@ -55,7 +59,9 @@ function routerOnlyPlan(message: string, note: string): { plan: ValidatedPlan; n
     const plan = validatePlan(
       {
         ...emptyPlan(looksLikeCapabilityQuestion(message) ? "features" : "smalltalk"),
-        reply: looksLikeCapabilityQuestion(message) ? "" : "",
+        reply: looksLikeCapabilityQuestion(message)
+          ? "من دستیار هوشمند و گفت‌وگومحور کلینیک هستم؛ بدون نیاز به منو می‌توانید به‌صورت محاوره‌ای نوبت‌ها را مدیریت کنید، ساعات کاری را بپرسید، یا مشخصات کاربران (مثلاً «شماره تلفن کاربر شماره ۴ رو عوض کن») را ویرایش کنید."
+          : "",
         confidence: 0.2,
       },
       "router",
@@ -68,12 +74,39 @@ function routerOnlyPlan(message: string, note: string): { plan: ValidatedPlan; n
   // No model → still pull literal values (uuid, phone, day, price…) out of the sentence.
   const params = slotsForAction(message, action?.fields);
 
+  // If user mentioned user #4 / ordinal without UUID, resolve from cached users
+  if (guess.feature.id === "users") {
+    const cachedUsers = getCachedResourceRows("users");
+    const ordinalMap: Record<string, number> = {
+      "1": 1, "۱": 1, اول: 1, اولین: 1,
+      "2": 2, "۲": 2, دوم: 2, دومین: 2,
+      "3": 3, "۳": 3, سوم: 3, سومین: 3,
+      "4": 4, "۴": 4, چهار: 4, چهارم: 4, چهارمین: 4,
+      "5": 5, "۵": 5, پنج: 5, پنجم: 5,
+    };
+    for (const [w, idx] of Object.entries(ordinalMap)) {
+      if (message.includes(w)) {
+        const u = cachedUsers[idx - 1] as Record<string, unknown> | undefined;
+        if (u && typeof u.id === "string") {
+          params.id = u.id;
+          params._itemTitle = String(u.fullName || u.name || `کاربر شماره ${idx}`);
+          break;
+        }
+      }
+    }
+  }
+
+  const missing: string[] = [];
+  if (guess.actionId === "users.update" && params.id && !params.phone) {
+    missing.push("phone");
+  }
+
   const plan = validatePlan(
     {
       intent,
       actionId: guess.actionId,
       params,
-      missing: [],
+      missing,
       understood: `حدس من: ${guess.feature.titleFa} — ${guess.actionId}`,
       reply: "",
       confidence: Math.min(0.6, 0.25 + guess.score / 10),
@@ -109,11 +142,28 @@ export async function planRequest(input: {
   const config = getConfig();
   const system = input.locale === "en" ? PLANNER_SYSTEM_EN : PLANNER_SYSTEM_FA;
 
+  // Load relevant clinic entities into cache so AI can naturally resolve items like "کاربر شماره ۴"
+  const lowerMsg = input.message.toLowerCase();
+  if (lowerMsg.includes("کاربر") || lowerMsg.includes("پرسنل") || lowerMsg.includes("user")) {
+    await ensureResourceLoaded("users").catch(() => {});
+  } else if (lowerMsg.includes("خدمت") || lowerMsg.includes("سرویس") || lowerMsg.includes("قیمت")) {
+    await ensureResourceLoaded("services").catch(() => {});
+  } else if (lowerMsg.includes("ساعت") || lowerMsg.includes("شیفت")) {
+    await ensureResourceLoaded("working-hours").catch(() => {});
+  }
+
+  const cachedContext = formatCachedContextForAi();
+
   const messages = [
     { role: "system" as const, content: system },
     {
       role: "user" as const,
-      content: plannerUserPrompt(input.message, [plannerContext(input.previous ?? null), buildRouterHint(input.message)].filter(Boolean).join("\n")),
+      content: plannerUserPrompt(
+        input.message,
+        [plannerContext(input.previous ?? null), cachedContext, buildRouterHint(input.message)]
+          .filter(Boolean)
+          .join("\n\n"),
+      ),
     },
   ];
 
