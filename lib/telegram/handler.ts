@@ -41,6 +41,7 @@ import {
   getIdentity,
   identitySummary,
   isVerified,
+  popPendingText,
   setPending,
   verifyContact,
 } from "@/lib/telegram/identity";
@@ -118,6 +119,10 @@ function reasonFa(reason: string | undefined): string {
   return REASON_FA[reason] ?? "دلیل نامشخص (مدیر می‌تواند لاگ سرور را ببیند).";
 }
 
+type GateResult =
+  | { consumed: false }
+  | { consumed: true; executeText?: string };
+
 /**
  * Returns true when the message was consumed by the identity gate.
  * Skipped entirely unless TELEGRAM_REQUIRE_IDENTITY=true.
@@ -128,7 +133,7 @@ async function identityGate(input: {
   text: string;
   contact?: { phone_number?: string; first_name?: string; user_id?: number };
   locale: Locale;
-}): Promise<boolean> {
+}): Promise<GateResult> {
   const { requireIdentity } = getConfig().telegram;
 
   // /whoami and /logout work regardless of the flag.
@@ -141,7 +146,7 @@ async function identityGate(input: {
         : "هنوز وارد نشده‌ای. دکمهٔ «📱 ارسال شمارهٔ من» را بزن.",
       removeKeyboard: true,
     });
-    return true;
+    return { consumed: true };
   }
 
   if (/^\/logout\b/.test(input.text)) {
@@ -151,54 +156,68 @@ async function identityGate(input: {
       text: input.locale === "en" ? "You are signed out." : "از حساب خارج شدی. هر وقت خواستی دوباره شماره‌ات را بفرست.",
       removeKeyboard: true,
     });
-    return true;
+    return { consumed: true };
   }
 
-  if (!requireIdentity || isVerified(input.chatId)) return false;
+  if (!requireIdentity || isVerified(input.chatId)) return { consumed: false };
 
   // Already waiting on a contact share (or a previous check) → don't nag again.
   // The user asked: "keep asking the phone number check only once".
   const existing = input.contact ? undefined : getIdentity(input.chatId);
   if (existing?.status === "pending") {
+    if (input.text && !input.text.startsWith("/")) {
+      setPending(input.chatId, "awaiting-contact", input.text);
+    }
     await sendMessage({
       chatId: input.chatId,
       text:
         input.locale === "en"
-          ? "Your number was already sent — I’m checking it now."
-          : "شمارهٔ تو از قبل فرستادتی و در حال بررسی است.",
+          ? "Please share your phone number using the button below to sign in."
+          : "هنوز شماره‌ات را نفرستاده‌ای؛ لطفاً دکمهٔ «📱 ارسال شمارهٔ من» در پایین صفحه را لمس کن تا وارد شوی.",
     });
-    return true;
+    return { consumed: true };
   }
 
   // A shared contact → try to verify.
   if (input.contact) {
+    const pendingText = popPendingText(input.chatId);
     const identity = await verifyContact({ chatId: input.chatId, fromId: input.fromId, contact: input.contact });
     if (identity.status === "verified") {
-      await sendMessage({
-        chatId: input.chatId,
-        text: `خوش آمدی ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}\n\nحالا هر چه می‌خواهی بپرس، یا از منو انتخاب کن.`,
-        keyboard: menuKeyboard(input.locale),
-        removeKeyboard: true,
-      });
+      if (!pendingText) {
+        await sendMessage({
+          chatId: input.chatId,
+          text: `خوش آمدی ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}\n\nحالا هر چه می‌خواهی بپرس، یا از منو انتخاب کن.`,
+          keyboard: menuKeyboard(input.locale),
+          removeKeyboard: true,
+        });
+      } else {
+        await sendMessage({
+          chatId: input.chatId,
+          text: `خوش آمدی ${identity.fullName ?? ""}! ✅\n${identitySummary(identity)}`,
+          removeKeyboard: true,
+        });
+      }
+      return { consumed: true, executeText: pendingText };
     } else {
       await sendMessage({
         chatId: input.chatId,
         text: LOGIN_DENIED[input.locale](reasonFa(identity.reason)),
         keyboard: contactRequestKeyboard(input.locale),
       });
+      return { consumed: true };
     }
-    return true;
   }
 
   // Anything else → ask for the phone, by opening the panel first.
-  setPending(input.chatId, "awaiting-contact");
+  const pendingText = input.text && !input.text.startsWith("/") ? input.text : undefined;
+  setPending(input.chatId, "awaiting-contact", pendingText);
   await sendMessage({
     chatId: input.chatId,
     text: LOGIN_PROMPT[input.locale],
     keyboard: contactRequestKeyboard(input.locale),
   });
   logInfo("identity.prompted", { chatId: input.chatId });
-  return true;
+  return { consumed: true };
 }
 
 function welcomeText(locale: Locale, botName?: string): string {
@@ -270,6 +289,50 @@ async function keyboardFor(
     tip: suggestion.tip,
     engine: suggestion.engine,
     count: list.length,
+  };
+}
+
+async function processTextMessage(input: {
+  chatId: number;
+  text: string;
+  locale: Locale;
+  replyToMessageId?: number;
+}): Promise<BridgeOutcome> {
+  const { chatId, text, locale, replyToMessageId } = input;
+  sendTyping(chatId);
+
+  let result: ChatResult;
+  try {
+    result = await handleChat({ message: text, sessionId: sessionIdFor(chatId), locale });
+  } catch (error) {
+    logWarn("telegram.chat_failed", { chatId, message: error instanceof Error ? error.message : "unknown" });
+    await sendMessage({ chatId, text: errorMessage(locale), keyboard: menuKeyboard(locale) });
+    return { handled: true, chatId, status: "error", reason: "exception" };
+  }
+
+  const ui = await keyboardFor(result, { userMessage: text, locale });
+  await sendMessage({
+    chatId,
+    text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
+    keyboard: ui.keyboard,
+    ...(replyToMessageId ? { replyToMessageId } : {}),
+  });
+
+  logInfo("telegram.message", {
+    chatId,
+    status: result.status,
+    actionId: result.actionId,
+    planner: result.trace.planner,
+    suggestions: ui.count,
+  });
+
+  return {
+    handled: true,
+    chatId,
+    status: result.status,
+    actionId: result.actionId,
+    suggestions: ui.count,
+    text: result.reply,
   };
 }
 
@@ -374,14 +437,23 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
 
   // Identity first: a shared contact arrives as a message *without* text, and an
   // unverified chat must not reach the clinic at all.
-  const consumed = await identityGate({
+  const gate = await identityGate({
     chatId,
     fromId: message.from?.id ?? 0,
     text,
     contact: message.contact,
     locale,
   });
-  if (consumed) return { handled: true, chatId, status: "identity" };
+  if (gate.consumed) {
+    if (gate.executeText) {
+      return await processTextMessage({
+        chatId,
+        text: gate.executeText,
+        locale,
+      });
+    }
+    return { handled: true, chatId, status: "identity" };
+  }
 
   if (!text) {
     await sendMessage({ chatId, text: locale === "en" ? "I can only read text for now." : "فعلاً فقط پیام متنی را می‌خوانم. ✍️" });
@@ -414,39 +486,10 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     return { handled: true, chatId, status: "id" };
   }
 
-  sendTyping(chatId);
-
-  let result: ChatResult;
-  try {
-    result = await handleChat({ message: text, sessionId: sessionIdFor(chatId), locale });
-  } catch (error) {
-    logWarn("telegram.chat_failed", { chatId, message: error instanceof Error ? error.message : "unknown" });
-    await sendMessage({ chatId, text: errorMessage(locale), keyboard: menuKeyboard(locale) });
-    return { handled: true, chatId, status: "error", reason: "exception" };
-  }
-
-  const ui = await keyboardFor(result, { userMessage: text, locale });
-  await sendMessage({
+  return await processTextMessage({
     chatId,
-    text: truncateAtSentence(`${result.reply}${ui.tip ? tipLine(ui.tip) : ""}`, MAX_TEXT),
-    keyboard: ui.keyboard,
+    text,
+    locale,
     replyToMessageId: message.message_id,
   });
-
-  logInfo("telegram.message", {
-    chatId,
-    status: result.status,
-    actionId: result.actionId,
-    planner: result.trace.planner,
-    suggestions: ui.count,
-  });
-
-  return {
-    handled: true,
-    chatId,
-    status: result.status,
-    actionId: result.actionId,
-    suggestions: ui.count,
-    text: result.reply,
-  };
 }

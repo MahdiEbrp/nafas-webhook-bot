@@ -40,6 +40,7 @@ export type Identity = {
   fullName?: string;
   roleKey?: string;
   reason?: string;
+  pendingText?: string;
   at: number;
 };
 
@@ -60,8 +61,17 @@ export function isVerified(chatId: number): boolean {
   return getIdentity(chatId)?.status === "verified";
 }
 
-export function setPending(chatId: number, reason: string): void {
-  store.set(chatId, { status: "pending", reason, at: Date.now() });
+export function setPending(chatId: number, reason: string, pendingText?: string): void {
+  store.set(chatId, { status: "pending", reason, pendingText, at: Date.now() });
+}
+
+export function popPendingText(chatId: number): string | undefined {
+  const entry = store.get(chatId);
+  const text = entry?.pendingText;
+  if (entry) {
+    delete entry.pendingText;
+  }
+  return text;
 }
 
 export function clearIdentity(chatId: number): void {
