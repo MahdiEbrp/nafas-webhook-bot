@@ -10,7 +10,7 @@
  */
 
 import { callWebhook, type WebhookRequest, type WebhookResult } from "@/lib/webhooks/client";
-import { getAction } from "@/lib/features/manifest";
+import { getAction, getFeature } from "@/lib/features/manifest";
 import { logInfo } from "@/lib/log";
 
 export type CacheEntry = {
@@ -277,6 +277,31 @@ export function prefetchPredictedActions(
   }
 
   return Promise.all(promises);
+}
+
+/**
+ * TIME TRAVEL MENU PREFETCHING
+ * Eagerly prefetches the read data for options presented in menus:
+ * - "main": prefetches primary clinic overview actions (bookings.list, services.list, working-hours.list)
+ * - featureId: prefetches all non-parameterized read actions for that specific section (e.g. bookings.list)
+ */
+export function prefetchMenuActions(menu: "main" | string): Promise<void[]> {
+  if (menu === "main") {
+    return prefetchPredictedActions([
+      { actionId: "bookings.list" },
+      { actionId: "services.list" },
+      { actionId: "working-hours.list" },
+    ]);
+  }
+
+  const feature = getFeature(menu);
+  if (!feature) return Promise.resolve([]);
+
+  const readActions = feature.actions
+    .filter((a) => a.danger === "read" && !a.path.includes(":id"))
+    .map((a) => ({ actionId: a.id }));
+
+  return prefetchPredictedActions(readActions);
 }
 
 export function getCacheStats(): CacheStats {
