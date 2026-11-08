@@ -86,9 +86,30 @@ function redactQuery(query: WebhookRequest["query"]): Record<string, string | nu
 
 /** Map the target project's error payload onto our own codes. */
 function errorFromPayload(status: number, payload: unknown): { code: string; message: string } {
-  const asRecord = payload as { error?: { code?: string; message?: string }; message?: string } | null;
+  const asRecord = payload as {
+    error?: {
+      code?: string;
+      message?: string;
+      details?: unknown;
+      issues?: Array<{ path?: string[]; message?: string }>;
+    };
+    message?: string;
+  } | null;
   const code = asRecord?.error?.code ?? `HTTP_${status}`;
-  const message = asRecord?.error?.message ?? asRecord?.message ?? `Request failed with status ${status}`;
+
+  let detailMsg = "";
+  if (asRecord?.error?.issues && Array.isArray(asRecord.error.issues)) {
+    detailMsg = asRecord.error.issues
+      .map((i) => (i.path && i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))
+      .filter(Boolean)
+      .join("؛ ");
+  } else if (asRecord?.error?.details) {
+    detailMsg = typeof asRecord.error.details === "string"
+      ? asRecord.error.details
+      : JSON.stringify(asRecord.error.details);
+  }
+
+  const rawMsg = detailMsg || asRecord?.error?.message || asRecord?.message || `Request failed with status ${status}`;
 
   switch (status) {
     case 401:
@@ -102,7 +123,7 @@ function errorFromPayload(status: number, payload: unknown): { code: string; mes
     case 429:
       return { code: "WEBHOOK_RATE_LIMITED", message: "The webhook API is temporarily rate limited." };
     default:
-      return { code, message };
+      return { code, message: rawMsg };
   }
 }
 

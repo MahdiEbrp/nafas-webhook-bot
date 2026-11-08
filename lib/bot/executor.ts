@@ -74,6 +74,9 @@ function coerce(key: string, value: unknown): unknown {
     if (["true", "بله", "yes", "1", "فعال"].includes(value.trim().toLowerCase())) return true;
     if (["false", "خیر", "no", "0", "غیرفعال"].includes(value.trim().toLowerCase())) return false;
   }
+  if (leaf === "phone") {
+    return value.trim().replace(/[\s\-()]/g, "");
+  }
   return value;
 }
 
