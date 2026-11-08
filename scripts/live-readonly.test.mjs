@@ -63,3 +63,34 @@ test("ignored search and malformed model JSON fail", async () => {
   } });
   assert.equal(ok, false);
 });
+
+test("accepts upstream data envelopes around paginated lists", async () => {
+  for (const wrap of [
+    (rows) => ({ ok: true, data: { items: rows, total: rows.length } }),
+    (rows) => ({ ok: true, data: { rows } }),
+    (rows) => ({ ok: true, data: { data: rows } }),
+    (rows) => ({ ok: true, data: rows }),
+  ]) {
+    let count = 0;
+    assert.equal(await runLiveChecks({ env, log: () => {}, fetchImpl: async () => {
+      count++;
+      if (count === 1) return json(wrap([{ fullName: "PRIVATE RECORD" }]));
+      if (count === 2) return json(wrap([]));
+      return json({ choices: [{ message: { content: '{"ok":true}' } }] });
+    } }), true);
+  }
+});
+
+test("rejects error envelopes and unrelated arrays even on HTTP 200", async () => {
+  for (const payload of [
+    { ok: false, data: [] },
+    { ok: true, data: { success: false, items: [] } },
+    { ok: true, data: { error: "PRIVATE ERROR", rows: [] } },
+    { unexpected: [] },
+  ]) {
+    const logs = [];
+    assert.equal(await runLiveChecks({ env, log: (line) => logs.push(line), fetchImpl: async () => json(payload) }), false);
+    assert(logs[0].includes("HTTP 200; unexpected response shape/content"));
+    assert(!logs.join("\n").includes("PRIVATE"));
+  }
+});

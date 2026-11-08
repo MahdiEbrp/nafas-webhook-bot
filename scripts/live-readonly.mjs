@@ -38,19 +38,26 @@ export async function runLiveChecks({ env = process.env, fetchImpl = fetch, log 
       }
       const payload = await response.json();
       const ok = validate(payload);
-      report(name, ok, ok ? `HTTP ${response.status}; response shape verified` : "unexpected response shape/content");
+      report(name, ok, ok ? `HTTP ${response.status}; response shape verified` : `HTTP ${response.status}; unexpected response shape/content`);
     } catch {
       // Errors can contain URLs, bodies and derived credentials. Do not print them.
       report(name, false, "network, TLS, timeout, redirect or invalid JSON error (details suppressed)");
     }
   }
   const rows = (payload) => {
-    if (Array.isArray(payload)) return payload;
-    if (!payload || typeof payload !== "object" || payload.success === false || payload.error) return null;
-    for (const key of ["items", "rows", "data"]) {
-      if (Array.isArray(payload[key])) return payload[key];
+    // Match the app client: upstream wraps successes in { ok: true, data: ... },
+    // and the data itself can be a paginated { items/rows/data: [] } object.
+    // Only unwrap known data envelopes, never recursively scan arbitrary fields
+    // (an error payload may itself contain unrelated arrays).
+    for (let depth = 0; depth < 4; depth++) {
+      if (Array.isArray(payload)) return payload;
+      if (!payload || typeof payload !== "object" || payload.ok === false || payload.success === false || payload.error) return null;
+      for (const key of ["items", "rows"]) {
+        if (Array.isArray(payload[key])) return payload[key];
+      }
+      payload = payload.data;
     }
-    return null;
+    return Array.isArray(payload) ? payload : null;
   };
   const listUrl = new URL("/api/v1/webhooks/users", base);
   listUrl.searchParams.set("perPage", "1");
