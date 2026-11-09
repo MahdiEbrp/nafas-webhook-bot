@@ -262,7 +262,10 @@ if (verified.ok && verified.ruleContextAvailable) {
 | `lib/auth/session-store.ts` | ذخیرهٔ AES-256-GCM نشست در Postgres با lookup مبتنی بر HMAC |
 | `lib/auth/login-flow-store.ts` | نگهداری رمز‌شدهٔ کوتاه‌مدت phone/code stage برای ورود Telegram |
 | `lib/auth/telegram-login.ts` | گردش طبیعی و امن «می‌خواهم لاگین کنم» |
+| `scripts/auth-check.ts` | تشخیص امن تنظیمات و round-trip دیتابیس بدون چاپ secret |
 | `scripts/selftest.ts` | تست آفلاین OTP، گردش ورود، رمزنگاری و خطاهای API |
+
+برای عیب‌یابی همان environment، پس از نصب/ورود با Vercel CLI می‌توانی `vercel env pull .env.local --environment=production` و سپس `npm run auth:check` را اجرا کنی. اسکریپت فقط نتیجهٔ checkها را چاپ می‌کند و مقدار secret یا رشتهٔ اتصال را نمایش نمی‌دهد؛ فایل `.env.local` را به اشتراک نگذار یا commit نکن.
 
 ## مدیریت کاربران
 
