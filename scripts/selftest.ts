@@ -251,6 +251,15 @@ async function main(): Promise<void> {
   const { nowFacts, betweenFacts, leapYearFacts, addFacts } = await import("@/lib/dates/engine");
   const { nowInZone } = await import("@/lib/dates/timezone");
   const { isIdentityQuestion, identityText } = await import("@/lib/bot/identity");
+  const { normalizeDatabaseUrl, setRunnerForTesting } = await import("@/lib/db/client");
+  const { ensureSchema, resetSchemaCache, SCHEMA_STATEMENTS } = await import("@/lib/db/schema");
+  const {
+    ensureChatSession,
+    resolveSessionId,
+    fallbackSessionId,
+    newSessionId,
+    resetChatSessionCacheForTesting,
+  } = await import("@/lib/db/chat-sessions");
 
   console.log("\n🤖 chat bot self-test (offline)\n");
   resetConfigCache();
@@ -1036,6 +1045,219 @@ async function main(): Promise<void> {
       process.env.DATE_ASSISTANT = "true";
       resetConfigCache();
     }
+  });
+
+  /* ── 9. Persisted chat sessions ─────────────────────────────────────── */
+
+  /**
+   * A pretend Postgres. It implements only what chat-sessions.ts actually
+   * sends, and records every query so the tests can assert on the SQL.
+   */
+  function makeFakeDb() {
+    const rows = new Map<number, { session_id: string; created_at: Date }>();
+    const queries: string[] = [];
+    let failNext = false;
+
+    const stamp = () => new Date("2026-11-09T12:00:00Z").toISOString();
+
+    const runner = async (query: string, params: unknown[] = []): Promise<unknown[]> => {
+      queries.push(query);
+      if (failNext) {
+        failNext = false;
+        throw new Error("neon unreachable");
+      }
+      if (/create (table|index) if not exists/i.test(query)) return [];
+
+      if (/insert into chat_sessions/i.test(query)) {
+        const chatId = Number(params[0]);
+        const proposed = String(params[1]);
+        const existing = rows.get(chatId);
+        if (existing) {
+          return [
+            {
+              telegram_chat_id: chatId,
+              session_id: existing.session_id,
+              created_at: existing.created_at,
+              updated_at: stamp(),
+              last_seen_at: stamp(),
+              inserted: false,
+            },
+          ];
+        }
+        rows.set(chatId, { session_id: proposed, created_at: new Date(stamp()) });
+        return [
+          {
+            telegram_chat_id: chatId,
+            session_id: proposed,
+            created_at: stamp(),
+            updated_at: stamp(),
+            last_seen_at: stamp(),
+            inserted: true,
+          },
+        ];
+      }
+
+      if (/select .* from chat_sessions where telegram_chat_id/i.test(query)) {
+        const row = rows.get(Number(params[0]));
+        return row
+          ? [{ telegram_chat_id: Number(params[0]), ...row, updated_at: stamp(), last_seen_at: stamp(), inserted: false }]
+          : [];
+      }
+
+      return [];
+    };
+
+    return { runner, rows, queries, fail: () => { failNext = true; } };
+  }
+
+  await test("a pasted connection string is repaired before it is used", () => {
+    const pasted =
+      "postgresql://neondb_owner:secret@ep-x.neon.tech/neondb?channel_binding=require&amp;sslmode=require";
+    const cleaned = normalizeDatabaseUrl(pasted);
+    assertEqual(cleaned, "postgresql://neondb_owner:secret@ep-x.neon.tech/neondb?sslmode=require", "repaired");
+    assert(!cleaned.includes("&amp;"), "html escaping removed");
+    assert(!cleaned.includes("channel_binding"), "libpq-only option dropped");
+    assertEqual(
+      normalizeDatabaseUrl("postgresql://u:p@h/db"),
+      "postgresql://u:p@h/db?sslmode=require",
+      "ssl is added when missing",
+    );
+    assertEqual(normalizeDatabaseUrl("  <postgresql://u:p@h/db>  "), "postgresql://u:p@h/db?sslmode=require", "markdown brackets stripped");
+  });
+
+  await test("the schema is idempotent, so it can run on every boot", () => {
+    for (const statement of SCHEMA_STATEMENTS) {
+      assert(/if not exists/i.test(statement), "every statement is IF NOT EXISTS");
+    }
+    assert(SCHEMA_STATEMENTS.some((statement) => /create table/i.test(statement)), "creates the table");
+    assert(SCHEMA_STATEMENTS.some((statement) => /create index/i.test(statement)), "creates the index");
+  });
+
+  await test("a new chat is stored, a returning chat keeps its session id", async () => {
+    const db = makeFakeDb();
+    setRunnerForTesting(db.runner);
+    resetSchemaCache();
+    resetChatSessionCacheForTesting();
+
+    try {
+      const first = await ensureChatSession(4242);
+      assert(first !== null, "the row came back");
+      assertEqual(first?.isNew, true, "flagged as new");
+      assertEqual(db.rows.get(4242)?.session_id, first?.sessionId, "stored under the chat id");
+      assert(
+        /^[0-9a-f-]{36}$/.test(first?.sessionId ?? ""),
+        `session id is a uuid: ${first?.sessionId}`,
+      );
+
+      // Clear the in-process cache so the second call really goes through SQL.
+      resetChatSessionCacheForTesting();
+      const second = await ensureChatSession(4242);
+      assertEqual(second?.isNew, false, "not new any more");
+      assertEqual(second?.fromCache, false, "read from the database, not from memory");
+      assertEqual(second?.sessionId, first?.sessionId, "the same session id is kept");
+      assertEqual(db.rows.size, 1, "still exactly one row for that chat");
+
+      assert(
+        db.queries.some((query) => /on conflict \(telegram_chat_id\) do update/i.test(query)),
+        "it is a real upsert, not select-then-insert",
+      );
+      assert(
+        db.queries.some((query) => /xmax = 0/i.test(query)),
+        "inserted-vs-updated comes from xmax, not a second query",
+      );
+    } finally {
+      setRunnerForTesting(null);
+      resetSchemaCache();
+      resetChatSessionCacheForTesting();
+    }
+  });
+
+  await test("a warm instance does not hit the database for a chat it knows", async () => {
+    const db = makeFakeDb();
+    setRunnerForTesting(db.runner);
+    resetSchemaCache();
+    resetChatSessionCacheForTesting();
+
+    try {
+      await ensureChatSession(777);
+      const afterFirst = db.queries.length;
+      const again = await ensureChatSession(777);
+      assertEqual(again?.isNew, false, "served from cache");
+      assertEqual(again?.fromCache, true, "flagged as cached");
+      assertEqual(db.queries.length, afterFirst, "the cached chat issued no query at all");
+    } finally {
+      setRunnerForTesting(null);
+      resetSchemaCache();
+      resetChatSessionCacheForTesting();
+    }
+  });
+
+  await test("without a database the bot falls back, it does not stop", async () => {
+    setRunnerForTesting(null);
+    resetChatSessionCacheForTesting();
+    assertEqual(await ensureChatSession(123), null, "no session from a missing database");
+    assertEqual(await resolveSessionId(123), "tg-123", "deterministic fallback");
+    assertEqual(fallbackSessionId(123), "tg-123", "same shape as before this feature");
+  });
+
+  await test("a database error is logged, not thrown at the user", async () => {
+    const db = makeFakeDb();
+    setRunnerForTesting(db.runner);
+    resetSchemaCache();
+    resetChatSessionCacheForTesting();
+
+    try {
+      db.fail();
+      const sessionId = await resolveSessionId(555);
+      assertEqual(sessionId, "tg-555", "the message is still answered");
+    } finally {
+      setRunnerForTesting(null);
+      resetSchemaCache();
+      resetChatSessionCacheForTesting();
+    }
+  });
+
+  await test("Telegram: the stored session id is what the conversation is keyed by", async () => {
+    const db = makeFakeDb();
+    setRunnerForTesting(db.runner);
+    resetSchemaCache();
+    resetChatSessionCacheForTesting();
+    resetSessionsForTesting();
+    calls.length = 0;
+    modelReply = "سلام";
+
+    try {
+      const outcome = await handleTelegramUpdate(telegramUpdate({ text: "سلام" }));
+      assertEqual(outcome.handled, true, "message handled");
+
+      const stored = db.rows.get(777);
+      assert(stored !== undefined, "the chat id was written to the database");
+      assert(
+        /^[0-9a-f-]{36}$/.test(stored?.session_id ?? ""),
+        `as a uuid: ${stored?.session_id}`,
+      );
+
+      // The model must have been called with that exact session as context key.
+      const completion = calls.filter((call) => call.url.includes("chat/completions")).at(-1);
+      assert(completion !== undefined, "the model was called");
+
+      // And the conversation memory must live under the same key.
+      const { conversationLength } = await import("@/lib/bot");
+      assertEqual(conversationLength(stored?.session_id ?? ""), 2, "user + assistant stored under the uuid");
+      assertEqual(conversationLength("tg-777"), 0, "the old fallback key is not used");
+    } finally {
+      setRunnerForTesting(null);
+      resetSchemaCache();
+      resetChatSessionCacheForTesting();
+      modelReply = "سلام! خوشحالم که اینجایی. 🙂";
+    }
+  });
+
+  await test("session ids are unique per chat and stable within one", () => {
+    const a = newSessionId();
+    const b = newSessionId();
+    assert(a !== b, "two chats get two ids");
+    assertEqual(typeof a, "string", "a string");
   });
 
   await test("long answers are cut at a sentence, not mid-word", () => {

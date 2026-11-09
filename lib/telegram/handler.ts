@@ -24,6 +24,7 @@ import {
   sendTyping,
   type TelegramUpdate,
 } from "@/lib/telegram/api";
+import { resolveSessionId } from "@/lib/db/chat-sessions";
 
 export type BridgeOutcome = {
   handled: boolean;
@@ -44,8 +45,15 @@ function isAllowed(chatId: number): boolean {
   return allowedChatIds.includes(chatId);
 }
 
-function sessionIdFor(chatId: number): string {
-  return `tg-${chatId}`;
+/**
+ * The conversation key for a chat.
+ *
+ * Stored in Postgres as chat_id → session_id when a database is configured; the
+ * deterministic `tg-<chatId>` otherwise. `resolveSessionId` never throws, so a
+ * database outage makes the bot forgetful, never silent.
+ */
+function sessionIdFor(chatId: number): Promise<string> {
+  return resolveSessionId(chatId);
 }
 
 const CLEARED: Record<Locale, string> = {
@@ -84,7 +92,7 @@ async function processTextMessage(input: {
   const { chatId, text, locale, replyToMessageId } = input;
   sendTyping(chatId);
 
-  const result = await handleChat({ message: text, sessionId: sessionIdFor(chatId), locale });
+  const result = await handleChat({ message: text, sessionId: await sessionIdFor(chatId), locale });
 
   await replyText(chatId, result.reply, { replyToMessageId });
 
@@ -146,7 +154,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
 
   if (/^\/(clear|reset|new)\b/.test(text)) {
-    resetConversation(sessionIdFor(chatId));
+    resetConversation(await sessionIdFor(chatId));
     await replyText(chatId, CLEARED[locale]);
     logInfo("telegram.clear", { chatId });
     return { handled: true, chatId, status: "cleared" };

@@ -14,10 +14,12 @@
     "selftest": "tsx scripts/selftest.ts",
     "check": "tsc --noEmit && tsx scripts/selftest.ts",
     "models": "tsx scripts/list-free-models.ts",
-    "telegram:setup": "tsx scripts/telegram-setup.ts"
+    "telegram:setup": "tsx scripts/telegram-setup.ts",
+    "db:check": "tsx scripts/db-check.ts"
   },
   "dependencies": {
     "@date-fns/tz": "^1.5.0",
+    "@neondatabase/serverless": "^1.2.0",
     "date-fns": "^4.4.0",
     "date-fns-jalali": "^4.4.0-0",
     "next": "^16.4.5",
