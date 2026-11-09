@@ -16,6 +16,7 @@
     "models": "tsx scripts/list-free-models.ts",
     "telegram:setup": "tsx scripts/telegram-setup.ts",
     "db:check": "tsx scripts/db-check.ts",
+    "auth:check": "tsx scripts/auth-check.ts",
     "db:real": "tsx scripts/db-real.ts",
     "coverage": "c8 --experimental-monocart --all --include \"lib/users/**\" --exclude \"lib/users/types.ts\" --check-coverage --lines 100 --functions 100 --branches 100 --statements 100 --reporter text tsx scripts/selftest.ts"
   },
