@@ -178,7 +178,7 @@ curl -s https://<your-app>/api/health?db=1
 
 ## کلاینت مدیریت قوانین
 
-`RuleManager` در `lib/rules/manager.ts` یک کلاینت برای **API بیرونی** قوانین است؛ این مخزن endpoint یا داشبورد قوانین پیاده نمی‌کند. بدون `baseUrl` دادهٔ دامی و حافظه‌ای برای تست فراهم است. در حالت زنده، origin را از `RULES_API_BASE_URL` یا گزینهٔ `baseUrl` می‌گیرد و فقط روی HTTPS درخواست می‌فرستد.
+`RuleManager` در `lib/rules/manager.ts` یک کلاینت برای **API بیرونی** قوانین است؛ این مخزن endpoint یا داشبورد قوانین پیاده نمی‌کند. origin پیش‌فرض `https://nafasbeautyclinic.ir` است و با `NAFAS_API_BASE_URL` یا گزینهٔ `baseUrl` قابل تنظیم است؛ `RULES_API_BASE_URL` هم برای override اختصاصی قوانین پشتیبانی می‌شود. برای دادهٔ دامی در تست، صریحاً `new RuleManager({ baseUrl: "" })` بساز. درخواست زنده فقط روی HTTPS فرستاده می‌شود.
 
 ```ts
 import { RuleManager } from "@/lib/rules/manager";
@@ -231,6 +231,32 @@ const answer = await handleChat({
 | `lib/rules/manager.ts` | کلاینت HTTP، دادهٔ دامی و پیشنهاد/تأیید تغییرها |
 | `lib/rules/assistant.ts` | ابزارهای function-calling هوش مصنوعی و گردش تأیید |
 | `scripts/selftest.ts` | تست‌های آفلاین اعتبارسنجی، مرز احراز هویت و درخواست‌های API |
+
+## ورود پیامکی OTP به API نفس
+
+کلاینت `SmsOtpClient` در `lib/auth/sms-otp.ts` برای سرویس `https://nafasbeautyclinic.ir` سه درخواست `request`، `verify` و `resend` را می‌فرستد. شماره با قالب عمومی ۷ تا ۱۵ رقم و `+` اختیاری پذیرفته می‌شود؛ کد تأیید دقیقاً ۶ رقم ASCII است. حساب باید از قبل در سامانه با همان شماره فعال و غیرمسدود باشد؛ این کلاینت ثبت‌نام یا رمز عبور ندارد.
+
+```ts
+import { SmsOtpClient } from "@/lib/auth/sms-otp";
+
+const otp = new SmsOtpClient(); // NAFAS_API_BASE_URL یا https://nafasbeautyclinic.ir
+const sent = await otp.request("09121234567");
+// کاربر کد پیامک‌شده را وارد می‌کند.
+const verified = await otp.verify("09121234567", code);
+if (verified.ok && verified.session?.ruleRequestContext) {
+  // فقط در لایهٔ server-side قابل‌اعتماد؛ cookie/CSRF را به مدل یا log نده.
+  await rulesAssistant.handle({ conversationId, message, context: verified.session.ruleRequestContext });
+}
+```
+
+`resend(phone)` همان بدنهٔ درخواست را به مسیر resend می‌فرستد. مقدارهای `expiresInMs` و `resendInMs` از پاسخ سرور خوانده می‌شوند؛ محدودیت ۵ درخواست در ۱۵ دقیقه برای IP و ۵ در ۵ دقیقه برای شماره باید توسط API مقصد اعمال شود و کلاینت آن‌ها را دور نمی‌زند. پاسخ verify می‌تواند Set-Cookie و CSRF header `x-csrf-token` داشته باشد. اگر CSRF در cookie برمی‌گردد، نامش را با `csrfCookieName` تنظیم کن. بدون cookie و CSRF، `ruleRequestContext` ساخته نمی‌شود؛ API contract ارسالی این جزئیات را تضمین نکرده بود، پس کلاینت حدس نمی‌زند.
+
+شماره و کد در log نوشته نمی‌شوند. نشست برگشتی را میزبان به‌صورت امن نگه می‌دارد؛ این ماژول آن را در دیتابیس یا حافظهٔ پایدار ذخیره نمی‌کند. این ورود پیامکی از phone-gate تلگرام و شناسهٔ مکالمهٔ بات مستقل است.
+
+| فایل | کار |
+| --- | --- |
+| `lib/auth/sms-otp.ts` | کلاینت OTP، اعتبارسنجی ورودی و استخراج اختیاری cookie/CSRF برای Rules API |
+| `scripts/selftest.ts` | تست آفلاین request/resend/verify و خطاهای API |
 
 ## مدیریت کاربران
 

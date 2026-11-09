@@ -1736,7 +1736,79 @@ async function main(): Promise<void> {
     assertEqual(typeof a, "string", "a string");
   });
 
-  /* ── 11. Rules client ────────────────────────────────────────────────── */
+  /* ── 11. SMS OTP client ──────────────────────────────────────────────── */
+
+  const { SmsOtpClient } = await import("@/lib/auth/sms-otp");
+
+  await test("SMS OTP request, resend, and verify use the documented HTTPS API", async () => {
+    const calls: Array<{ url: string; body: unknown; headers: Headers }> = [];
+    let responseStatus = 200;
+    let responseBody: unknown = { ok: true, expiresInMs: 300000, resendInMs: 60000 };
+    let responseHeaders = new Headers({ "content-type": "application/json", "x-request-id": "otp-request-1" });
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      const headers = new Headers(init.headers);
+      calls.push({ url: typeof input === "string" ? input : String(input), body: JSON.parse(String(init.body)) as unknown, headers });
+      return new Response(JSON.stringify(responseBody), { status: responseStatus, headers: responseHeaders });
+    };
+    const otp = new SmsOtpClient({ fetchImpl });
+    const requested = await otp.request("  +989121234567  ");
+    assertEqual(requested.ok, true, "SMS request accepted");
+    assertEqual(requested.ok ? requested.expiresInMs : undefined, 300000, "expiry returned by API");
+    assertEqual(requested.ok ? requested.resendInMs : undefined, 60000, "resend cooldown returned by API");
+    assertEqual(calls[0]?.url, "https://nafasbeautyclinic.ir/api/v1/auth/otp/request", "default API base URL and request path");
+    assertEqual(JSON.stringify(calls[0]?.body), JSON.stringify({ channel: "sms", phone: "+989121234567" }), "phone is trimmed and channel fixed to SMS");
+
+    const resent = await otp.resend("09121234567");
+    assertEqual(resent.ok, true, "resend accepted");
+    assertEqual(calls[1]?.url, "https://nafasbeautyclinic.ir/api/v1/auth/otp/resend", "resend path");
+    assertEqual(JSON.stringify(calls[1]?.body), JSON.stringify({ channel: "sms", phone: "09121234567" }), "resend body matches the contract");
+
+    const cookieHeaders = new Headers({ "content-type": "application/json", "x-request-id": "otp-verify-1", "x-csrf-token": "csrf-private" });
+    cookieHeaders.append("set-cookie", "session=server-session; Path=/; HttpOnly; Secure; SameSite=Lax");
+    responseHeaders = cookieHeaders;
+    responseBody = { ok: true };
+    const verified = await otp.verify("+989121234567", "123456");
+    assertEqual(verified.ok, true, "valid verification accepted");
+    assertEqual(calls[2]?.url, "https://nafasbeautyclinic.ir/api/v1/auth/otp/verify", "verify path");
+    assertEqual(JSON.stringify(calls[2]?.body), JSON.stringify({ phone: "+989121234567", code: "123456" }), "verify body has phone and six-digit code");
+    if (verified.ok) {
+      assertEqual(verified.session?.ruleRequestContext?.actorId, "+989121234567", "verified phone binds the actor");
+      assertEqual(verified.session?.ruleRequestContext?.csrfToken, "csrf-private", "CSRF response header is extracted");
+      assert(verified.session?.ruleRequestContext?.sessionCookie.includes("session=server-session"), "server session cookie is extracted");
+      assertEqual(verified.requestId, "otp-verify-1", "request id is returned");
+    }
+
+    const beforeInvalid = calls.length;
+    const invalidPhone = await otp.request("12345");
+    const invalidCode = await otp.verify("09121234567", "12345x");
+    assertEqual(invalidPhone.ok ? "ok" : invalidPhone.status, 400, "invalid phone rejected locally");
+    assertEqual(invalidCode.ok ? "ok" : invalidCode.status, 400, "non-six-digit code rejected locally");
+    assertEqual(calls.length, beforeInvalid, "invalid input never reaches API");
+  });
+
+  await test("SMS OTP failures preserve API error codes and fail closed without CSRF", async () => {
+    const fetchWith = (status: number, payload: unknown, headers = new Headers({ "content-type": "application/json" })): typeof fetch =>
+      async () => new Response(JSON.stringify(payload), { status, headers });
+    const invalid = await new SmsOtpClient({ fetchImpl: fetchWith(401, { code: "INVALID_CODE" }) }).verify("09121234567", "123456");
+    assertEqual(invalid.ok ? "ok" : invalid.code, "INVALID_CODE", "invalid code is mapped");
+    assertEqual(invalid.ok ? "ok" : invalid.status, 401, "401 is preserved");
+    assert(invalid.ok === false && invalid.message.includes("درست نیست"), "localized invalid-code message");
+
+    const locked = await new SmsOtpClient({ fetchImpl: fetchWith(423, { code: "LOCKED_OUT" }) }).verify("09121234567", "123456");
+    assertEqual(locked.ok ? "ok" : locked.code, "LOCKED_OUT", "lockout code is preserved");
+    assertEqual(locked.ok ? "ok" : locked.status, 423, "423 is preserved");
+
+    const noCookie = await new SmsOtpClient({ fetchImpl: fetchWith(200, { ok: true }) }).verify("09121234567", "123456");
+    assertEqual(noCookie.ok, true, "verification success is reported");
+    assertEqual(noCookie.ok ? noCookie.session : null, undefined, "without Set-Cookie there is no reusable session");
+
+    const cookieOnly = new Headers({ "content-type": "application/json" });
+    cookieOnly.append("set-cookie", "session=server-session; Path=/; HttpOnly; Secure");
+    const missingCsrf = await new SmsOtpClient({ fetchImpl: fetchWith(200, { ok: true }, cookieOnly) }).verify("09121234567", "123456");
+    assertEqual(missingCsrf.ok ? missingCsrf.session?.ruleRequestContext : null, undefined, "session without CSRF cannot make a Rules API context");
+  });
+
+  /* ── 12. Rules client ────────────────────────────────────────────────── */
 
   const { RuleManager, seedRules } = await import("@/lib/rules/manager");
   const { RulesAssistant } = await import("@/lib/rules/assistant");
@@ -1765,7 +1837,7 @@ async function main(): Promise<void> {
       assertEqual(options.messages.at(-1)?.role, "tool", "API results are returned to the model as tool output");
       return { content: "یک قانون فعال پیدا شد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
     }) as typeof complete;
-    const manager = new RuleManager();
+    const manager = new RuleManager({ baseUrl: "" });
     const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
     const result = await assistant.handle({ conversationId: "rules-ai-1", message: "قوانین فعال را نشان بده", locale: "fa", context: RULE_CONTEXT });
     assertEqual(result.kind, "read", "read action completes through the library");
@@ -1782,7 +1854,7 @@ async function main(): Promise<void> {
         toolCalls: [{ id: "create-1", type: "function" as const, function: { name: "create_rule", arguments: JSON.stringify(RULE_CREATE) } }],
       };
     }) as typeof complete;
-    const manager = new RuleManager();
+    const manager = new RuleManager({ baseUrl: "" });
     const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
     const proposed = await assistant.handle({ conversationId: "rules-ai-2", message: "قانون تازه‌ای بساز", locale: "fa", context: RULE_CONTEXT });
     assertEqual(proposed.kind, "proposed", "AI action creates only a proposal");
@@ -1801,7 +1873,7 @@ async function main(): Promise<void> {
     assertEqual((await manager.list()).total, 3, "only the explicit yes changes data");
     assertEqual(modelCalls, 1, "confirmation is deterministic, not another model call");
 
-    const cancelledAssistant = new RulesAssistant({ manager: new RuleManager(), completeImpl: fakeComplete });
+    const cancelledAssistant = new RulesAssistant({ manager: new RuleManager({ baseUrl: "" }), completeImpl: fakeComplete });
     await cancelledAssistant.handle({ conversationId: "rules-ai-3", message: "قانونی بساز", context: RULE_CONTEXT });
     const cancelled = await cancelledAssistant.handle({ conversationId: "rules-ai-3", message: "لغو", context: RULE_CONTEXT });
     assertEqual(cancelled.kind, "cancelled", "explicit cancel discards the proposal");
@@ -1817,7 +1889,7 @@ async function main(): Promise<void> {
       }
       return { content: "یک قانون فعال وجود دارد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
     }) as typeof complete;
-    const manager = new RuleManager();
+    const manager = new RuleManager({ baseUrl: "" });
     const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
     resetSessionsForTesting();
     const result = await handleChat({
@@ -1846,7 +1918,7 @@ async function main(): Promise<void> {
   });
 
   await test("dummy rules validate, paginate, filter, and require confirmation for writes", async () => {
-    const manager = new RuleManager({ now: () => Date.parse("2026-06-01T00:00:00.000Z") });
+    const manager = new RuleManager({ baseUrl: "", now: () => Date.parse("2026-06-01T00:00:00.000Z") });
     assertEqual((await manager.list()).total, 2, "two rules are seeded");
     assertEqual((await manager.list({ status: "active" })).rules.length, 1, "active filter");
     assertEqual((await manager.list({ status: "inactive" })).rules.length, 1, "inactive filter");
