@@ -52,7 +52,16 @@ function check(label: string, ok: boolean, detail = ""): void {
 async function main(): Promise<void> {
   let EmbeddedPostgres: new (options: Record<string, unknown>) => Embedded;
   try {
-    const loaded = (await import("embedded-postgres")) as { default: typeof EmbeddedPostgres };
+    /*
+     * The specifier is a variable on purpose.
+     *
+     * `import("embedded-postgres")` written literally makes tsc resolve the
+     * package, and it is not a dependency — so `npm run typecheck` fails on any
+     * clone that has not installed it by hand. A variable specifier is not
+     * statically resolvable, which is exactly what we want here.
+     */
+    const moduleName = "embedded-postgres";
+    const loaded = (await import(moduleName)) as { default: typeof EmbeddedPostgres };
     EmbeddedPostgres = loaded.default;
   } catch {
     console.error(
