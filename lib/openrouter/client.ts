@@ -12,6 +12,8 @@
 import { getConfig } from "@/lib/config";
 import { logWarn } from "@/lib/log";
 import { truncate } from "@/lib/text";
+import { selectChain, type SelectionSource } from "./select";
+import { getStat, recordFailure, recordSuccess } from "./stats";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -43,6 +45,8 @@ export type CompletionResult = {
   finishReason: string | null;
   /** every model we tried, in order, with the reason it was skipped */
   attempts: Array<{ model: string; ok: boolean; ms: number; error?: string; status?: number }>;
+  /** how the chain was chosen: auto (live catalog), fixed, or fallback */
+  selection: SelectionSource;
   usage?: { promptTokens?: number; completionTokens?: number };
 };
 
@@ -133,9 +137,15 @@ async function callOnce(
 }
 
 /**
- * Walks the free-model chain until one model answers.
- * Throws an ApiError-ish Error with `code = "ALL_MODELS_FAILED"` when the chain
- * is exhausted, so callers can degrade gracefully.
+ * Walks the model chain until one model answers.
+ *
+ * The chain comes from `selectChain()`: the best free models from the live
+ * catalog, ordered by quality and measured speed. Every outcome is fed back
+ * into `lib/openrouter/stats.ts`, so the next call already knows that the
+ * winner was slow or that the runner-up is rate-limited.
+ *
+ * Throws an Error with `code = "ALL_MODELS_FAILED"` when the chain is
+ * exhausted, so callers can degrade gracefully.
  */
 export async function complete(options: CompletionOptions): Promise<CompletionResult> {
   const config = getConfig();
@@ -146,20 +156,38 @@ export async function complete(options: CompletionOptions): Promise<CompletionRe
     throw error;
   }
 
-  const chain = options.modelChain ?? config.modelChain;
+  // An explicit chain wins (tests, and callers that must pin a model).
+  const selection = options.modelChain ? null : await selectChain();
+  const chain = options.modelChain ?? selection?.chain ?? config.modelChain;
+  const source: SelectionSource = options.modelChain ? "fixed" : selection?.source ?? "fixed";
+
+  // An auto-selected pool is already redundant, so each model gets one shot:
+  // trying four models once beats trying one model four times.
+  const shotsPerModel = options.modelChain ? config.modelRetries + 1 : 1;
   const attempts: CompletionResult["attempts"] = [];
 
   for (const model of chain) {
-    for (let attempt = 0; attempt <= config.modelRetries; attempt += 1) {
+    for (let attempt = 0; attempt < shotsPerModel; attempt += 1) {
       const startedAt = Date.now();
       try {
         const { content, usage, finishReason } = await callOnce(model, options, config.modelTimeoutMs);
-        attempts.push({ model, ok: true, ms: Date.now() - startedAt });
-        return { content, model, finishReason, attempts, usage };
+        const ms = Date.now() - startedAt;
+        recordSuccess(model, ms);
+        attempts.push({ model, ok: true, ms });
+        return { content, model, finishReason, attempts, usage, selection: source };
       } catch (error) {
         const status = error instanceof ModelCallError ? error.status : 0;
         const message = error instanceof Error ? error.message : String(error);
-        attempts.push({ model, ok: false, ms: Date.now() - startedAt, error: truncate(message, 200), status });
+        const ms = Date.now() - startedAt;
+        attempts.push({ model, ok: false, ms, error: truncate(message, 200), status });
+
+        // Longer cooldown the more often this model has failed in a row.
+        const previous = getStat(model)?.consecutiveFailures ?? 0;
+        recordFailure(model, {
+          status,
+          error: truncate(message, 200),
+          cooldownMs: config.modelCooldownMs * Math.min(4, previous + 1),
+        });
 
         if (!isRetryableStatus(status)) {
           // Bad request / unknown model → no point retrying, move to next model.
@@ -168,7 +196,9 @@ export async function complete(options: CompletionOptions): Promise<CompletionRe
         }
 
         // Small back-off before retrying or moving on (free pool needs it).
-        await new Promise((resolve) => setTimeout(resolve, 300 + attempt * 500));
+        if (attempt + 1 < shotsPerModel) {
+          await new Promise((resolve) => setTimeout(resolve, 300 + attempt * 500));
+        }
       }
     }
   }

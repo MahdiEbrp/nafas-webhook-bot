@@ -15,8 +15,16 @@ export type Locale = "fa" | "en";
 export type AppConfig = {
   /** OpenRouter */
   openrouterApiKey: string;
-  /** Ordered free-model chain, first one that works wins */
+  /** Fallback / pinned chain: used when auto-selection is off or the catalog is unreachable */
   modelChain: string[];
+  /** "auto" picks the best free models from the live catalog; "fixed" uses modelChain only */
+  modelSelection: "auto" | "fixed";
+  /** How many auto-selected models to try, in order, before giving up */
+  modelPoolSize: number;
+  /** Ignore catalog models with less context than this (a chat with memory needs room) */
+  modelMinContext: number;
+  /** How long a model that just failed waits before it can be picked first again */
+  modelCooldownMs: number;
   /** Hard timeout for a single model call */
   modelTimeoutMs: number;
   /** Max attempts per model before falling through to the next */
@@ -54,9 +62,10 @@ export type AppConfig = {
 const FREE_SUFFIX = ":free";
 
 /**
- * Free models on OpenRouter change over time, so the chain is configurable.
- * The defaults are `:free` models that are strong enough for natural Persian
- * conversation. Run `npm run models` to see what is alive today.
+ * The fallback chain. Free models on OpenRouter change over time, so with
+ * MODEL_SELECTION=auto (the default) this list is only a safety net for when
+ * the catalog cannot be fetched, plus a hint that these ids are trusted — they
+ * get a small ranking boost. Run `npm run models` to see today's live ranking.
  */
 export const DEFAULT_MODEL_CHAIN = [
   "liquid/lfm-3-1.7b:free",
@@ -107,6 +116,10 @@ export function getConfig(): AppConfig {
   cached = {
     openrouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
     modelChain: safeChain,
+    modelSelection: process.env.MODEL_SELECTION?.trim().toLowerCase() === "fixed" ? "fixed" : "auto",
+    modelPoolSize: Math.max(1, Math.min(8, int(process.env.MODEL_POOL_SIZE, 4))),
+    modelMinContext: int(process.env.MODEL_MIN_CONTEXT, 8192),
+    modelCooldownMs: int(process.env.MODEL_COOLDOWN_MS, 90_000),
     modelTimeoutMs: int(process.env.MODEL_TIMEOUT_MS, 45_000),
     modelRetries: int(process.env.MODEL_RETRIES, 2),
     temperature: Math.min(2, Math.max(0, float(process.env.TEMPERATURE, 0.7))),

@@ -19,6 +19,9 @@ import type { TelegramMessage, TelegramUpdate } from "@/lib/telegram/api";
 
 process.env.OPENROUTER_API_KEY = "test-key";
 process.env.OPENROUTER_MODELS = "test/free-a:free,test/free-b:free";
+// The conversation tests below pin the chain on purpose; the selection tests
+// further down switch MODEL_SELECTION to "auto" and switch it back.
+process.env.MODEL_SELECTION = "fixed";
 process.env.MODEL_RETRIES = "1";
 process.env.MODEL_TIMEOUT_MS = "2000";
 process.env.HISTORY_MESSAGES = "4";
@@ -44,7 +47,22 @@ let failAllModels = false;
 /** Reported finish_reason ("length" = the answer was cut by max_tokens). */
 let modelFinishReason: string | null = "stop";
 
-const FREE_MODEL_IDS = ["test/free-a:free", "test/free-b:free", "test/free-c:free"];
+/**
+ * The fake catalog. Deliberately mixed so ranking has something to decide:
+ * a known-strong model, plain mid-table ones, a big-context one, and a runt
+ * that must be filtered out for having too little context.
+ */
+const FREE_CATALOG: Array<{ id: string; context_length: number }> = [
+  { id: "test/free-a:free", context_length: 32_000 },
+  { id: "test/free-b:free", context_length: 32_000 },
+  { id: "test/free-c:free", context_length: 128_000 },
+  { id: "deepseek/deepseek-chat:free", context_length: 64_000 },
+  { id: "liquid/lfm-3-1.7b:free", context_length: 8_192 },
+  { id: "tiny/runt:free", context_length: 2_048 },
+];
+
+/** Set to a non-200 to make the catalog fetch fail. */
+let catalogStatus = 200;
 
 function lastUserMessage(body: unknown): string {
   const messages = (body as { messages?: Array<{ role: string; content: string }> })?.messages ?? [];
@@ -102,12 +120,15 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 
   /* OpenRouter — model catalog (used by /api/health) */
   if (url.includes("openrouter.ai/api/v1/models")) {
+    if (catalogStatus !== 200) {
+      return new Response("catalog unavailable", { status: catalogStatus });
+    }
     return new Response(
       JSON.stringify({
-        data: FREE_MODEL_IDS.map((id) => ({
-          id,
-          name: id,
-          context_length: 8192,
+        data: FREE_CATALOG.map((model) => ({
+          id: model.id,
+          name: model.id,
+          context_length: model.context_length,
           supported_parameters: ["tools", "response_format"],
         })),
       }),
@@ -218,6 +239,10 @@ async function main(): Promise<void> {
   const chatRoute = await import("@/app/api/chat/route");
   const webhookRoute = await import("@/app/api/telegram/webhook/route");
   const healthRoute = await import("@/app/api/health/route");
+  const { rankModels, scoreModel, speedDelta, UNKNOWN_QUALITY } = await import("@/lib/openrouter/ranking");
+  const { recordSuccess, recordFailure, getStat, resetStatsForTesting } = await import("@/lib/openrouter/stats");
+  const { selectChain } = await import("@/lib/openrouter/select");
+  const { resetModelCache } = await import("@/lib/openrouter/models");
 
   console.log("\n🤖 chat bot self-test (offline)\n");
   resetConfigCache();
@@ -363,21 +388,29 @@ async function main(): Promise<void> {
     assertEqual(response.status, 403, "origin blocked");
   });
 
-  await test("GET /api/health reports config + free models", async () => {
+  await test("GET /api/health reports the model selection", async () => {
     const response = await healthRoute.GET(new Request("http://localhost/api/health"));
     assertEqual(response.status, 200, "status");
     const payload = (await response.json()) as {
       ok: boolean;
       data: {
         bot: { name: string };
-        openrouter: { configured: boolean; freeModels: { count: number; configuredChainAlive: boolean } };
+        openrouter: {
+          configured: boolean;
+          selection: { source: string; chain: string[]; catalogSize: number } | null;
+          fallbackChain: string[];
+        };
         telegram: { configured: boolean; webhookUrl: string | null };
       };
     };
     assertEqual(payload.data.bot.name, "ربات تست", "bot name");
     assertEqual(payload.data.openrouter.configured, true, "openrouter configured");
-    assertEqual(payload.data.openrouter.freeModels.count, 3, "free models counted");
-    assertEqual(payload.data.openrouter.freeModels.configuredChainAlive, true, "configured chain is alive");
+    assert(payload.data.openrouter.selection !== null, "a selection is reported");
+    assert(
+      (payload.data.openrouter.selection?.chain.length ?? 0) > 0,
+      "the reported chain is not empty",
+    );
+    assertEqual(payload.data.openrouter.fallbackChain.join(","), "test/free-a:free,test/free-b:free", "fallback chain");
     assertEqual(payload.data.telegram.webhookUrl, "https://bot.example.com/api/telegram/webhook", "webhook url");
   });
 
@@ -499,6 +532,232 @@ async function main(): Promise<void> {
     const replayPayload = (await replay.json()) as { data: { skipped: boolean; reason: string } };
     assertEqual(replayPayload.data.skipped, true, "duplicate skipped");
     assertEqual(sentTexts().length, 0, "nothing sent twice");
+  });
+
+  /* ── 4. Automatic model selection ─────────────────────────────────── */
+
+  const catalogModel = (id: string, contextLength = 32_000) => ({
+    id,
+    name: id,
+    contextLength,
+    supportsTools: true,
+    supportsJsonMode: true,
+  });
+
+  await test("speed is worth less than quality, so a slow smart model still wins", () => {
+    assertEqual(speedDelta(null), 0, "an unmeasured model gets no speed term");
+    assertEqual(Math.round(speedDelta(2500)), 0, "average speed = no change");
+    assertEqual(Math.round(speedDelta(1)), 14, "very fast saturates at +14");
+    assertEqual(Math.round(speedDelta(99_000)), -14, "very slow saturates at -14");
+
+    const smart = scoreModel(catalogModel("deepseek/deepseek-chat:free", 64_000), {
+      latencyMs: 3000,
+      bestMs: 3000,
+      samples: 5,
+      failures: 0,
+      consecutiveFailures: 0,
+      lastStatus: null,
+      lastError: null,
+      lastUsedAt: 0,
+      cooldownUntil: 0,
+    });
+    const quick = scoreModel(catalogModel("test/free-a:free"), {
+      latencyMs: 5,
+      bestMs: 5,
+      samples: 5,
+      failures: 0,
+      consecutiveFailures: 0,
+      lastStatus: null,
+      lastError: null,
+      lastUsedAt: 0,
+      cooldownUntil: 0,
+    });
+
+    assertEqual(smart.quality, 88, "deepseek has the strong prior");
+    assertEqual(quick.quality, UNKNOWN_QUALITY, "an unknown id gets the mid-table prior");
+    assert(smart.score > quick.score, `smart ${smart.score} beats quick ${quick.score}`);
+  });
+
+  await test("a model that is failing sinks but is never dropped", () => {
+    const now = 1_000_000;
+    const stat = {
+      latencyMs: 100,
+      bestMs: 100,
+      samples: 3,
+      failures: 2,
+      consecutiveFailures: 2,
+      lastStatus: 429,
+      lastError: "quota",
+      lastUsedAt: now,
+      cooldownUntil: now + 90_000,
+    };
+    const healthy = scoreModel(catalogModel("test/free-b:free"), undefined, { now });
+    const cooling = scoreModel(catalogModel("test/free-a:free"), stat, { now });
+
+    assertEqual(cooling.coolingDown, true, "flagged as cooling down");
+    assert(cooling.score < healthy.score, `pushed behind a healthy peer (${cooling.score} < ${healthy.score})`);
+    assert(cooling.reason.includes("cooling down"), "reason explains it");
+
+    const ranked = rankModels(
+      [catalogModel("test/free-a:free"), catalogModel("test/free-b:free")],
+      (id) => (id === "test/free-a:free" ? stat : undefined),
+      { now },
+    );
+    assertEqual(ranked[0]?.id, "test/free-b:free", "the healthy model goes first");
+    assertEqual(ranked.length, 2, "the cooling model is still in the list");
+  });
+
+  await test("a pinned model gets a boost, and tiny-context models are filtered out", () => {
+    const pinned = scoreModel(catalogModel("test/free-a:free"), undefined, { pinned: ["test/free-a:free"] });
+    const plain = scoreModel(catalogModel("test/free-a:free"), undefined, {});
+    assertEqual(pinned.score - plain.score, 6, "operator boost");
+
+    const ranked = rankModels(
+      [catalogModel("test/free-a:free", 32_000), catalogModel("tiny/runt:free", 2_048)],
+      () => undefined,
+      { minContext: 8_192 },
+    );
+    assertEqual(ranked.length, 1, "the runt is filtered out");
+    assertEqual(ranked[0]?.id, "test/free-a:free", "the usable model survives");
+  });
+
+  await test("auto selection builds a chain from the live catalog, best first", async () => {
+    resetStatsForTesting();
+    resetModelCache();
+    catalogStatus = 200;
+    const saved = process.env.MODEL_SELECTION;
+    process.env.MODEL_SELECTION = "auto";
+    resetConfigCache();
+
+    try {
+      const selection = await selectChain({ quiet: true });
+      assertEqual(selection.source, "auto", "source");
+      assertEqual(selection.catalogSize, 6, "whole catalog seen");
+      assertEqual(selection.considered, 5, "the runt was filtered out by min context");
+      assertEqual(selection.chain.length, getConfig().modelPoolSize, "chain is capped at the pool size");
+      assertEqual(selection.chain[0], "deepseek/deepseek-chat:free", "the strongest model goes first");
+      assert(!selection.chain.includes("tiny/runt:free"), "the runt is not in the chain");
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_SELECTION;
+      else process.env.MODEL_SELECTION = saved;
+      resetConfigCache();
+    }
+  });
+
+  await test("measured speed reorders models of equal quality", async () => {
+    resetStatsForTesting();
+    resetModelCache();
+    const saved = process.env.MODEL_SELECTION;
+    process.env.MODEL_SELECTION = "auto";
+    resetConfigCache();
+
+    try {
+      // free-a and free-b have the same prior; only speed can separate them.
+      recordSuccess("test/free-a:free", 900);
+      recordSuccess("test/free-b:free", 40);
+
+      const selection = await selectChain({ quiet: true });
+      const a = selection.top.find((model) => model.id === "test/free-a:free");
+      const b = selection.top.find((model) => model.id === "test/free-b:free");
+      assert(b !== undefined && a !== undefined, "both models are ranked");
+      assert((b?.score ?? 0) > (a?.score ?? 0), `the faster one scores higher: ${b?.score} > ${a?.score}`);
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_SELECTION;
+      else process.env.MODEL_SELECTION = saved;
+      resetStatsForTesting();
+      resetConfigCache();
+    }
+  });
+
+  await test("one pool slot is kept for a model we have not timed yet", async () => {
+    resetStatsForTesting();
+    resetModelCache();
+    const saved = process.env.MODEL_SELECTION;
+    process.env.MODEL_SELECTION = "auto";
+    resetConfigCache();
+
+    try {
+      // Measure everything that would normally fill the pool.
+      for (const id of ["deepseek/deepseek-chat:free", "test/free-c:free", "test/free-a:free", "test/free-b:free"]) {
+        recordSuccess(id, 500);
+      }
+
+      const selection = await selectChain({ quiet: true });
+      const last = selection.chain[selection.chain.length - 1] ?? "";
+      const lastModel = selection.top.find((model) => model.id === last);
+      assertEqual(lastModel?.samples, 0, "the last slot went to an unmeasured model");
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_SELECTION;
+      else process.env.MODEL_SELECTION = saved;
+      resetStatsForTesting();
+      resetConfigCache();
+    }
+  });
+
+  await test("MODEL_SELECTION=fixed ignores the catalog and uses OPENROUTER_MODELS", async () => {
+    resetModelCache();
+    catalogStatus = 200;
+    const saved = process.env.MODEL_SELECTION;
+    process.env.MODEL_SELECTION = "fixed";
+    resetConfigCache();
+
+    try {
+      const selection = await selectChain({ quiet: true });
+      assertEqual(selection.source, "fixed", "source");
+      assertEqual(selection.chain.join(","), "test/free-a:free,test/free-b:free", "exactly the configured chain");
+      assertEqual(selection.catalogSize, 0, "the catalog was not even fetched");
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_SELECTION;
+      else process.env.MODEL_SELECTION = saved;
+      resetConfigCache();
+    }
+  });
+
+  await test("when the catalog is unreachable the bot falls back, it does not stop", async () => {
+    resetModelCache();
+    catalogStatus = 503;
+    const saved = process.env.MODEL_SELECTION;
+    process.env.MODEL_SELECTION = "auto";
+    resetConfigCache();
+
+    try {
+      const selection = await selectChain({ quiet: true });
+      assertEqual(selection.source, "fallback", "source");
+      assertEqual(selection.chain.join(","), "test/free-a:free,test/free-b:free", "configured chain used");
+      assert((selection.note ?? "").includes("catalog unavailable"), "the note says why");
+    } finally {
+      catalogStatus = 200;
+      if (saved === undefined) delete process.env.MODEL_SELECTION;
+      else process.env.MODEL_SELECTION = saved;
+      resetModelCache();
+      resetConfigCache();
+    }
+  });
+
+  await test("every call teaches the stats: successes are timed, failures cool down", async () => {
+    resetSessionsForTesting();
+    resetStatsForTesting();
+    resetModelCache();
+    failFirstModel = true;
+
+    try {
+      const result = await handleChat({ message: "سلام", sessionId: "s-stats", locale: "fa" });
+      assertEqual(result.model, "test/free-b:free", "the fallback model answered");
+
+      const winner = getStat("test/free-b:free");
+      assertEqual(winner?.samples, 1, "the winner was timed once");
+      assert(typeof winner?.latencyMs === "number", "a latency was recorded");
+      assertEqual(winner?.cooldownUntil, 0, "a success clears any cooldown");
+
+      const loser = getStat("test/free-a:free");
+      assertEqual(loser?.consecutiveFailures, 1, "the failure was counted");
+      assertEqual(loser?.lastStatus, 429, "the status was kept");
+      assert((loser?.cooldownUntil ?? 0) > Date.now(), "the loser is cooling down right now");
+    } finally {
+      failFirstModel = false;
+      resetStatsForTesting();
+      resetModelCache();
+    }
   });
 
   await test("long answers are cut at a sentence, not mid-word", () => {
