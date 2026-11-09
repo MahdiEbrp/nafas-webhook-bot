@@ -210,6 +210,17 @@ function lastSent(): string {
   return sentTexts().at(-1) ?? "";
 }
 
+/** Full sendMessage payloads, so tests can look at the reply keyboard too. */
+function sentPayloads(): Array<Record<string, unknown>> {
+  return calls
+    .filter((call) => call.url.endsWith("/sendMessage"))
+    .map((call) => (call.body ?? {}) as Record<string, unknown>);
+}
+
+function lastMarkup(): Record<string, unknown> | undefined {
+  return sentPayloads().at(-1)?.reply_markup as Record<string, unknown> | undefined;
+}
+
 function telegramUpdate(overrides: Partial<TelegramMessage> = {}): TelegramUpdate {
   const message: TelegramMessage = {
     message_id: 10,
@@ -251,15 +262,24 @@ async function main(): Promise<void> {
   const { nowFacts, betweenFacts, leapYearFacts, addFacts } = await import("@/lib/dates/engine");
   const { nowInZone } = await import("@/lib/dates/timezone");
   const { isIdentityQuestion, identityText } = await import("@/lib/bot/identity");
-  const { normalizeDatabaseUrl, setRunnerForTesting } = await import("@/lib/db/client");
-  const { ensureSchema, resetSchemaCache, SCHEMA_STATEMENTS } = await import("@/lib/db/schema");
+  const { normalizeDatabaseUrl, setRunnerForTesting, dbConfigured } = await import("@/lib/db/client");
+  const { ensureSchema, resetSchemaCache, SCHEMA_STATEMENTS, TABLE_NAME } = await import("@/lib/db/schema");
   const {
     ensureChatSession,
     resolveSessionId,
     fallbackSessionId,
     newSessionId,
+    phoneFor,
+    setChatPhone,
+    cachedPhoneCount,
     resetChatSessionCacheForTesting,
   } = await import("@/lib/db/chat-sessions");
+  const {
+    normalizeIranPhone,
+    isStoredPhone,
+    displayPhone,
+    toAsciiDigits,
+  } = await import("@/lib/phone");
 
   console.log("\n🤖 chat bot self-test (offline)\n");
   resetConfigCache();
@@ -1053,12 +1073,81 @@ async function main(): Promise<void> {
    * A pretend Postgres. It implements only what chat-sessions.ts actually
    * sends, and records every query so the tests can assert on the SQL.
    */
+  /**
+   * Splits a parenthesised SQL list on its top-level commas.
+   *
+   * Depth-aware on purpose: a naive `[^)]*` or a plain `split(",")` breaks on
+   * `now()`, which is exactly the kind of wrong answer that makes a guard worse
+   * than no guard at all.
+   */
+  function sqlList(sql: string, opener: RegExp): string[] {
+    const at = sql.search(opener);
+    if (at < 0) return [];
+
+    let depth = 0;
+    let body = "";
+    for (let index = at; index < sql.length; index += 1) {
+      const char = sql[index];
+      if (char === "(") {
+        depth += 1;
+        // Only the list's own opening paren is skipped. A nested one is real
+        // content: dropping it while keeping its partner turns `now()` into
+        // `now)`, and the level counter below then never finds the next comma.
+        if (depth === 1) continue;
+      } else if (char === ")") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+      if (depth > 0) body += char;
+    }
+
+    const parts: string[] = [];
+    let level = 0;
+    let current = "";
+    for (const char of body) {
+      if (char === "(") level += 1;
+      else if (char === ")") level = Math.max(0, level - 1);
+      if (char === "," && level === 0) {
+        parts.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    parts.push(current.trim());
+    return parts.filter(Boolean);
+  }
+
+  /**
+   * The table's real columns, read out of the real schema statements.
+   *
+   * Deriving them beats retyping them: a column added to schema.ts is known here
+   * immediately, and a column named in SQL but missing from the schema is not.
+   */
+  const DECLARED_COLUMNS = sqlList(
+    SCHEMA_STATEMENTS.find((statement) => /create table/i.test(statement)) ?? "",
+    /create table if not exists\s+\w+\s*\(/i,
+  ).map((definition) => definition.split(/\s+/)[0]);
+
   function makeFakeDb() {
-    const rows = new Map<number, { session_id: string; created_at: Date }>();
+    type FakeRow = { session_id: string; phone: string | null; created_at: Date };
+    const rows = new Map<number, FakeRow>();
     const queries: string[] = [];
+    /** SQL the fake refused, the way Postgres would have. */
+    const sqlErrors: string[] = [];
     let failNext = false;
 
     const stamp = () => new Date("2026-11-09T12:00:00Z").toISOString();
+
+    const shape = (chatId: number, row: FakeRow, inserted: boolean) => ({
+      telegram_chat_id: chatId,
+      session_id: row.session_id,
+      phone: row.phone,
+      created_at: row.created_at.toISOString(),
+      updated_at: stamp(),
+      last_seen_at: stamp(),
+      inserted,
+    });
 
     const runner = async (query: string, params: unknown[] = []): Promise<unknown[]> => {
       queries.push(query);
@@ -1066,48 +1155,78 @@ async function main(): Promise<void> {
         failNext = false;
         throw new Error("neon unreachable");
       }
+
       if (/create (table|index) if not exists/i.test(query)) return [];
+      // Postgres would widen the table here; a Map has nothing to widen.
+      if (/alter table .* add column if not exists/i.test(query)) return [];
+
+      /*
+       * The arity guard.
+       *
+       * A shipped INSERT once named six columns and supplied five values, and
+       * this fake did not notice because it only pattern-matched. Real Postgres
+       * rejects that on every row, so the check belongs here: if the column list
+       * and the value list disagree, or a column does not exist, fail loudly
+       * instead of quietly returning a plausible row.
+       */
+      if (/^\s*insert into\s+chat_sessions/i.test(query)) {
+        const columns = sqlList(query, /insert into\s+chat_sessions\s*\(/i);
+        const values = sqlList(query, /\bvalues\s*\(/i);
+
+        if (columns.length !== values.length) {
+          const detail =
+            `INSERT arity mismatch: ${columns.length} columns (${columns.join(", ")}) ` +
+            `but ${values.length} values (${values.join(", ")})`;
+          sqlErrors.push(detail);
+          throw new Error("INSERT has more target columns than expressions");
+        }
+
+        for (const column of columns) {
+          if (!DECLARED_COLUMNS.includes(column)) {
+            sqlErrors.push(`INSERT targets "${column}", which is not a column of ${TABLE_NAME}`);
+            throw new Error(`column "${column}" of relation "${TABLE_NAME}" does not exist`);
+          }
+        }
+      }
 
       if (/insert into chat_sessions/i.test(query)) {
         const chatId = Number(params[0]);
         const proposed = String(params[1]);
+        // The phone upsert carries the number in $3 and overwrites it on
+        // conflict; the session upsert carries no number at all.
+        const setsPhone = /set\s+phone\s*=\s*excluded\.phone/i.test(query);
+        const incoming = params[2] === null || params[2] === undefined ? null : String(params[2]);
+
         const existing = rows.get(chatId);
         if (existing) {
-          return [
-            {
-              telegram_chat_id: chatId,
-              session_id: existing.session_id,
-              created_at: existing.created_at,
-              updated_at: stamp(),
-              last_seen_at: stamp(),
-              inserted: false,
-            },
-          ];
+          if (setsPhone) existing.phone = incoming;
+          return [shape(chatId, existing, false)];
         }
-        rows.set(chatId, { session_id: proposed, created_at: new Date(stamp()) });
-        return [
-          {
-            telegram_chat_id: chatId,
-            session_id: proposed,
-            created_at: stamp(),
-            updated_at: stamp(),
-            last_seen_at: stamp(),
-            inserted: true,
-          },
-        ];
+
+        const created: FakeRow = {
+          session_id: proposed,
+          phone: setsPhone ? incoming : null,
+          created_at: new Date(stamp()),
+        };
+        rows.set(chatId, created);
+        return [shape(chatId, created, true)];
       }
 
       if (/select .* from chat_sessions where telegram_chat_id/i.test(query)) {
         const row = rows.get(Number(params[0]));
-        return row
-          ? [{ telegram_chat_id: Number(params[0]), ...row, updated_at: stamp(), last_seen_at: stamp(), inserted: false }]
-          : [];
+        return row ? [shape(Number(params[0]), row, false)] : [];
       }
 
       return [];
     };
 
-    return { runner, rows, queries, fail: () => { failNext = true; } };
+    return {
+      runner,
+      rows,
+      queries,
+      sqlErrors,
+      fail: () => { failNext = true; },
+    };
   }
 
   await test("a pasted connection string is repaired before it is used", () => {
@@ -1172,19 +1291,30 @@ async function main(): Promise<void> {
     }
   });
 
-  await test("a warm instance does not hit the database for a chat it knows", async () => {
+  await test("a settled chat is answered from memory, an unsettled one is re-read", async () => {
     const db = makeFakeDb();
     setRunnerForTesting(db.runner);
     resetSchemaCache();
     resetChatSessionCacheForTesting();
 
     try {
+      // No number yet: the chat is *not* settled, so we keep asking the database.
+      // Another instance may have collected the number in the meantime, and
+      // blocking somebody who already gave theirs is worse than one extra read.
       await ensureChatSession(777);
       const afterFirst = db.queries.length;
-      const again = await ensureChatSession(777);
-      assertEqual(again?.isNew, false, "served from cache");
-      assertEqual(again?.fromCache, true, "flagged as cached");
-      assertEqual(db.queries.length, afterFirst, "the cached chat issued no query at all");
+      const unsettled = await ensureChatSession(777);
+      assertEqual(unsettled?.fromCache, false, "an unsettled chat is re-read, not served from memory");
+      assert(db.queries.length > afterFirst, "the re-read really reached the database");
+
+      // Once the number is on file the chat is settled and the DB is off the
+      // hot path entirely.
+      await setChatPhone(777, "09121234567");
+      const afterSave = db.queries.length;
+      const settled = await ensureChatSession(777);
+      assertEqual(settled?.fromCache, true, "flagged as cached");
+      assertEqual(settled?.phone, "09121234567", "the cached entry carries the number");
+      assertEqual(db.queries.length, afterSave, "the settled chat issued no query at all");
     } finally {
       setRunnerForTesting(null);
       resetSchemaCache();
@@ -1217,6 +1347,207 @@ async function main(): Promise<void> {
     }
   });
 
+  /* ── 10. The phone gate ─────────────────────────────────────────────── */
+
+  /** Runs a block with a fresh fake database and an empty outbox. */
+  async function withGateDb(run: (db: ReturnType<typeof makeFakeDb>) => Promise<void>): Promise<void> {
+    const db = makeFakeDb();
+    setRunnerForTesting(db.runner);
+    resetSchemaCache();
+    resetChatSessionCacheForTesting();
+    resetSessionsForTesting();
+    calls.length = 0;
+    modelReply = "سلام!";
+    try {
+      await run(db);
+    } finally {
+      setRunnerForTesting(null);
+      resetSchemaCache();
+      resetChatSessionCacheForTesting();
+      resetSessionsForTesting();
+    }
+  }
+
+  await test("Iranian numbers are read in every shape and stored as 09XXXXXXXXX", () => {
+    const shapes: Array<[string, string]> = [
+      ["09121234567", "09121234567"],
+      ["۰۹۱۲۱۲۳۴۵۶۷", "09121234567"],
+      ["٠٩١٢١٢٣٤٥٦٧", "09121234567"],
+      ["+989121234567", "09121234567"],
+      ["00989121234567", "09121234567"],
+      ["989121234567", "09121234567"],
+      ["9121234567", "09121234567"],
+      ["+98 912 123 4567", "09121234567"],
+      ["0912-123-4567", "09121234567"],
+      ["(0912) 123 4567", "09121234567"],
+    ];
+    for (const [raw, expected] of shapes) {
+      const check = normalizeIranPhone(raw);
+      assertEqual(check.ok, true, `"${raw}" is accepted`);
+      assertEqual(check.ok && check.normalized, expected, `"${raw}" → ${expected}`);
+    }
+    assertEqual(toAsciiDigits("۰۹۱۲"), "0912", "Persian digits are converted");
+    assertEqual(displayPhone("09121234567"), "۰۹۱۲۱۲۳۴۵۶۷", "shown back to the user in Persian");
+  });
+
+  await test("anything that is not an Iranian mobile is refused, with a usable reason", () => {
+    const refusals: Array<[string, string]> = [
+      ["+14155552671", "not-iranian-mobile"],
+      ["02112345678", "not-iranian-mobile"],
+      ["+442071838750", "too-long"],
+      ["0912123456", "too-short"],
+      ["091212345678", "too-long"],
+      ["سلام", "empty"],
+      ["", "empty"],
+    ];
+    for (const [raw, reason] of refusals) {
+      const check = normalizeIranPhone(raw);
+      assertEqual(check.ok, false, `"${raw}" is refused`);
+      assertEqual(!check.ok && check.reason, reason, `"${raw}" → ${reason}`);
+    }
+    assertEqual(isStoredPhone("09121234567"), true, "stored form is recognised");
+    assertEqual(isStoredPhone("+989121234567"), false, "international form is not the stored form");
+    assertEqual(isStoredPhone(null), false, "null is not a phone");
+  });
+
+  await test("the schema carries a phone column and widens a table that predates it", () => {
+    const create = SCHEMA_STATEMENTS.find((statement) => /create table/i.test(statement)) ?? "";
+    assert(/phone\s+text/.test(create), "a fresh install gets the column");
+    assert(
+      SCHEMA_STATEMENTS.some((statement) =>
+        /alter table \w+ add column if not exists phone text/i.test(statement),
+      ),
+      "an existing table is widened rather than left phone-less",
+    );
+    for (const statement of SCHEMA_STATEMENTS) {
+      assert(/if not exists/i.test(statement), "still idempotent");
+    }
+  });
+
+  await test("a phone number is stored against the chat id and read back", async () => {
+    await withGateDb(async (db) => {
+      assertEqual(await phoneFor(9001), null, "nothing on file for a new chat");
+
+      await ensureChatSession(9001);
+      assertEqual(db.rows.get(9001)?.phone, null, "the row exists before the number does");
+
+      const saved = await setChatPhone(9001, "09121234567");
+      assertEqual(saved?.phone, "09121234567", "the write returned the fresh row");
+      assertEqual(db.rows.get(9001)?.phone, "09121234567", "the column holds the stored form");
+      assertEqual(await phoneFor(9001), "09121234567", "read back under the chat id");
+      assertEqual(cachedPhoneCount(), 1, "the cache knows the number now");
+      assertEqual(
+        db.sqlErrors.length,
+        0,
+        db.sqlErrors.length === 0
+          ? "Postgres-shaped SQL throughout"
+          : `Postgres would reject this SQL: ${db.sqlErrors.join(" | ")}`,
+      );
+
+      // Last line of defence: nothing but the stored form reaches the column.
+      assertEqual(await setChatPhone(9002, "+14155552671"), null, "a foreign number is not written");
+      assertEqual(db.rows.get(9002), undefined, "and no row is created for it");
+    });
+  });
+
+  await test("the gate holds every message until a number is on file", async () => {
+    await withGateDb(async () => {
+      const outcome = await handleTelegramUpdate(telegramUpdate({ text: "امروز چندمه؟" }));
+      assertEqual(outcome.handled, true, "the update was consumed");
+      assertEqual(outcome.status, "phone-required", "and held at the gate");
+
+      const markup = lastMarkup();
+      assert(markup !== undefined, "a reply keyboard came with the ask");
+      const keyboard = markup?.keyboard as Array<Array<{ request_contact?: boolean }>> | undefined;
+      assertEqual(
+        keyboard?.[0]?.[0]?.request_contact,
+        true,
+        "the button asks Telegram itself for the contact",
+      );
+      assert(lastSent().includes("شماره"), "the ask says what is missing");
+
+      assertEqual(
+        calls.filter((call) => call.url.includes("chat/completions")).length,
+        0,
+        "the model was never reached",
+      );
+    });
+  });
+
+  await test("/start is gated too, but /id is not", async () => {
+    await withGateDb(async () => {
+      const start = await handleTelegramUpdate(telegramUpdate({ text: "/start" }));
+      assertEqual(start.status, "phone-required", "no welcome before the number is known");
+
+      const id = await handleTelegramUpdate(telegramUpdate({ text: "/id" }));
+      assertEqual(id.status, "id", "/id stays reachable, or the allowlist could never be set");
+      assert(lastSent().includes("777"), "and it still echoes the chat id");
+    });
+  });
+
+  await test("a shared Telegram contact saves the number, then the bot answers", async () => {
+    await withGateDb(async (db) => {
+      const shared = await handleTelegramUpdate(
+        telegramUpdate({ contact: { phone_number: "+989121234567", user_id: 777 } }),
+      );
+      assertEqual(shared.status, "phone-saved", "the contact was accepted");
+      assertEqual(db.rows.get(777)?.phone, "09121234567", "stored as 09XXXXXXXXX, no country code");
+      assert(lastSent().includes("۰۹۱۲۱۲۳۴۵۶۷"), "confirmed back in Persian digits");
+      assertEqual(lastMarkup()?.remove_keyboard, true, "and the keyboard was taken away");
+
+      const asked = await handleTelegramUpdate(telegramUpdate({ text: "امروز چندمه؟" }));
+      assertEqual(asked.status, "answered", "the next message is answered normally");
+      assert(
+        calls.some((call) => call.url.includes("chat/completions")),
+        "the model was reached this time",
+      );
+    });
+  });
+
+  await test("a number typed as text is accepted where the button is not available", async () => {
+    await withGateDb(async (db) => {
+      const typed = await handleTelegramUpdate(telegramUpdate({ text: "۰۹۱۲۱۲۳۴۵۶۷" }));
+      assertEqual(typed.status, "phone-saved", "Persian digits, typed by hand");
+      assertEqual(db.rows.get(777)?.phone, "09121234567", "normalised to the stored form");
+    });
+  });
+
+  await test("a foreign or landline number is refused and the user is asked again", async () => {
+    await withGateDb(async (db) => {
+      const foreign = await handleTelegramUpdate(
+        telegramUpdate({ contact: { phone_number: "+14155552671", user_id: 777 } }),
+      );
+      assertEqual(foreign.status, "phone-rejected:not-iranian-mobile", "refused");
+      assertEqual(db.rows.get(777)?.phone, undefined, "nothing was stored");
+      assert(lastSent().includes("۰۹"), "the reply shows the wanted shape");
+
+      // A one-time keyboard is gone once tapped, so it must be offered again.
+      const markup = lastMarkup();
+      const keyboard = markup?.keyboard as Array<Array<{ request_contact?: boolean }>> | undefined;
+      assertEqual(keyboard?.[0]?.[0]?.request_contact, true, "the button is handed back");
+
+      const landline = await handleTelegramUpdate(telegramUpdate({ text: "02112345678" }));
+      assertEqual(landline.status, "phone-rejected:not-iranian-mobile", "a landline is not a mobile");
+      assertEqual(await phoneFor(777), null, "still nothing on file");
+    });
+  });
+
+  await test("with no database the gate steps aside instead of locking everyone out", async () => {
+    setRunnerForTesting(null);
+    resetChatSessionCacheForTesting();
+    resetSessionsForTesting();
+    calls.length = 0;
+    modelReply = "سلام!";
+    try {
+      assertEqual(dbConfigured(), false, "there is nowhere to put a number");
+      const outcome = await handleTelegramUpdate(telegramUpdate({ text: "سلام" }));
+      assertEqual(outcome.status, "answered", "so the bot answers, exactly as it did before");
+    } finally {
+      resetChatSessionCacheForTesting();
+      resetSessionsForTesting();
+    }
+  });
+
   await test("Telegram: the stored session id is what the conversation is keyed by", async () => {
     const db = makeFakeDb();
     setRunnerForTesting(db.runner);
@@ -1227,6 +1558,13 @@ async function main(): Promise<void> {
     modelReply = "سلام";
 
     try {
+      // The phone gate is in force, so the number has to exist before any
+      // message is answered. Sharing the contact is the realistic first step.
+      const gate = await handleTelegramUpdate(
+        telegramUpdate({ contact: { phone_number: "+989121234567", user_id: 777 } }),
+      );
+      assertEqual(gate.status, "phone-saved", "the gate let the chat through afterwards");
+
       const outcome = await handleTelegramUpdate(telegramUpdate({ text: "سلام" }));
       assertEqual(outcome.handled, true, "message handled");
 

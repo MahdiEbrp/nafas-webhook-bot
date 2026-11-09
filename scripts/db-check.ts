@@ -21,7 +21,9 @@ import {
   ensureChatSession,
   fallbackSessionId,
   newSessionId,
+  phoneFor,
   resetChatSessionCacheForTesting,
+  setChatPhone,
 } from "@/lib/db/chat-sessions";
 
 /** A chat id that cannot collide with a real one. */
@@ -110,6 +112,32 @@ async function main(): Promise<void> {
   console.log(`  ${sameSession ? OK : BAD} same session id on the second message`);
   console.log(`  ${notNew ? OK : BAD} the second message is not reported as new`);
 
+  // The phone column: it is what the gate refuses to answer without, so a
+  // deployment where this silently fails is a bot that asks for a number
+  // forever. Worth proving end to end.
+  const hasPhoneColumn = columns.some((column) => column.column_name === "phone");
+  console.log(`  ${hasPhoneColumn ? OK : BAD} the phone column exists`);
+
+  const TEST_PHONE = "09121234567";
+  startedAt = Date.now();
+  const withPhone = await setChatPhone(TEST_CHAT_ID, TEST_PHONE);
+  const phoneMs = Date.now() - startedAt;
+  const phoneSaved = withPhone?.phone === TEST_PHONE;
+  console.log(
+    `  ${phoneSaved ? OK : BAD} phone stored in ${phoneMs}ms → ${withPhone?.phone ?? "nothing"}`,
+  );
+
+  // The stored form must survive the trip, and the session id must not change.
+  const readBack = await phoneFor(TEST_CHAT_ID);
+  const phoneRoundTrip = readBack === TEST_PHONE;
+  const sessionSurvived = withPhone?.sessionId === first.sessionId;
+  console.log(`  ${phoneRoundTrip ? OK : BAD} phone read back as ${readBack ?? "nothing"}`);
+  console.log(`  ${sessionSurvived ? OK : BAD} saving a phone left the session id alone`);
+
+  // A foreign number must never reach the column.
+  const refused = await setChatPhone(TEST_CHAT_ID, "+14155552671");
+  console.log(`  ${refused === null ? OK : BAD} a non-Iranian number is refused before it is written`);
+
   const leftover = await run(`delete from ${TABLE_NAME} where telegram_chat_id = $1 returning session_id`, [
     TEST_CHAT_ID,
   ]);
@@ -118,7 +146,8 @@ async function main(): Promise<void> {
   console.log(`\n  fallback when the database is gone: ${fallbackSessionId(TEST_CHAT_ID)}`);
   console.log(`  generated session id shape: ${newSessionId()}`);
 
-  const failed = !sameSession || !notNew;
+  const failed =
+    !sameSession || !notNew || !hasPhoneColumn || !phoneSaved || !phoneRoundTrip || !sessionSurvived;
   if (failed) {
     console.log(`\n  ${BAD} the round-trip did not behave as expected.\n`);
     process.exitCode = 1;

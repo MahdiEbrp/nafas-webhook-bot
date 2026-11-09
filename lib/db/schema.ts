@@ -26,11 +26,23 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   `create table if not exists ${TABLE_NAME} (
      telegram_chat_id bigint      primary key,
      session_id       text        not null,
+     phone            text,
      created_at       timestamptz not null default now(),
      updated_at       timestamptz not null default now(),
      last_seen_at     timestamptz not null default now()
    )`,
+  /**
+   * For databases created before `phone` existed.
+   *
+   * `create table if not exists` does nothing when the table is already there,
+   * so a deployment that ran the first version would keep its phone-less table
+   * forever. This line is the migration, and `if not exists` makes it free
+   * afterwards. A `phone` column that is nullable on purpose: a row exists the
+   * moment a chat writes in, which is before we have its number.
+   */
+  `alter table ${TABLE_NAME} add column if not exists phone text`,
   `create index if not exists ${TABLE_NAME}_session_id_idx on ${TABLE_NAME} (session_id)`,
+  `create index if not exists ${TABLE_NAME}_phone_idx on ${TABLE_NAME} (phone)`,
 ];
 
 let ensured: Promise<boolean> | null = null;

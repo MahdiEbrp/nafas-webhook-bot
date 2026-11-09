@@ -7,3 +7,6 @@ out
 *.tsbuildinfo
 .vercel
 .DS_Store
+
+# throwaway cluster created by `npm run db:real`
+.pgdata
