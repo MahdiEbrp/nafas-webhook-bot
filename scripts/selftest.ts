@@ -44,6 +44,7 @@ const calls: Call[] = [];
 
 /** Canned model behaviour. */
 let modelReply = "سلام! خوشحالم که اینجایی. 🙂";
+let modelToolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | null = null;
 let modelStatus = 200;
 /** Force the first model in the chain to fail so the fallback is exercised. */
 let failFirstModel = false;
@@ -113,7 +114,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       JSON.stringify({
         choices: [
           {
-            message: { content: `${modelReply} [${lastUserMessage(body)}]` },
+            message: modelToolCalls
+              ? { content: null, tool_calls: modelToolCalls }
+              : { content: `${modelReply} [${lastUserMessage(body)}]` },
             finish_reason: modelFinishReason,
           },
         ],
@@ -258,6 +261,7 @@ async function main(): Promise<void> {
   const { rankModels, scoreModel, speedDelta, UNKNOWN_QUALITY } = await import("@/lib/openrouter/ranking");
   const { recordSuccess, recordFailure, getStat, resetStatsForTesting } = await import("@/lib/openrouter/stats");
   const { selectChain } = await import("@/lib/openrouter/select");
+  const { complete } = await import("@/lib/openrouter/client");
   const { resetModelCache } = await import("@/lib/openrouter/models");
   const { answerDateQuestion } = await import("@/lib/dates/intent");
   const { extractDates } = await import("@/lib/dates/parse");
@@ -292,6 +296,23 @@ async function main(): Promise<void> {
     assertEqual(config.modelChain.join(","), "test/free-a:free,test/free-b:free", "model chain");
     assertEqual(config.history.maxMessages, 4, "history window");
     assert(configWarnings(config).some((w) => w.includes("OPENROUTER_API_KEY")) === false, "no API-key warning");
+  });
+
+  await test("OpenRouter accepts a function-tool response without text content", async () => {
+    modelToolCalls = [{ id: "call-rules-1", type: "function", function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }];
+    try {
+      const result = await complete({
+        messages: [{ role: "user", content: "قوانین فعال را نشان بده" }],
+        tools: [{ type: "function", function: { name: "list_rules", description: "List rules", parameters: { type: "object" } } }],
+        modelChain: ["test/free-a:free"],
+      });
+      assertEqual(result.content, "", "tool-only result has empty content");
+      assertEqual(result.toolCalls?.[0]?.function.name, "list_rules", "tool call is exposed to the caller");
+      const request = calls.filter((call) => call.url.includes("chat/completions")).at(-1);
+      assertEqual((request?.body as { tools?: unknown[] } | undefined)?.tools?.length, 1, "tool schema is sent to OpenRouter");
+    } finally {
+      modelToolCalls = null;
+    }
   });
 
   await test("system prompt is a conversation prompt, not an instruction sheet", () => {
@@ -1715,7 +1736,269 @@ async function main(): Promise<void> {
     assertEqual(typeof a, "string", "a string");
   });
 
-  /* ── 11. User management ────────────────────────────────────────────── */
+  /* ── 11. Rules client ────────────────────────────────────────────────── */
+
+  const { RuleManager, seedRules } = await import("@/lib/rules/manager");
+  const { RulesAssistant } = await import("@/lib/rules/assistant");
+  const RULE_CONTEXT = { actorId: "operator-1", sessionCookie: "session=private-cookie", csrfToken: "private-csrf" };
+  const RULE_CREATE = {
+    slug: "new-clinic-rule",
+    translations: {
+      fa: { name: "  قانون تازه  ", description: "  توضیح  " },
+      en: { name: "  New rule  ", description: null },
+    },
+  };
+
+  await test("AI rules assistant executes read tools and summarizes trusted results", async () => {
+    const ruleCalls: Array<{ name: string; arguments: string }> = [];
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      assert((options.messages[0]?.content ?? "").includes("دستیار دقیق مدیریت قوانین"), "rules safety prompt is sent to the model");
+      if (options.tools) {
+        assert(options.tools.length >= 5, "AI receives rule function tools");
+        assert(!JSON.stringify(options.messages).includes(RULE_CONTEXT.sessionCookie), "session cookie is never sent to AI");
+        ruleCalls.push({ name: "list_rules", arguments: "" });
+        return {
+          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+          toolCalls: [{ id: "read-1", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+        };
+      }
+      assertEqual(options.messages.at(-1)?.role, "tool", "API results are returned to the model as tool output");
+      return { content: "یک قانون فعال پیدا شد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete;
+    const manager = new RuleManager();
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    const result = await assistant.handle({ conversationId: "rules-ai-1", message: "قوانین فعال را نشان بده", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(result.kind, "read", "read action completes through the library");
+    assertEqual(result.reply, "یک قانون فعال پیدا شد.", "AI phrases the API result");
+    assertEqual(ruleCalls[0]?.name, "list_rules", "only the requested read function is selected");
+  });
+
+  await test("AI-proposed rule mutations wait for an explicit deterministic confirmation", async () => {
+    let modelCalls = 0;
+    const fakeComplete = (async () => {
+      modelCalls += 1;
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "create-1", type: "function" as const, function: { name: "create_rule", arguments: JSON.stringify(RULE_CREATE) } }],
+      };
+    }) as typeof complete;
+    const manager = new RuleManager();
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    const proposed = await assistant.handle({ conversationId: "rules-ai-2", message: "قانون تازه‌ای بساز", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(proposed.kind, "proposed", "AI action creates only a proposal");
+    assert(proposed.reply.includes("تأیید") && proposed.reply.includes("هنوز هیچ تغییری انجام نشده"), "the user sees explicit confirmation wording");
+    assert(proposed.reply.includes("دادهٔ آزمایشی محلی"), "dummy mode is clearly labeled before confirmation");
+    assertEqual((await manager.list()).total, 2, "proposal has not changed data");
+
+    const ambiguous = await assistant.handle({ conversationId: "rules-ai-2", message: "فکر کنم خوبه", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(ambiguous.kind, "proposed", "ambiguous assent does not execute");
+    assertEqual(modelCalls, 1, "confirmation is not delegated to model interpretation");
+    assertEqual((await manager.list()).total, 2, "ambiguous answer leaves store unchanged");
+
+    const confirmed = await assistant.handle({ conversationId: "rules-ai-2", message: "بله", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(confirmed.kind, "confirmed", "explicit yes applies the mutation");
+    assert(confirmed.reply.includes("چیزی به API بیرونی ارسال نشد"), "dummy confirmation cannot claim a remote write");
+    assertEqual((await manager.list()).total, 3, "only the explicit yes changes data");
+    assertEqual(modelCalls, 1, "confirmation is deterministic, not another model call");
+
+    const cancelledAssistant = new RulesAssistant({ manager: new RuleManager(), completeImpl: fakeComplete });
+    await cancelledAssistant.handle({ conversationId: "rules-ai-3", message: "قانونی بساز", context: RULE_CONTEXT });
+    const cancelled = await cancelledAssistant.handle({ conversationId: "rules-ai-3", message: "لغو", context: RULE_CONTEXT });
+    assertEqual(cancelled.kind, "cancelled", "explicit cancel discards the proposal");
+  });
+
+  await test("handleChat can opt into the library rules assistant without exposing secrets to the model", async () => {
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      if (options.tools) {
+        return {
+          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+          toolCalls: [{ id: "chat-rule-read", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+        };
+      }
+      return { content: "یک قانون فعال وجود دارد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete;
+    const manager = new RuleManager();
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    resetSessionsForTesting();
+    const result = await handleChat({
+      message: "قوانین فعال را نشان بده",
+      sessionId: "chat-rules-ai",
+      locale: "fa",
+      rulesAssistant: assistant,
+      ruleContext: RULE_CONTEXT,
+    });
+    assertEqual(result.layer, "rules", "rules tool flow is integrated into handleChat when injected");
+    assertEqual(result.reply, "یک قانون فعال وجود دارد.", "AI answer is returned by the chat library");
+
+    const capabilities = await handleChat({
+      message: "چه کارهایی بلدی؟",
+      sessionId: "chat-rules-caps",
+      locale: "fa",
+      rulesAssistant: assistant,
+      ruleContext: RULE_CONTEXT,
+    });
+    assert(capabilities.reply.includes("قوانین را هم می‌توانم مدیریت کنم"), "capabilities mention rules only when integration is enabled");
+    assert(capabilities.reply.includes("فهرست‌کردن قوانین"), "rules capabilities come from the rule capability list");
+  });
+
+  await test("dummy rules validate, paginate, filter, and require confirmation for writes", async () => {
+    const manager = new RuleManager({ now: () => Date.parse("2026-06-01T00:00:00.000Z") });
+    assertEqual((await manager.list()).total, 2, "two rules are seeded");
+    assertEqual((await manager.list({ status: "active" })).rules.length, 1, "active filter");
+    assertEqual((await manager.list({ status: "inactive" })).rules.length, 1, "inactive filter");
+    assertEqual((await manager.list({ search: "CANCELLATION" })).total, 1, "case-insensitive bilingual search");
+    assertEqual((await manager.list({ page: 2, perPage: 1 })).rules[0]?.slug, "cancellation-policy", "pagination is applied");
+    assertEqual((await manager.list({ page: 0 })).error, "page باید عدد صحیحی بین ۱ تا ۱۰۰۰۰۰ باشد.", "invalid page is rejected");
+
+    const invalidSlug = await manager.proposeCreate({ ...RULE_CREATE, slug: "Bad Slug" });
+    assertEqual(invalidSlug.ok ? "ok" : invalidSlug.code, "invalid-slug", "slug is kebab-case");
+    const invalidOrder = await manager.proposeCreate({ ...RULE_CREATE, displayOrder: 10001 });
+    assertEqual(invalidOrder.ok ? "ok" : invalidOrder.code, "invalid-display-order", "display order is bounded");
+    const invalidCases: Array<[string, () => Promise<{ ok: boolean; code?: string }>]> = [
+      ["invalid-name", () => manager.proposeCreate({ ...RULE_CREATE, translations: { ...RULE_CREATE.translations, fa: { name: " ", description: null } } })],
+      ["invalid-description", () => manager.proposeCreate({ ...RULE_CREATE, translations: { ...RULE_CREATE.translations, en: { name: "Valid", description: "x".repeat(2001) } } })],
+      ["invalid-icon", () => manager.proposeCreate({ ...RULE_CREATE, icon: "x".repeat(101) })],
+      ["invalid-image", () => manager.proposeCreate({ ...RULE_CREATE, image: "x".repeat(2049) })],
+      ["invalid-color", () => manager.proposeCreate({ ...RULE_CREATE, color: "x".repeat(51) })],
+      ["invalid-highlighted", () => manager.proposeCreate({ ...RULE_CREATE, highlighted: "yes" as unknown as boolean })],
+      ["invalid-is-active", () => manager.proposeCreate({ ...RULE_CREATE, isActive: 1 as unknown as boolean })],
+    ];
+    for (const [expected, operation] of invalidCases) {
+      const result = await operation();
+      assertEqual(result.ok ? "ok" : result.code, expected, `${expected} is rejected`);
+    }
+    assert((await manager.list({ perPage: 101 })).error?.includes("perPage"), "perPage is bounded");
+    assert((await manager.list({ search: "x".repeat(101) })).error?.includes("جست‌وجو"), "search length is bounded");
+
+    const proposal = await manager.proposeCreate(RULE_CREATE);
+    assertEqual(proposal.ok, true, "valid create is proposed");
+    assertEqual((await manager.list()).total, 2, "proposal alone does not mutate the store");
+    const confirmed = await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual(confirmed.ok, true, "confirmed create applies");
+    const created = confirmed.ok ? (await manager.get(confirmed.applied[0] ?? "")).rule : null;
+    assertEqual(created?.slug, "new-clinic-rule", "created slug is stored");
+    assertEqual(created?.translations.fa.name, "قانون تازه", "names are trimmed");
+    assertEqual(created?.translations.fa.description, "توضیح", "descriptions are trimmed");
+    assertEqual(created?.highlighted, false, "highlighted default is false");
+    assertEqual(created?.displayOrder, 0, "display order default is zero");
+    assertEqual(created?.isActive, true, "active default is true");
+
+    const id = created?.id ?? "";
+    const update = await manager.proposeUpdate(id, { translations: { en: { name: "Updated name" } } });
+    const changed = await manager.confirm(update.ok ? update.change.token : "");
+    const after = (await manager.get(id)).rule;
+    assertEqual(changed.ok, true, "confirmed patch applies");
+    assertEqual(after?.translations.en.name, "Updated name", "only the requested locale/name changes");
+    assertEqual(after?.translations.fa.name, "قانون تازه", "other locale is retained");
+    assertEqual(after?.translations.en.description, null, "unmentioned description remains null");
+
+    const bulk = await manager.proposeBulk({ action: "deactivate", scope: "filtered", filters: { search: "new-clinic-rule" } });
+    const bulkResult = await manager.confirm(bulk.ok ? bulk.change.token : "");
+    assertEqual(bulkResult.ok, true, "filtered bulk change is confirmed");
+    assertEqual((await manager.get(id)).rule?.isActive, false, "filtered bulk deactivates the match");
+
+    const tooMany = await manager.proposeBulk({ action: "delete", scope: "page", ids: Array.from({ length: 101 }, () => id) });
+    assertEqual(tooMany.ok ? "ok" : tooMany.code, "too-many-ids", "bulk page is capped at 100 ids");
+    const deleteProposal = await manager.proposeDelete(id);
+    assertEqual(deleteProposal.ok, true, "delete requires an explicit proposal");
+    assert((await manager.get(id)).rule !== null, "delete proposal leaves the rule in place");
+    const deleted = await manager.confirm(deleteProposal.ok ? deleteProposal.change.token : "");
+    assertEqual(deleted.ok, true, "confirmed deletion applies");
+    assertEqual((await manager.get(id)).rule, null, "deleted rule is gone");
+  });
+
+  await test("live rules client sends per-call session and CSRF context only on requests", async () => {
+    const calls: Array<{ url: string; method: string; headers: Headers; body?: unknown; credentials?: RequestCredentials }> = [];
+    let responseBody: unknown = { rules: seedRules(), page: 1, perPage: 10, total: 2 };
+    let responseStatus = 200;
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      const headers = new Headers(init.headers);
+      calls.push({
+        url: typeof input === "string" ? input : String(input),
+        method: init.method ?? "GET",
+        headers,
+        body: init.body ? JSON.parse(String(init.body)) as unknown : undefined,
+        credentials: init.credentials,
+      });
+      return new Response(JSON.stringify(responseBody), {
+        status: responseStatus,
+        headers: { "content-type": "application/json", "x-request-id": "rules-request-1" },
+      });
+    };
+    const manager = new RuleManager({ baseUrl: "https://rules.example.test", fetchImpl });
+    const missingContext = await manager.list();
+    assertEqual(missingContext.status, 401, "live request without context is unauthorized");
+    assertEqual(calls.length, 0, "missing auth makes no network request");
+
+    const listed = await manager.list({ page: 2, perPage: 5, search: " policy ", status: "active" }, RULE_CONTEXT);
+    assertEqual(listed.total, 2, "live list parses pagination");
+    assertEqual(listed.requestId, "rules-request-1", "request id is surfaced");
+    const get = calls[0];
+    assert(get?.url.includes("/api/v1/rules?page=2&perPage=5&status=active&search=policy"), "list query is normalized and encoded");
+    assertEqual(get?.headers.get("cookie"), RULE_CONTEXT.sessionCookie, "cookie comes from this call context");
+    assertEqual(get?.headers.get("x-csrf-token"), RULE_CONTEXT.csrfToken, "CSRF token comes from this call context");
+    assertEqual(get?.credentials, "omit", "fetch does not add ambient credentials");
+
+    const rejected = await manager.proposeCreate(RULE_CREATE);
+    assertEqual(rejected.ok ? "ok" : rejected.code, "missing-auth-context", "live mutation proposal needs auth context");
+    const proposal = await manager.proposeCreate(RULE_CREATE, RULE_CONTEXT);
+    assertEqual(proposal.ok, true, "authenticated mutation is proposed");
+    assertEqual(calls.length, 1, "proposal sends no request");
+    assert(!JSON.stringify(proposal).includes(RULE_CONTEXT.sessionCookie), "pending change never exposes cookie");
+    const wrongActor = await manager.confirm(proposal.ok ? proposal.change.token : "", { ...RULE_CONTEXT, actorId: "operator-2" });
+    assertEqual(wrongActor.ok ? "ok" : wrongActor.code, "forbidden", "confirmation is bound to proposing actor");
+    assertEqual(calls.length, 1, "wrong actor cannot trigger a request");
+
+    responseBody = { rule: { ...seedRules()[0], id: "22222222-2222-4222-8222-222222222299", slug: "new-clinic-rule" } };
+    const result = await manager.confirm(proposal.ok ? proposal.change.token : "", RULE_CONTEXT);
+    assertEqual(result.ok, true, "same actor can confirm");
+    const post = calls[1];
+    assertEqual(post?.method, "POST", "create uses POST");
+    assertEqual(post?.url, "https://rules.example.test/api/v1/rules", "create endpoint");
+    assertEqual((post?.body as { slug?: string } | undefined)?.slug, "new-clinic-rule", "create body is normalized");
+    assertEqual(result.ok ? result.requestId : undefined, "rules-request-1", "write request id is surfaced");
+
+    responseStatus = 429;
+    responseBody = { message: "Too many requests" };
+    const limited = await manager.list({}, RULE_CONTEXT);
+    assertEqual(limited.status, 429, "rate limit status is preserved");
+    assertEqual(limited.error, "Too many requests", "API error message is returned");
+  });
+
+  await test("live rules client uses PATCH, DELETE, and bulk endpoints with safe validation", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const rule = seedRules()[0]!;
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      calls.push({ url: typeof input === "string" ? input : String(input), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) as unknown : undefined });
+      const body = init.method === "GET" ? { rule } : { applied: [rule.id], failed: [] };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const manager = new RuleManager({ baseUrl: "https://rules.example.test", fetchImpl });
+    const patch = await manager.proposeUpdate(rule.id, { translations: { fa: { description: null }, en: { name: "Changed" } } }, RULE_CONTEXT);
+    assertEqual(patch.ok, true, "patch proposal can read target rule");
+    const patched = await manager.confirm(patch.ok ? patch.change.token : "", RULE_CONTEXT);
+    assertEqual(patched.ok, true, "patch confirmation succeeds");
+    const patchRequest = calls.find((call) => call.method === "PATCH");
+    assertEqual(patchRequest?.url, `https://rules.example.test/api/v1/rules/${rule.id}`, "PATCH endpoint");
+    assertEqual((patchRequest?.body as { translations?: { en?: { name?: string } } } | undefined)?.translations?.en?.name, "Changed", "patch body stays partial");
+
+    const bulk = await manager.proposeBulk({ action: "activate", scope: "page", ids: [rule.id] }, RULE_CONTEXT);
+    const bulkResult = await manager.confirm(bulk.ok ? bulk.change.token : "", RULE_CONTEXT);
+    assertEqual(bulkResult.ok, true, "bulk confirmation succeeds");
+    const bulkRequest = calls.find((call) => call.url.endsWith("/bulk"));
+    assertEqual(bulkRequest?.method, "POST", "bulk uses POST");
+    assertEqual((bulkRequest?.body as { scope?: string } | undefined)?.scope, "page", "scope is transmitted");
+
+    const deletion = await manager.proposeDelete(rule.id, RULE_CONTEXT);
+    const deleted = await manager.confirm(deletion.ok ? deletion.change.token : "", RULE_CONTEXT);
+    assertEqual(deleted.ok, true, "delete confirmation succeeds");
+    assert(calls.some((call) => call.method === "DELETE" && call.url.endsWith(`/${rule.id}`)), "delete endpoint uses DELETE");
+
+    const insecure = await new RuleManager({ baseUrl: "http://rules.example.test", fetchImpl }).list({}, RULE_CONTEXT);
+    assertEqual(insecure.status, 0, "session cookies are never sent over plain HTTP");
+  });
+
+  /* ── 12. User management ────────────────────────────────────────────── */
 
   const { UserManager, seedUsers } = await import("@/lib/users/manager");
   const {

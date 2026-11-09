@@ -17,15 +17,35 @@ import { getStat, recordFailure, recordSuccess } from "./stats";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
+export type ChatToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
 export type ChatMessage = {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  tool_call_id?: string;
+  tool_calls?: ChatToolCall[];
+};
+
+export type ChatTool = {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
 };
 
 export type CompletionOptions = {
   messages: ChatMessage[];
   /** Ask the model for a JSON object (response_format). Supported by all defaults. */
   json?: boolean;
+  /** OpenAI-compatible function tools, used by library-level assistants. */
+  tools?: ChatTool[];
+  toolChoice?: "auto" | "none";
   temperature?: number;
   maxTokens?: number;
   /** Override the configured free-model chain. */
@@ -38,6 +58,7 @@ export type CompletionOptions = {
 export type CompletionResult = {
   content: string;
   model: string;
+  toolCalls?: ChatToolCall[];
   /**
    * The provider's `finish_reason`. `"length"` means max_tokens ran out and the
    * answer stops mid-sentence — callers must not show that to a user.
@@ -70,7 +91,7 @@ async function callOnce(
   model: string,
   options: CompletionOptions,
   timeoutMs: number,
-): Promise<{ content: string; usage?: CompletionResult["usage"]; finishReason: string | null }> {
+): Promise<{ content: string; usage?: CompletionResult["usage"]; finishReason: string | null; toolCalls?: ChatToolCall[] }> {
   const config = getConfig();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -94,6 +115,7 @@ async function callOnce(
         max_tokens: options.maxTokens ?? 1200,
         ...(options.topP === undefined ? {} : { top_p: options.topP }),
         ...(options.json ? { response_format: { type: "json_object" } } : {}),
+        ...(options.tools ? { tools: options.tools, tool_choice: options.toolChoice ?? "auto" } : {}),
       }),
       signal: controller.signal,
     });
@@ -105,7 +127,7 @@ async function callOnce(
 
     const payload = (await response.json()) as {
       choices?: Array<{
-        message?: { content?: string | null; reasoning?: string | null };
+        message?: { content?: string | null; reasoning?: string | null; tool_calls?: ChatToolCall[] };
         finish_reason?: string | null;
       }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -118,12 +140,17 @@ async function callOnce(
 
     const choice = payload.choices?.[0];
     const content = choice?.message?.content?.trim() ?? "";
-    if (!content) {
-      throw new ModelCallError(502, model, "Empty completion (free model returned no content)");
+    const toolCalls = choice?.message?.tool_calls?.filter((call) =>
+      call.type === "function" && typeof call.id === "string"
+      && typeof call.function?.name === "string" && typeof call.function?.arguments === "string",
+    );
+    if (!content && (!toolCalls || toolCalls.length === 0)) {
+      throw new ModelCallError(502, model, "Empty completion (free model returned no content or tool call)");
     }
 
     return {
       content,
+      ...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
       finishReason: choice?.finish_reason ?? null,
       usage: {
         promptTokens: payload.usage?.prompt_tokens,
@@ -170,11 +197,11 @@ export async function complete(options: CompletionOptions): Promise<CompletionRe
     for (let attempt = 0; attempt < shotsPerModel; attempt += 1) {
       const startedAt = Date.now();
       try {
-        const { content, usage, finishReason } = await callOnce(model, options, config.modelTimeoutMs);
+        const { content, usage, finishReason, toolCalls } = await callOnce(model, options, config.modelTimeoutMs);
         const ms = Date.now() - startedAt;
         recordSuccess(model, ms);
         attempts.push({ model, ok: true, ms });
-        return { content, model, finishReason, attempts, usage, selection: source };
+        return { content, model, ...(toolCalls ? { toolCalls } : {}), finishReason, attempts, usage, selection: source };
       } catch (error) {
         const status = error instanceof ModelCallError ? error.status : 0;
         const message = error instanceof Error ? error.message : String(error);

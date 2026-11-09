@@ -27,11 +27,17 @@ import { dateInstruction, systemPrompt } from "./prompt";
 import { answerDateQuestion } from "@/lib/dates/intent";
 import { nowFacts } from "@/lib/dates/engine";
 import { clearSession, countMessages, getMessages, pushMessage } from "./session";
+import { isRulesRequestCandidate, rulesCapabilitiesText, type RulesAssistant } from "@/lib/rules/assistant";
+import type { RuleRequestContext } from "@/lib/rules/types";
 
 export type ChatInput = {
   message: string;
   sessionId: string;
   locale?: Locale;
+  /** Optional AI-backed rules toolset; only inject from a trusted library caller. */
+  rulesAssistant?: RulesAssistant;
+  /** Fresh, authenticated caller context for this turn; never read from model text. */
+  ruleContext?: RuleRequestContext;
 };
 
 export type ChatStatus = "answered" | "empty" | "error";
@@ -42,7 +48,7 @@ export type ChatResult = {
   /** which model in the chain actually answered, null when code answered */
   model: string | null;
   /** which layer produced the answer */
-  layer: "identity" | "users" | "calendar" | "chat" | "none";
+  layer: "identity" | "users" | "rules" | "calendar" | "chat" | "none";
   /** date intent, when the calendar layer handled it */
   dateIntent?: string;
   /** true when the model garbled the facts and the deterministic text was used */
@@ -133,7 +139,10 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
    * it does. The list is the source of truth for both the code and the model.
    */
   if (isCapabilityQuestion(message)) {
-    const reply = capabilityAnswer(locale);
+    const userCapabilities = capabilityAnswer(locale);
+    const reply = input.rulesAssistant && input.ruleContext
+      ? `${userCapabilities}\n\n${rulesCapabilitiesText(locale)}`
+      : userCapabilities;
 
     pushMessage(input.sessionId, "user", message, config.history.maxMessages);
     pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);
@@ -183,6 +192,38 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
   }
 
   const memory = getMessages(input.sessionId, config.history.ttlMs);
+
+  const shouldHandleRules = input.rulesAssistant && (
+    isRulesRequestCandidate(message)
+    || Boolean(input.ruleContext && input.rulesAssistant.hasPending(input.sessionId, input.ruleContext.actorId))
+  );
+  if (shouldHandleRules && input.rulesAssistant) {
+    const rulesResult = input.ruleContext
+      ? await input.rulesAssistant.handle({
+          conversationId: input.sessionId,
+          message,
+          locale,
+          history: memory.map((turn) => ({ role: turn.role, content: turn.content })),
+          context: input.ruleContext,
+        })
+      : {
+          kind: "error" as const,
+          reply: locale === "en" ? "Rules management requires an authenticated session." : "مدیریت قوانین به نشست احراز هویت‌شده نیاز دارد.",
+        };
+    pushMessage(input.sessionId, "user", message, config.history.maxMessages);
+    pushMessage(input.sessionId, "assistant", rulesResult.reply, config.history.maxMessages);
+    logInfo("chat.rules", { sessionId: input.sessionId, kind: rulesResult.kind, ...(rulesResult.model ? { model: rulesResult.model } : {}) });
+    return {
+      status: "answered",
+      reply: rulesResult.reply,
+      model: rulesResult.model ?? null,
+      layer: "rules",
+      ms: Date.now() - startedAt,
+      contextMessages: memory.length,
+      truncated: false,
+    };
+  }
+
   const clock = clockLine(new Date(), locale);
 
   const messages: ModelMessage[] = [
