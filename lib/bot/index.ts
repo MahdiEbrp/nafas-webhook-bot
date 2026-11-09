@@ -132,17 +132,16 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
     };
   }
 
-  /* ── 1b. Capabilities — read from the list, never paraphrased ────────
+  /* ── 1b. Capabilities — read from the lists, never paraphrased ───────
    *
-   * «چه کارهایی بلدی؟» is answered from `lib/users/capabilities.ts` so the
-   * bot cannot claim an ability the UserManager does not have, or forget one
-   * it does. The list is the source of truth for both the code and the model.
+   * User capabilities always appear; rules capabilities are also listed with
+   * an explicit note about whether this caller injected the authenticated
+   * RulesAssistant. The model never improvises these claims.
    */
   if (isCapabilityQuestion(message)) {
     const userCapabilities = capabilityAnswer(locale);
-    const reply = input.rulesAssistant && input.ruleContext
-      ? `${userCapabilities}\n\n${rulesCapabilitiesText(locale)}`
-      : userCapabilities;
+    const rulesEnabled = Boolean(input.rulesAssistant && input.ruleContext);
+    const reply = `${userCapabilities}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}`;
 
     pushMessage(input.sessionId, "user", message, config.history.maxMessages);
     pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);
