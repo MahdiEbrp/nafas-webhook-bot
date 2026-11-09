@@ -1,51 +1,65 @@
 /**
  * npm run models
  *
- * Prints every :free model currently on OpenRouter, marks the ones that support
- * tool-calling / JSON mode, and shows whether your configured chain is still
- * alive. Free models come and go — run this whenever the bot starts failing.
+ * Prints every `:free` model OpenRouter currently offers, ranked the same way
+ * the bot ranks them at runtime: curated quality prior, then measured speed,
+ * then cooldowns. The top of this list is what the bot will actually try first.
+ *
+ * Free models come and go — run this whenever the bot starts failing, and edit
+ * `QUALITY_TIERS` in lib/openrouter/ranking.ts if a good new one appears.
  */
 
-import { DEFAULT_MODEL_CHAIN, getConfig } from "@/lib/config";
+import { getConfig } from "@/lib/config";
 import { listFreeModels } from "@/lib/openrouter/models";
+import { selectChain } from "@/lib/openrouter/select";
 
 async function main(): Promise<void> {
+  const config = getConfig();
   const models = await listFreeModels(true);
-  const configured = new Set(getConfig().modelChain);
+  const selection = await selectChain({ quiet: true });
 
-  console.log(`\n${models.length} free models on OpenRouter (${new Date().toISOString()})\n`);
-  console.log("  cfg  tools json  ctx       id");
+  console.log(`\n${models.length} free models on OpenRouter (${new Date().toISOString()})`);
+  console.log(`selection: ${config.modelSelection} · pool ${config.modelPoolSize} · min context ${config.modelMinContext}\n`);
 
-  for (const model of models) {
+  if (selection.note) console.log(`  ⚠ ${selection.note}\n`);
+
+  console.log("  score  qual  speed    ctx   id");
+  for (const model of selection.top) {
+    const speed = model.latencyMs === null ? "  —    " : `${String(Math.round(model.latencyMs)).padStart(5)}ms`;
     console.log(
       [
-        configured.has(model.id) ? "  ✓  " : "     ",
-        model.supportsTools ? "  ✓  " : "  ·  ",
-        model.supportsJsonMode ? " ✓  " : " ·  ",
-        String(model.contextLength).padStart(9),
+        String(model.score).padStart(6),
+        String(model.quality).padStart(5),
+        speed,
+        String(model.contextLength).padStart(7),
         ` ${model.id}`,
-      ].join(" ").replace(/\s+$/, ""),
+        model.samples > 0 ? ` (${model.samples} samples)` : "",
+        model.coolingDown ? " ❄ cooling down" : "",
+      ].join(""),
     );
   }
 
-  const ids = new Set(models.map((model) => model.id));
-  const dead = getConfig().modelChain.filter((id) => !ids.has(id));
+  console.log(`\n  considered ${selection.considered} of ${selection.catalogSize} models`);
+  console.log(`\nchain the bot will walk (${selection.source}):`);
+  selection.chain.forEach((id, index) => console.log(`  ${index + 1}. ${id}`));
 
-  console.log("\nconfigured chain:");
-  for (const id of getConfig().modelChain) console.log(`  ${ids.has(id) ? "✓ alive" : "✗ gone "} ${id}`);
+  const ids = new Set(models.map((model) => model.id));
+  const dead = config.modelChain.filter((id) => !ids.has(id));
 
   if (dead.length > 0) {
-    console.log(`\n⚠  ${dead.length} model(s) in OPENROUTER_MODELS no longer exist.`);
-    console.log("   Suggested replacement order (tools + json first):");
-    const suggestions = models.filter((model) => model.supportsTools && model.supportsJsonMode).slice(0, 5).map((m) => m.id);
-    console.log(`   OPENROUTER_MODELS=${(suggestions.length > 0 ? suggestions : DEFAULT_MODEL_CHAIN).join(",")}`);
-    process.exitCode = 1;
+    console.log("\n⚠ these pinned models are gone from OpenRouter (they are only a fallback now):");
+    for (const id of dead) console.log(`   ✗ ${id}`);
+    console.log("\n  Suggested replacement:");
+    console.log(`   OPENROUTER_MODELS=${selection.chain.join(",")}`);
   } else {
-    console.log("\n✓ every configured model is available.");
+    console.log("\n✓ every pinned model still exists.");
   }
+  console.log("");
 }
 
 main().catch((error) => {
+  // This script talks to openrouter.ai, unlike the self-test which is offline.
   console.error("Failed to list models:", error instanceof Error ? error.message : error);
+  console.error("(needs network access to openrouter.ai)");
   process.exitCode = 1;
 });
