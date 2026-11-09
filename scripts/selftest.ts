@@ -1736,7 +1736,69 @@ async function main(): Promise<void> {
     assertEqual(typeof a, "string", "a string");
   });
 
-  /* ── 11. SMS OTP client ──────────────────────────────────────────────── */
+  /* ── 11. Encrypted auth-session persistence ──────────────────────────── */
+
+  const { EncryptedAuthSessionStore } = await import("@/lib/auth/session-store");
+  const masterKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+  await test("auth sessions are AES-GCM encrypted, actor-indexed, expiring, and tamper resistant", async () => {
+    let now = 1_800_000_000_000;
+    const dbState: { row?: { actorHash: unknown; payload: unknown; expiresAt: unknown } } = {};
+    const statements: string[] = [];
+    const run: import("@/lib/db/client").SqlRunner = async (query, params = []) => {
+      statements.push(query);
+      if (/^insert into auth_sessions/u.test(query)) {
+        dbState.row = { actorHash: params[0], payload: params[1], expiresAt: params[2] };
+        return [];
+      }
+      if (/^select encrypted_payload/u.test(query)) {
+        return dbState.row ? [{ encrypted_payload: dbState.row.payload }] : [];
+      }
+      return [];
+    };
+    setRunnerForTesting(run);
+    resetSchemaCache();
+    const store = new EncryptedAuthSessionStore({ encryptionKey: masterKey, now: () => now, maxAgeMs: 60_000 });
+    try {
+      const session = {
+        actorId: "+989121234567",
+        sessionCookie: "session=highly-private-cookie",
+        csrfToken: "highly-private-csrf",
+      };
+      assertEqual(await store.save(session), true, "valid session saved");
+      assert(dbState.row !== undefined, "row written");
+      const rowText = JSON.stringify(dbState.row);
+      assert(!rowText.includes(session.actorId), "phone is not persisted as cleartext");
+      assert(!rowText.includes(session.sessionCookie), "session cookie is not persisted as cleartext");
+      assert(!rowText.includes(session.csrfToken), "CSRF token is not persisted as cleartext");
+      assert(typeof dbState.row?.actorHash === "string" && dbState.row.actorHash !== session.actorId, "actor lookup uses an HMAC digest");
+      assert(statements.some((statement) => statement.includes("create table if not exists auth_sessions")), "auth_sessions table schema is ensured");
+      const restored = await store.get(session.actorId);
+      assertEqual(restored?.sessionCookie, session.sessionCookie, "cookie decrypts on read");
+      assertEqual(restored?.csrfToken, session.csrfToken, "CSRF decrypts on read");
+      assertEqual(restored?.expiresAt, now + 60_000, "local max age caps session retention");
+
+      const wrongKey = new EncryptedAuthSessionStore({ encryptionKey: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", now: () => now });
+      assertEqual(await wrongKey.get(session.actorId), null, "different key cannot decrypt or locate session");
+      if (dbState.row) dbState.row.payload = `${String(dbState.row.payload).slice(0, -2)}aa`;
+      assertEqual(await store.get(session.actorId), null, "tampered ciphertext is rejected");
+      assertEqual(await store.delete(session.actorId), true, "local session deletion succeeds");
+    } finally {
+      setRunnerForTesting(null);
+      resetSchemaCache();
+    }
+  });
+
+  await test("encrypted auth-session storage fails closed without a database or valid key", async () => {
+    setRunnerForTesting(null);
+    resetSchemaCache();
+    const noDatabase = new EncryptedAuthSessionStore({ encryptionKey: masterKey });
+    assertEqual(await noDatabase.save({ actorId: "owner", sessionCookie: "session=secret" }), false, "missing database refuses to save");
+    const invalidKey = new EncryptedAuthSessionStore({ encryptionKey: "not-a-32-byte-key" });
+    assertEqual(await invalidKey.save({ actorId: "owner", sessionCookie: "session=secret" }), false, "invalid encryption key refuses to save");
+  });
+
+  /* ── 12. SMS OTP client ──────────────────────────────────────────────── */
 
   const { SmsOtpClient } = await import("@/lib/auth/sms-otp");
 
@@ -1750,7 +1812,18 @@ async function main(): Promise<void> {
       calls.push({ url: typeof input === "string" ? input : String(input), body: JSON.parse(String(init.body)) as unknown, headers });
       return new Response(JSON.stringify(responseBody), { status: responseStatus, headers: responseHeaders });
     };
-    const otp = new SmsOtpClient({ fetchImpl });
+    const savedSessions: import("@/lib/auth/session-store").StoredAuthSession[] = [];
+    const sessionStore: import("@/lib/auth/session-store").AuthSessionStore = {
+      save: async (session) => { savedSessions.push(structuredClone(session)); return true; },
+      get: async (actorId) => savedSessions.find((session) => session.actorId === actorId) ?? null,
+      delete: async (actorId) => {
+        const index = savedSessions.findIndex((session) => session.actorId === actorId);
+        if (index < 0) return false;
+        savedSessions.splice(index, 1);
+        return true;
+      },
+    };
+    const otp = new SmsOtpClient({ fetchImpl, sessionStore });
     const requested = await otp.request("  +989121234567  ");
     assertEqual(requested.ok, true, "SMS request accepted");
     assertEqual(requested.ok ? requested.expiresInMs : undefined, 300000, "expiry returned by API");
@@ -1772,10 +1845,16 @@ async function main(): Promise<void> {
     assertEqual(calls[2]?.url, "https://nafasbeautyclinic.ir/api/v1/auth/otp/verify", "verify path");
     assertEqual(JSON.stringify(calls[2]?.body), JSON.stringify({ phone: "+989121234567", code: "123456" }), "verify body has phone and six-digit code");
     if (verified.ok) {
-      assertEqual(verified.session?.ruleRequestContext?.actorId, "+989121234567", "verified phone binds the actor");
-      assertEqual(verified.session?.ruleRequestContext?.csrfToken, "csrf-private", "CSRF response header is extracted");
-      assert(verified.session?.ruleRequestContext?.sessionCookie.includes("session=server-session"), "server session cookie is extracted");
+      assertEqual(verified.sessionStored, true, "session is persisted before verify returns");
+      assertEqual(verified.ruleContextAvailable, true, "session and CSRF are available for Rules API");
       assertEqual(verified.requestId, "otp-verify-1", "request id is returned");
+      const context = await otp.getRuleRequestContext("+989121234567");
+      assertEqual(context?.actorId, "+989121234567", "verified phone binds the actor");
+      assertEqual(context?.csrfToken, "csrf-private", "CSRF response header is recovered from storage");
+      assert(context?.sessionCookie.includes("session=server-session"), "server session cookie is recovered from storage");
+      assert(!JSON.stringify(verified).includes("server-session"), "raw session cookie is not returned in the verification result");
+      assert(!JSON.stringify(verified).includes("csrf-private"), "raw CSRF token is not returned in the verification result");
+      assert(savedSessions[0]?.sessionCookie.includes("session=server-session"), "the injected store received the session for secure persistence");
     }
 
     const beforeInvalid = calls.length;
@@ -1799,13 +1878,27 @@ async function main(): Promise<void> {
     assertEqual(locked.ok ? "ok" : locked.status, 423, "423 is preserved");
 
     const noCookie = await new SmsOtpClient({ fetchImpl: fetchWith(200, { ok: true }) }).verify("09121234567", "123456");
-    assertEqual(noCookie.ok, true, "verification success is reported");
-    assertEqual(noCookie.ok ? noCookie.session : null, undefined, "without Set-Cookie there is no reusable session");
+    assertEqual(noCookie.ok ? "ok" : noCookie.code, "SESSION_COOKIE_MISSING", "success without Set-Cookie cannot establish a reusable session");
 
     const cookieOnly = new Headers({ "content-type": "application/json" });
     cookieOnly.append("set-cookie", "session=server-session; Path=/; HttpOnly; Secure");
-    const missingCsrf = await new SmsOtpClient({ fetchImpl: fetchWith(200, { ok: true }, cookieOnly) }).verify("09121234567", "123456");
-    assertEqual(missingCsrf.ok ? missingCsrf.session?.ruleRequestContext : null, undefined, "session without CSRF cannot make a Rules API context");
+    const cookieOnlyStore: import("@/lib/auth/session-store").AuthSessionStore = {
+      save: async () => true,
+      get: async () => ({ actorId: "09121234567", sessionCookie: "session=server-session" }),
+      delete: async () => true,
+    };
+    const missingCsrfClient = new SmsOtpClient({ fetchImpl: fetchWith(200, { ok: true }, cookieOnly), sessionStore: cookieOnlyStore });
+    const missingCsrf = await missingCsrfClient.verify("09121234567", "123456");
+    assertEqual(missingCsrf.ok ? missingCsrf.ruleContextAvailable : null, false, "session without CSRF cannot make a Rules API context");
+    assertEqual(await missingCsrfClient.getRuleRequestContext("09121234567"), null, "context retrieval fails closed without CSRF");
+
+    const storageFailure = new SmsOtpClient({
+      fetchImpl: fetchWith(200, { ok: true }, cookieOnly),
+      sessionStore: { save: async () => false, get: async () => null, delete: async () => false },
+    });
+    const rejectedSession = await storageFailure.verify("09121234567", "123456");
+    assertEqual(rejectedSession.ok ? "ok" : rejectedSession.code, "SESSION_STORAGE_FAILED", "storage failure fails closed after upstream verification");
+    assert(!JSON.stringify(rejectedSession).includes("server-session"), "storage failure response contains no session material");
   });
 
   /* ── 12. Rules client ────────────────────────────────────────────────── */

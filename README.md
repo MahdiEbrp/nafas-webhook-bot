@@ -243,20 +243,22 @@ const otp = new SmsOtpClient(); // NAFAS_API_BASE_URL یا https://nafasbeautycl
 const sent = await otp.request("09121234567");
 // کاربر کد پیامک‌شده را وارد می‌کند.
 const verified = await otp.verify("09121234567", code);
-if (verified.ok && verified.session?.ruleRequestContext) {
-  // فقط در لایهٔ server-side قابل‌اعتماد؛ cookie/CSRF را به مدل یا log نده.
-  await rulesAssistant.handle({ conversationId, message, context: verified.session.ruleRequestContext });
+if (verified.ok && verified.ruleContextAvailable) {
+  // نشست از DB رمزگشایی می‌شود؛ فقط server-side استفاده کن و به مدل/log نده.
+  const context = await otp.getRuleRequestContext("09121234567");
+  if (context) await rulesAssistant.handle({ conversationId, message, context });
 }
 ```
 
 `resend(phone)` همان بدنهٔ درخواست را به مسیر resend می‌فرستد. مقدارهای `expiresInMs` و `resendInMs` از پاسخ سرور خوانده می‌شوند؛ محدودیت ۵ درخواست در ۱۵ دقیقه برای IP و ۵ در ۵ دقیقه برای شماره باید توسط API مقصد اعمال شود و کلاینت آن‌ها را دور نمی‌زند. پاسخ verify می‌تواند Set-Cookie و CSRF header `x-csrf-token` داشته باشد. اگر CSRF در cookie برمی‌گردد، نامش را با `csrfCookieName` تنظیم کن. بدون cookie و CSRF، `ruleRequestContext` ساخته نمی‌شود؛ API contract ارسالی این جزئیات را تضمین نکرده بود، پس کلاینت حدس نمی‌زند.
 
-شماره و کد در log نوشته نمی‌شوند. نشست برگشتی را میزبان به‌صورت امن نگه می‌دارد؛ این ماژول آن را در دیتابیس یا حافظهٔ پایدار ذخیره نمی‌کند. این ورود پیامکی از phone-gate تلگرام و شناسهٔ مکالمهٔ بات مستقل است.
+شماره و کد در log نوشته نمی‌شوند. پس از verify، cookie و CSRF فقط به شکل AES-256-GCM ciphertext در جدول `auth_sessions` ذخیره می‌شوند؛ actor lookup با HMAC انجام می‌شود تا شماره در ستون‌های دیتابیس آشکار نباشد. برای این مسیر، `DATABASE_URL` و کلید مستقل ۳۲‌بایتی `AUTH_SESSION_ENCRYPTION_KEY` الزامی‌اند؛ کلید را با `openssl rand -hex 32` بساز، در secret manager نگه دار و بین deployها ثابت نگه‌دار. بدون DB یا کلید معتبر، ذخیره‌سازی fail-closed است و verify موفقیت‌آمیز گزارش نمی‌شود. نشست حداکثر ۷ روز و در صورت وجود expiry کوتاه‌تر کوکی، تا همان زمان نگهداری می‌شود. با `getRuleRequestContext(phone)` context از DB بازیابی می‌شود و با `clearStoredSession(phone)` رکورد محلی حذف می‌شود (این حذف نشست را در سرویس upstream revoke نمی‌کند). نشست خام را به مدل یا log نفرست. این ورود پیامکی از phone-gate تلگرام و شناسهٔ مکالمهٔ بات مستقل است.
 
 | فایل | کار |
 | --- | --- |
-| `lib/auth/sms-otp.ts` | کلاینت OTP، اعتبارسنجی ورودی و استخراج اختیاری cookie/CSRF برای Rules API |
-| `scripts/selftest.ts` | تست آفلاین request/resend/verify و خطاهای API |
+| `lib/auth/sms-otp.ts` | کلاینت OTP و بازیابی server-side context نشست از store رمز‌شده |
+| `lib/auth/session-store.ts` | ذخیرهٔ AES-256-GCM در Postgres با actor index مبتنی بر HMAC |
+| `scripts/selftest.ts` | تست آفلاین OTP، رمزنگاری و خطاهای API |
 
 ## مدیریت کاربران
 

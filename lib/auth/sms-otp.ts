@@ -1,25 +1,21 @@
 import type { RuleRequestContext } from "@/lib/rules/types";
 import { logWarn } from "@/lib/log";
 
+import { authSessionStore, type AuthSessionStore } from "./session-store";
+
 const DEFAULT_BASE_URL = "https://nafasbeautyclinic.ir";
 const PHONE_PATTERN = /^\+?[0-9]{7,15}$/u;
 const CODE_PATTERN = /^[0-9]{6}$/u;
-
-export type SmsOtpSession = {
-  /** Cookie header for server-to-server calls; never log or send this to a model. */
-  cookieHeader: string;
-  /** CSRF value returned in a response header or configured CSRF cookie. */
-  csrfToken?: string;
-  /** Available only when both session cookie and CSRF token were returned. */
-  ruleRequestContext?: RuleRequestContext;
-};
 
 export type SmsOtpSuccess = {
   ok: true;
   requestId?: string;
   expiresInMs?: number;
   resendInMs?: number;
-  session?: SmsOtpSession;
+  /** True after the session is encrypted and persisted in Postgres. */
+  sessionStored?: boolean;
+  /** False when the upstream response did not provide a CSRF token. */
+  ruleContextAvailable?: boolean;
 };
 
 export type SmsOtpFailure = {
@@ -41,6 +37,8 @@ export type SmsOtpClientOptions = {
   csrfTokenHeader?: string;
   /** Optional CSRF cookie name, if the API uses a readable/double-submit cookie. */
   csrfCookieName?: string;
+  /** Injectable for tests or a host-provided secure store. Defaults to encrypted Postgres storage. */
+  sessionStore?: AuthSessionStore;
 };
 
 type ApiBody = Record<string, unknown>;
@@ -54,6 +52,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   ACCOUNT_INACTIVE: "این حساب فعال نیست.",
   ACCOUNT_BANNED: "این حساب در دسترس نیست.",
   RATE_LIMITED: "تعداد درخواست‌ها بیش از حد مجاز است؛ کمی بعد دوباره تلاش کن.",
+  SESSION_COOKIE_MISSING: "ورود تأیید شد، اما سرویس cookie نشست را برنگرداند.",
+  SESSION_STORAGE_FAILED: "ورود تأیید شد، اما ذخیرهٔ رمزگذاری‌شدهٔ نشست انجام نشد.",
 };
 
 function isRecord(value: unknown): value is ApiBody {
@@ -66,13 +66,15 @@ function normalizedPhone(value: unknown): string | null {
   return PHONE_PATTERN.test(phone) ? phone : null;
 }
 
-function responseCookies(headers: Headers): string[] {
+function setCookieHeaders(headers: Headers): string[] {
   const headerBag = headers as Headers & { getSetCookie?: () => string[] };
-  const setCookies = typeof headerBag.getSetCookie === "function"
-    ? headerBag.getSetCookie()
-    : (headers.get("set-cookie") ?? "").split(/,(?=\s*[^;,=\s]+=[^;,]*)/u);
+  if (typeof headerBag.getSetCookie === "function") return headerBag.getSetCookie();
+  return (headers.get("set-cookie") ?? "").split(/,(?=\s*[^;,=\s]+=[^;,]*)/u).filter(Boolean);
+}
+
+function responseCookies(headers: Headers): string[] {
   const byName = new Map<string, string>();
-  for (const setCookie of setCookies) {
+  for (const setCookie of setCookieHeaders(headers)) {
     const pair = setCookie.split(";", 1)[0]?.trim();
     if (!pair) continue;
     const separator = pair.indexOf("=");
@@ -92,6 +94,24 @@ function cookieValue(cookies: string[], name: string): string | undefined {
   } catch {
     return raw;
   }
+}
+
+function upstreamExpiry(headers: Headers): number | undefined {
+  const expiries: number[] = [];
+  for (const cookie of setCookieHeaders(headers)) {
+    const maxAge = cookie.match(/(?:^|;)\s*max-age\s*=\s*(-?\d+)/iu)?.[1];
+    if (maxAge !== undefined) {
+      const seconds = Number(maxAge);
+      if (Number.isFinite(seconds)) expiries.push(Date.now() + seconds * 1000);
+      continue;
+    }
+    const expires = cookie.match(/(?:^|;)\s*expires\s*=\s*([^;]+)/iu)?.[1];
+    if (expires) {
+      const parsed = Date.parse(expires);
+      if (Number.isFinite(parsed)) expiries.push(parsed);
+    }
+  }
+  return expiries.length ? Math.min(...expiries) : undefined;
 }
 
 function apiError(body: unknown, status: number): { code: string; message: string } {
@@ -116,6 +136,7 @@ export class SmsOtpClient {
   private readonly timeoutMs: number;
   private readonly csrfTokenHeader: string;
   private readonly csrfCookieName?: string;
+  private readonly sessionStore: AuthSessionStore;
 
   constructor(options: SmsOtpClientOptions = {}) {
     const configuredBaseUrl = options.baseUrl ?? (process.env.NAFAS_API_BASE_URL?.trim() || DEFAULT_BASE_URL);
@@ -124,6 +145,7 @@ export class SmsOtpClient {
     this.timeoutMs = options.timeoutMs ?? 10_000;
     this.csrfTokenHeader = options.csrfTokenHeader ?? "x-csrf-token";
     this.csrfCookieName = options.csrfCookieName?.trim() || undefined;
+    this.sessionStore = options.sessionStore ?? authSessionStore;
   }
 
   request(phoneInput: string): Promise<SmsOtpResult> {
@@ -144,18 +166,70 @@ export class SmsOtpClient {
     const result = await this.send("verify", "/api/v1/auth/otp/verify", { phone, code: codeInput });
     if (!result.ok) return result;
     const cookies = responseCookies(result.headers);
+    const sessionCookie = cookies.join("; ");
+    if (!sessionCookie) {
+      return {
+        ok: false,
+        status: 502,
+        code: "SESSION_COOKIE_MISSING",
+        message: ERROR_MESSAGES.SESSION_COOKIE_MISSING ?? "نشست احراز هویت دریافت نشد.",
+        ...(result.requestId ? { requestId: result.requestId } : {}),
+      };
+    }
     const csrfToken = result.headers.get(this.csrfTokenHeader)?.trim()
       || (this.csrfCookieName ? cookieValue(cookies, this.csrfCookieName) : undefined);
-    const sessionCookie = cookies.join("; ");
-    const ruleRequestContext = sessionCookie && csrfToken
-      ? { actorId: phone, sessionCookie, csrfToken }
-      : undefined;
-
+    const expiresAt = upstreamExpiry(result.headers);
+    let saved = false;
+    try {
+      saved = await this.sessionStore.save({
+        actorId: phone,
+        sessionCookie,
+        ...(csrfToken ? { csrfToken } : {}),
+        ...(expiresAt === undefined ? {} : { expiresAt }),
+      });
+    } catch {
+      // Keep storage failures fail-closed without logging or returning secrets.
+    }
+    if (!saved) {
+      return {
+        ok: false,
+        status: 503,
+        code: "SESSION_STORAGE_FAILED",
+        message: ERROR_MESSAGES.SESSION_STORAGE_FAILED ?? "ذخیره نشست انجام نشد.",
+        ...(result.requestId ? { requestId: result.requestId } : {}),
+      };
+    }
     return {
       ok: true,
-      requestId: result.requestId,
-      ...(sessionCookie ? { session: { cookieHeader: sessionCookie, ...(csrfToken ? { csrfToken } : {}), ...(ruleRequestContext ? { ruleRequestContext } : {}) } } : {}),
+      ...(result.requestId ? { requestId: result.requestId } : {}),
+      sessionStored: true,
+      ruleContextAvailable: Boolean(csrfToken),
     };
+  }
+
+  /** Decrypts a session only when needed; callers must keep the result server-side. */
+  async getRuleRequestContext(phoneInput: string): Promise<RuleRequestContext | null> {
+    const phone = normalizedPhone(phoneInput);
+    if (!phone) return null;
+    let stored: Awaited<ReturnType<AuthSessionStore["get"]>>;
+    try {
+      stored = await this.sessionStore.get(phone);
+    } catch {
+      return null;
+    }
+    if (!stored || stored.actorId !== phone || !stored.sessionCookie.trim() || !stored.csrfToken?.trim()) return null;
+    return { actorId: stored.actorId, sessionCookie: stored.sessionCookie, csrfToken: stored.csrfToken };
+  }
+
+  /** Removes the locally stored encrypted session; it does not revoke it upstream. */
+  async clearStoredSession(phoneInput: string): Promise<boolean> {
+    const phone = normalizedPhone(phoneInput);
+    if (!phone) return false;
+    try {
+      return await this.sessionStore.delete(phone);
+    } catch {
+      return false;
+    }
   }
 
   private async post(step: "request" | "resend", phoneInput: string): Promise<SmsOtpResult> {
