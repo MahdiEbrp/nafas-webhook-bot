@@ -4,7 +4,7 @@ import { jsonOk, withApiHandler } from "@/lib/errors";
 import { cachedCatalogAge } from "@/lib/openrouter/models";
 import { dbConfigured, getRunner } from "@/lib/db/client";
 import { ensureSchema, TABLE_NAME } from "@/lib/db/schema";
-import { cachedSessionCount } from "@/lib/db/chat-sessions";
+import { cachedPhoneCount, cachedSessionCount } from "@/lib/db/chat-sessions";
 import { selectChain } from "@/lib/openrouter/select";
 import { statsSnapshot } from "@/lib/openrouter/stats";
 
@@ -39,6 +39,11 @@ export const GET = withApiHandler(async (request) => {
     configured: dbConfigured(),
     table: TABLE_NAME,
     cachedSessions: cachedSessionCount(),
+    cachedPhones: cachedPhoneCount(),
+    // The gate needs somewhere to put a number, so it follows the runner rather
+    // than the config alone. Reporting it here is how an operator finds out why
+    // the bot is or is not asking for phone numbers.
+    phoneGate: config.phoneGate && getRunner() !== null,
   };
 
   if (checkDb) {

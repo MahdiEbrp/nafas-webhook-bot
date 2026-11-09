@@ -1,11 +1,13 @@
 /**
  * TELEGRAM BRIDGE
  *
- * Incoming Telegram update → `handleChat` → Persian answer. That is the whole
- * file. There are no buttons, no menus and no confirmations any more: a chat
- * bot reads text and writes text.
+ * Incoming Telegram update → `handleChat` → Persian answer. There are no menus
+ * and no confirmations: a chat bot reads text and writes text. The one button
+ * that exists is Telegram's own "share your number", and it is there because the
+ * owner asked for the phone number to come from Telegram rather than from typing.
  *
  * Flow:
+ *   no phone on file → the gate asks for one and nothing else is answered
  *   /start        → greeting
  *   /help         → what this bot is
  *   /clear /reset → forget the conversation
@@ -20,11 +22,16 @@ import { logInfo, logWarn } from "@/lib/log";
 import { truncateAtSentence } from "@/lib/text";
 import {
   answerCallbackQuery,
+  contactKeyboard,
+  removeKeyboard,
   sendMessage,
   sendTyping,
   type TelegramUpdate,
 } from "@/lib/telegram/api";
-import { resolveSessionId } from "@/lib/db/chat-sessions";
+import { resolveSessionId, setChatPhone } from "@/lib/db/chat-sessions";
+import { getRunner } from "@/lib/db/client";
+import { normalizeIranPhone } from "@/lib/phone";
+import { confirmPhoneText, ensurePhone } from "@/lib/telegram/phone-gate";
 
 export type BridgeOutcome = {
   handled: boolean;
@@ -39,6 +46,22 @@ export type BridgeOutcome = {
 /** Telegram caps a message at 4096 characters; leave room for the ellipsis. */
 const MAX_TEXT = 3900;
 
+/**
+ * Whether the phone gate is in force.
+ *
+ * It needs both a policy and a place to put the number. With no DATABASE_URL
+ * there is nowhere to store a phone, so gating would lock every user out with
+ * no possible answer — the gate steps aside instead and the bot behaves as it
+ * did before. `PHONE_GATE=off` switches the ask off while keeping persistence.
+ */
+function gateActive(): boolean {
+  // `getRunner()` rather than `dbConfigured()`: the question is not "was a URL
+  // set" but "is there anywhere to put a number", and the runner is what
+  // `setChatPhone` actually writes through. Asking the capability keeps this
+  // honest when a runner is injected, as it is in the self-test.
+  return getConfig().phoneGate && getRunner() !== null;
+}
+
 function isAllowed(chatId: number): boolean {
   const { allowedChatIds } = getConfig().telegram;
   if (allowedChatIds.length === 0) return true; // locked-down deployments should set this
@@ -46,14 +69,16 @@ function isAllowed(chatId: number): boolean {
 }
 
 /**
- * The conversation key for a chat.
+ * The conversation key for a person.
  *
- * Stored in Postgres as chat_id → session_id when a database is configured; the
- * deterministic `tg-<chatId>` otherwise. `resolveSessionId` never throws, so a
- * database outage makes the bot forgetful, never silent.
+ * Keyed by Telegram *user* id, not chat id: a chat id belongs to a conversation,
+ * so a new chat would start from nothing, and in a group one id is shared by
+ * everybody in it. Stored in Postgres as user_id → session_id when a database is
+ * configured; the deterministic `tg-<userId>` otherwise. `resolveSessionId`
+ * never throws, so a database outage makes the bot forgetful, never silent.
  */
-function sessionIdFor(chatId: number): Promise<string> {
-  return resolveSessionId(chatId);
+function sessionIdFor(userId: number): Promise<string> {
+  return resolveSessionId(userId);
 }
 
 const CLEARED: Record<Locale, string> = {
@@ -85,18 +110,19 @@ async function replyText(
 
 async function processTextMessage(input: {
   chatId: number;
+  userId: number;
   text: string;
   locale: Locale;
   replyToMessageId?: number;
 }): Promise<BridgeOutcome> {
-  const { chatId, text, locale, replyToMessageId } = input;
+  const { chatId, userId, text, locale, replyToMessageId } = input;
   sendTyping(chatId);
 
-  const result = await handleChat({ message: text, sessionId: await sessionIdFor(chatId), locale });
+  const result = await handleChat({ message: text, sessionId: await sessionIdFor(userId), locale });
 
   await replyText(chatId, result.reply, { replyToMessageId });
 
-  logInfo("telegram.message", { chatId, status: result.status, model: result.model, ms: result.ms });
+  logInfo("telegram.message", { chatId, userId, status: result.status, model: result.model, ms: result.ms });
 
   return {
     handled: true,
@@ -133,9 +159,82 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     return { handled: false, reason: "chat not allowed", chatId };
   }
 
+  /*
+   * Two different ids, and keeping them apart is the whole point:
+   *
+   *   chatId — where to send the reply. Telegram addressing, nothing else.
+   *   userId — whose settings these are. The key for session and phone.
+   *
+   * `from` is absent on channel posts and from anonymous group admins, where
+   * there is no user to attribute anything to. Guessing at the chat id instead
+   * would silently pool strangers into one record, so we decline instead.
+   */
+  const userId = message.from?.id;
+  if (userId === undefined) {
+    logWarn("telegram.no_user", { chatId });
+    return { handled: false, reason: "no user id on the update", chatId };
+  }
+
   const text = (message.text ?? "").trim();
 
+  /* ── 3. The phone gate ─────────────────────────────────────────────────
+   *
+   * Before anything is answered, this *user* must have an Iranian mobile on
+   * file — keyed by user id, so a number given in one chat still counts in
+   * another. That is the owner's rule, so it sits ahead of the commands too:
+   * `/start` from somebody without a number gets the ask, not the welcome.
+   *
+   * `/id` is the one exception. It stores nothing, it only echoes back what
+   * Telegram already sent us, and it is the documented way to discover the
+   * chat id for TELEGRAM_ALLOWED_CHAT_IDS. Gating it would make the allowlist
+   * impossible to set up, with no way back in.
+   */
+  if (gateActive() && !/^\/id\b/.test(text)) {
+    const say = async (
+      line: string,
+      options: { replyMarkup?: Record<string, unknown> } = {},
+    ): Promise<void> => {
+      await sendMessage({
+        chatId,
+        text: truncateAtSentence(line, MAX_TEXT),
+        replyToMessageId: message.message_id,
+        ...(options.replyMarkup ? { replyMarkup: options.replyMarkup } : {}),
+      });
+    };
+
+    const gate = await ensurePhone({
+      userId,
+      chatId,
+      chatType: message.chat.type,
+      text,
+      ...(message.contact ? { contact: message.contact } : {}),
+      locale,
+      say,
+      // Telegram only puts the contact button in a private chat.
+      keyboard: () =>
+        message.chat.type === "private"
+          ? contactKeyboard(locale === "en" ? "📱 Share my number" : "📱 شماره‌ام را بفرست")
+          : null,
+    });
+
+    if (!gate.pass) return { handled: true, chatId, status: gate.status };
+  }
+
   if (!text) {
+    // A shared contact carries no text. If the gate is off, a contact on its own
+    // is still worth taking rather than answering "I only read text".
+    if (message.contact?.phone_number) {
+      const check = normalizeIranPhone(message.contact.phone_number);
+      if (check.ok && (await setChatPhone(userId, check.normalized))) {
+        await sendMessage({
+          chatId,
+          text: confirmPhoneText(locale, check.normalized),
+          replyToMessageId: message.message_id,
+          replyMarkup: removeKeyboard(),
+        });
+        return { handled: true, chatId, status: "phone-saved" };
+      }
+    }
     await replyText(chatId, NO_TEXT[locale]);
     return { handled: true, chatId, status: "unsupported" };
   }
@@ -154,21 +253,25 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
 
   if (/^\/(clear|reset|new)\b/.test(text)) {
-    resetConversation(await sessionIdFor(chatId));
+    resetConversation(await sessionIdFor(userId));
     await replyText(chatId, CLEARED[locale]);
     logInfo("telegram.clear", { chatId });
     return { handled: true, chatId, status: "cleared" };
   }
 
   if (/^\/id\b/.test(text)) {
+    // Both, and labelled: the chat id is what TELEGRAM_ALLOWED_CHAT_IDS takes,
+    // the user id is what settings are stored under. In a private chat they are
+    // the same number, in a group they are not.
     await replyText(
       chatId,
       locale === "en"
-        ? `Your chat id: ${chatId}`
-        : `شناسهٔ گفت‌وگوی تو: ${chatId}\nاین را در TELEGRAM_ALLOWED_CHAT_IDS بگذار تا فقط تو دسترسی داشته باشی.`,
+        ? `Your user id: ${userId}\nThis chat id: ${chatId}`
+        : `شناسهٔ کاربری تو: ${userId}\nشناسهٔ این گفت‌وگو: ${chatId}\n` +
+            `برای TELEGRAM_ALLOWED_CHAT_IDS شناسهٔ گفت‌وگو را بگذار.`,
     );
     return { handled: true, chatId, status: "id" };
   }
 
-  return await processTextMessage({ chatId, text, locale, replyToMessageId: message.message_id });
+  return await processTextMessage({ chatId, userId, text, locale, replyToMessageId: message.message_id });
 }

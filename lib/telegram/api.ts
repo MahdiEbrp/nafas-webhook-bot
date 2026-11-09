@@ -5,8 +5,9 @@
  * A single `call()` wraps the `{ ok, result } / { ok:false, description }`
  * envelope Telegram uses, so callers never deal with HTTP codes.
  *
- * Only text is sent and received: a chat bot needs `sendMessage` and
- * `sendChatAction`, plus the three calls that register the webhook.
+ * Only text is sent, and only text and shared contacts are received: a chat bot
+ * needs `sendMessage` and `sendChatAction`, the reply keyboard that asks for a
+ * phone number, and the three calls that register the webhook.
  */
 
 import { getConfig } from "@/lib/config";
@@ -15,12 +16,26 @@ import { truncate } from "@/lib/text";
 
 export type TelegramUser = { id: number; is_bot: boolean; first_name: string; username?: string };
 export type TelegramChat = { id: number; type: string; first_name?: string; username?: string; title?: string };
+/**
+ * A shared contact.
+ *
+ * `user_id` is what makes this trustworthy: when it equals `message.from.id`
+ * the user shared *their own* number straight from Telegram, not one they typed
+ * or somebody else's card. `phone_number` arrives international (`+989…`).
+ */
+export type TelegramContact = {
+  phone_number: string;
+  first_name?: string;
+  last_name?: string;
+  user_id?: number;
+};
 export type TelegramMessage = {
   message_id: number;
   from?: TelegramUser;
   chat: TelegramChat;
   date: number;
   text?: string;
+  contact?: TelegramContact;
 };
 export type TelegramCallbackQuery = {
   id: string;
@@ -128,6 +143,7 @@ export function sendMessage(input: {
   chatId: number;
   text: string;
   replyToMessageId?: number;
+  replyMarkup?: Record<string, unknown>;
 }): Promise<TelegramResult<TelegramMessage>> {
   return call<TelegramMessage>("sendMessage", {
     chat_id: input.chatId,
@@ -135,7 +151,38 @@ export function sendMessage(input: {
     // No parse_mode on purpose: Persian text must never break parsing.
     link_preview_options: { is_disabled: true },
     ...(input.replyToMessageId ? { reply_to_message_id: input.replyToMessageId } : {}),
+    ...(input.replyMarkup ? { reply_markup: input.replyMarkup } : {}),
   });
+}
+
+/* ────────────────────────────── keyboard ────────────────────────────── */
+
+/**
+ * The "share your number" button.
+ *
+ * `request_contact: true` is Telegram's own mechanism: it puts a button under
+ * the field that sends the number *from the user's Telegram account* rather than
+ * making them type it. That is what the owner asked for — the number comes from
+ * the Telegram API, so it arrives as `message.contact` with `user_id` set, which
+ * also tells us it is really theirs.
+ *
+ * `one_time_keyboard` makes it fold away after the tap; the handler removes it
+ * explicitly once the number is stored, so it does not linger over the chat.
+ *
+ * Groups cannot offer this button, which is why the handler only sends it when
+ * `chat.type === "private"` and asks in plain words otherwise.
+ */
+export function contactKeyboard(label: string): Record<string, unknown> {
+  return {
+    keyboard: [[{ text: label, request_contact: true }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+}
+
+/** Takes the keyboard away once it has done its job. */
+export function removeKeyboard(): Record<string, unknown> {
+  return { remove_keyboard: true };
 }
 
 /** Acknowledges a button press (only reachable from buttons of an older build). */

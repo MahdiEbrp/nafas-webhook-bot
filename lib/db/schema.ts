@@ -12,9 +12,14 @@ import type { SqlRunner } from "./client";
 export const TABLE_NAME = "chat_sessions";
 
 /**
- * One row per Telegram chat.
+ * One row per Telegram user.
  *
- * `telegram_chat_id` is the key the owner asked for; `session_id` is the value.
+ * `telegram_user_id` is the key the owner asked for; `session_id` is the value
+ * and `phone` their Iranian mobile once they have given it.
+ *
+ * Keyed by user rather than by chat so the record follows the person: a chat id
+ * belongs to a conversation, so a new chat with the bot would start from
+ * nothing, and in a group one id is shared by everybody in it.
  *
  * There is deliberately no per-message counter. Updating one would mean a write
  * on every message, and on serverless that write would have to be fire-and-forget
@@ -24,13 +29,47 @@ export const TABLE_NAME = "chat_sessions";
  */
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `create table if not exists ${TABLE_NAME} (
-     telegram_chat_id bigint      primary key,
+     telegram_user_id bigint      primary key,
      session_id       text        not null,
+     phone            text,
      created_at       timestamptz not null default now(),
      updated_at       timestamptz not null default now(),
      last_seen_at     timestamptz not null default now()
    )`,
+  /**
+   * Renames the key column on databases created when the bot keyed by chat id.
+   *
+   * A plain `alter table … rename column` is not idempotent — the second run
+   * fails because the old name is gone — and this list runs on every boot. So
+   * the rename is guarded by a look at `information_schema`, which also makes it
+   * a no-op when the table does not exist yet.
+   *
+   * The data survives unchanged and stays correct: in a private chat Telegram
+   * uses the same number for the chat and the user, so every row written under
+   * a chat id already holds a user id. What changes is the meaning in groups,
+   * where a chat id is shared by everyone in it.
+   */
+  `do $$
+   begin
+     if exists (
+       select 1 from information_schema.columns
+        where table_name = '${TABLE_NAME}' and column_name = 'telegram_chat_id'
+     ) then
+       alter table ${TABLE_NAME} rename column telegram_chat_id to telegram_user_id;
+     end if;
+   end $$`,
+  /**
+   * For databases created before `phone` existed.
+   *
+   * `create table if not exists` does nothing when the table is already there,
+   * so a deployment that ran the first version would keep its phone-less table
+   * forever. This line is the migration, and `if not exists` makes it free
+   * afterwards. A `phone` column that is nullable on purpose: a row exists the
+   * moment a chat writes in, which is before we have its number.
+   */
+  `alter table ${TABLE_NAME} add column if not exists phone text`,
   `create index if not exists ${TABLE_NAME}_session_id_idx on ${TABLE_NAME} (session_id)`,
+  `create index if not exists ${TABLE_NAME}_phone_idx on ${TABLE_NAME} (phone)`,
 ];
 
 let ensured: Promise<boolean> | null = null;

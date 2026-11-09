@@ -47,6 +47,15 @@ export type AppConfig = {
    * runs without a database, exactly as it did before.
    */
   databaseUrl: string;
+  /**
+   * Refuse to answer anything until the chat has an Iranian mobile on file.
+   *
+   * Only meaningful when a database is configured: the number has to live
+   * somewhere, so with no DATABASE_URL the gate steps aside and the bot behaves
+   * as it did before rather than going silent for everyone. Set PHONE_GATE=off
+   * to switch the ask off while keeping persistence.
+   */
+  phoneGate: boolean;
   /** Bot entry-point protection (optional but recommended) */
   botApiKey: string | null;
   /** Requests per minute per client for /api/chat */
@@ -144,6 +153,7 @@ export function getConfig(): AppConfig {
     timeZone: process.env.TIME_ZONE?.trim() || "Asia/Tehran",
     dateAssistant: bool(process.env.DATE_ASSISTANT, true),
     databaseUrl: (process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? "").trim(),
+    phoneGate: bool(process.env.PHONE_GATE, true),
     botApiKey: process.env.BOT_API_KEY?.trim() || null,
     chatRateLimit: {
       limit: int(process.env.CHAT_RATE_LIMIT, 20),
