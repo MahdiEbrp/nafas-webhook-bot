@@ -35,7 +35,9 @@ import type {
   Proposal,
   ProposalFailure,
   SearchResult,
+  UserCreateInput,
   UserPatch,
+  UserRole,
   UserStatus,
 } from "./types";
 
@@ -73,6 +75,8 @@ export function seedUsers(): ManagedUser[] {
       id: "u-1001",
       firstName: "مریم",
       lastName: "احمدی",
+      email: "maryam.ahmadi@example.test",
+      role: "customer",
       phone: "09121234567",
       status: "active",
       createdAt: SEED_STAMP,
@@ -82,6 +86,8 @@ export function seedUsers(): ManagedUser[] {
       id: "u-1002",
       firstName: "مریم",
       lastName: "رضایی",
+      email: "maryam.rezaei@example.test",
+      role: "customer",
       phone: "09351234567",
       status: "active",
       createdAt: SEED_STAMP,
@@ -91,6 +97,8 @@ export function seedUsers(): ManagedUser[] {
       id: "u-1003",
       firstName: "علی",
       lastName: "محمدی",
+      email: "ali.mohammadi@example.test",
+      role: "doctor",
       phone: null,
       status: "disabled",
       createdAt: SEED_STAMP,
@@ -100,6 +108,10 @@ export function seedUsers(): ManagedUser[] {
 }
 
 const MESSAGES: Record<ProposalFailure, Record<Locale, string>> = {
+  "invalid-name": { fa: "نام و نام خانوادگی هرکدام باید دست‌کم ۲ نویسه باشند.", en: "First and last names must each contain at least 2 characters." },
+  "invalid-email": { fa: "نشانی ایمیل معتبر نیست.", en: "The email address is not valid." },
+  "invalid-password": { fa: "رمز باید دست‌کم ۸ نویسه و شامل عدد، حرف بزرگ و نماد ویژه باشد.", en: "The password must be at least 8 characters and include a number, uppercase letter, and special symbol." },
+  "invalid-role": { fa: "این نقش معتبر نیست. نقش باید مدیر، پزشک، پذیرش یا مشتری باشد.", en: "The role must be admin, doctor, reception, or customer." },
   "not-found": { fa: "چنین کاربری پیدا نشد.", en: "No such user." },
   "no-change": { fa: "چیزی برای تغییر نگفتی.", en: "You did not ask to change anything." },
   "empty-list": { fa: "لیست خالی است؛ کسی را انتخاب نکرده‌ای.", en: "The list is empty; nobody was selected." },
@@ -109,6 +121,26 @@ const MESSAGES: Record<ProposalFailure, Record<Locale, string>> = {
     en: "That is not an Iranian mobile. The right shape is like 09121234567.",
   },
 };
+
+const USER_ROLES: readonly UserRole[] = ["admin", "doctor", "reception", "customer"];
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+
+function validName(value: unknown): value is string {
+  return typeof value === "string" && [...value.trim()].length >= 2;
+}
+
+function validEmail(value: unknown): value is string {
+  return typeof value === "string" && EMAIL_PATTERN.test(value.trim());
+}
+
+function validPassword(value: unknown): value is string {
+  if (typeof value !== "string" || [...value].length < 8) return false;
+  return /\p{N}/u.test(value) && /\p{Lu}/u.test(value) && /[^\p{L}\p{N}]/u.test(value);
+}
+
+function validRole(value: unknown): value is UserRole {
+  return USER_ROLES.includes(value as UserRole);
+}
 
 /** Accepts an API that wraps its list, or one that returns a bare array. */
 function readUsers(body: unknown): ManagedUser[] | null {
@@ -131,6 +163,8 @@ export class UserManager {
   /** Always present: with no base url this *is* the backend. */
   private readonly store: Map<string, ManagedUser>;
   private readonly pending = new Map<string, PendingChange>();
+  /** Kept separately so `pendingChange()` and logs can never expose passwords. */
+  private readonly pendingPasswords = new Map<string, string>();
   private readonly locale: Locale;
 
   constructor(options: UserManagerOptions = {}) {
@@ -177,7 +211,7 @@ export class UserManager {
   }
 
   /**
-   * Finds users by id, phone, or either part of their name.
+   * Finds users by id, email, phone, or either part of their name.
    *
    * Matching is on normalised text and a prefix of the phone, so «مر» finds
    * both Maryams and «0912» finds the first one. An empty query returns
@@ -199,7 +233,7 @@ export class UserManager {
 
     const matches = all.filter((user) => {
       const name = `${user.firstName} ${user.lastName}`.toLowerCase();
-      if (name.includes(flat)) return true;
+      if (name.includes(flat) || user.email.toLowerCase().includes(flat)) return true;
       if (user.id.toLowerCase() === flat) return true;
       // A phone typed with Persian digits still has to match.
       if (digits.length >= 3 && user.phone && user.phone.includes(digits)) return true;
@@ -220,6 +254,40 @@ export class UserManager {
   /* ─────────────────────── proposing a change ──────────────────────── */
 
   /**
+   * Describes a new account without sending or storing its password.
+   * The secret is held privately until confirmation, then discarded.
+   */
+  async proposeCreate(input: UserCreateInput): Promise<Proposal> {
+    if (!validName(input?.firstName) || !validName(input?.lastName)) return this.refuse("invalid-name");
+    if (!validEmail(input?.email)) return this.refuse("invalid-email");
+    if (!validPassword(input?.password)) return this.refuse("invalid-password");
+    if (!validRole(input?.role)) return this.refuse("invalid-role");
+
+    const phone = normalizeIranPhone(input.phone);
+    if (!phone.ok) return this.refuse("bad-phone");
+
+    const stamp = new Date(this.now()).toISOString();
+    const user: ManagedUser = {
+      id: `u-${randomUUID()}`,
+      firstName: input.firstName.trim(),
+      lastName: input.lastName.trim(),
+      email: input.email.trim().toLowerCase(),
+      role: input.role,
+      phone: phone.normalized,
+      status: "active",
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+
+    return this.hold(
+      { kind: "create", user },
+      [user.id],
+      `ساخت حساب برای ${user.firstName} ${user.lastName} با نقش ${user.role}`,
+      input.password,
+    );
+  }
+
+  /**
    * Describes an edit and holds it. Sends nothing.
    *
    * The user is read first — a read is not a change — so the proposal can be
@@ -228,6 +296,14 @@ export class UserManager {
   async proposeEdit(userId: string, patch: UserPatch): Promise<Proposal> {
     const fields = Object.keys(patch).filter((key) => patch[key as keyof UserPatch] !== undefined);
     if (fields.length === 0) return this.refuse("no-change");
+    if (patch.firstName !== undefined && !validName(patch.firstName)) return this.refuse("invalid-name");
+    if (patch.lastName !== undefined && !validName(patch.lastName)) return this.refuse("invalid-name");
+    if (patch.email !== undefined && !validEmail(patch.email)) return this.refuse("invalid-email");
+    if (patch.role !== undefined && !validRole(patch.role)) return this.refuse("invalid-role");
+
+    if (patch.firstName !== undefined) patch = { ...patch, firstName: patch.firstName.trim() };
+    if (patch.lastName !== undefined) patch = { ...patch, lastName: patch.lastName.trim() };
+    if (patch.email !== undefined) patch = { ...patch, email: patch.email.trim().toLowerCase() };
 
     if (patch.phone !== undefined && patch.phone !== null) {
       const check = normalizeIranPhone(patch.phone);
@@ -283,6 +359,7 @@ export class UserManager {
     if (!change) return null;
     if (change.expiresAt <= this.now()) {
       this.pending.delete(token);
+      this.pendingPasswords.delete(token);
       return null;
     }
     return change;
@@ -294,6 +371,7 @@ export class UserManager {
   }
 
   cancel(token: string): boolean {
+    this.pendingPasswords.delete(token);
     return this.pending.delete(token);
   }
 
@@ -309,6 +387,8 @@ export class UserManager {
     if (!change) return { ok: false, code: "unknown-token", message: "چنین درخواستی وجود ندارد." };
 
     this.pending.delete(token);
+    const password = this.pendingPasswords.get(token);
+    this.pendingPasswords.delete(token);
 
     if (change.expiresAt <= this.now()) {
       logWarn("users.change_expired", { token, kind: change.action.kind });
@@ -322,7 +402,7 @@ export class UserManager {
     const mode = this.mode;
     const outcome =
       mode === "live"
-        ? await this.applyLive(change.action)
+        ? await this.applyLive(change.action, password)
         : await this.applyDummy(change.action);
 
     logInfo("users.change_applied", {
@@ -345,6 +425,7 @@ export class UserManager {
     action: PendingChange["action"],
     affected: string[],
     summary: string,
+    password?: string,
   ): Proposal {
     const token = randomUUID();
     const change: PendingChange = {
@@ -355,6 +436,7 @@ export class UserManager {
       expiresAt: this.now() + this.pendingTtlMs,
     };
     this.pending.set(token, change);
+    if (password !== undefined) this.pendingPasswords.set(token, password);
     logInfo("users.change_proposed", { kind: action.kind, affected: affected.length });
     return { ok: true, change };
   }
@@ -369,6 +451,11 @@ export class UserManager {
     const touch = (user: ManagedUser, patch: Partial<ManagedUser>): void => {
       this.store.set(user.id, { ...user, ...patch, updatedAt: stamp });
     };
+
+    if (action.kind === "create") {
+      this.store.set(action.user.id, { ...action.user });
+      return { applied: [action.user.id], failed };
+    }
 
     if (action.kind === "edit") {
       const user = this.store.get(action.userId);
@@ -402,7 +489,18 @@ export class UserManager {
 
   private async applyLive(
     action: PendingChange["action"],
+    password?: string,
   ): Promise<{ applied: string[]; failed: Array<{ id: string; reason: string }> }> {
+    if (action.kind === "create") {
+      const res = await this.request("users", {
+        method: "POST",
+        body: { ...action.user, password },
+      });
+      return res.ok
+        ? { applied: [action.user.id], failed: [] }
+        : { applied: [], failed: [{ id: action.user.id, reason: res.reason }] };
+    }
+
     if (action.kind === "edit") {
       const res = await this.request(`users/${encodeURIComponent(action.userId)}`, {
         method: "PATCH",

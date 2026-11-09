@@ -34,6 +34,12 @@ export const CAPABILITIES: readonly Capability[] = [
     needsConfirm: false,
   },
   {
+    id: "create",
+    title: { fa: "ساخت حساب کاربری", en: "Create a user account" },
+    example: { fa: "برای مریم یک حساب مشتری بساز", en: "Create a customer account for Maryam" },
+    needsConfirm: true,
+  },
+  {
     id: "edit",
     title: { fa: "ویرایش مشخصات کاربر", en: "Edit a user" },
     example: { fa: "شمارهٔ کاربر u-1002 را عوض کن", en: "Change the number for u-1002" },

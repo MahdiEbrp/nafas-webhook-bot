@@ -1782,7 +1782,7 @@ async function main(): Promise<void> {
     };
   }
 
-  const MUTATING_IDS = ["edit", "delete", "bulk-enable", "bulk-disable", "bulk-delete"];
+  const MUTATING_IDS = ["create", "edit", "delete", "bulk-enable", "bulk-disable", "bulk-delete"];
 
   await test("the dummy store answers without any network at all", async () => {
     const manager = new UserManager();
@@ -1798,12 +1798,125 @@ async function main(): Promise<void> {
     assertEqual(await manager.get("u-9999"), null, "an unknown id is null, not a throw");
   });
 
+  await test("creating an account waits for confirmation and never stores its password in dummy data", async () => {
+    const manager = new UserManager();
+    const input = {
+      firstName: "  مریم ",
+      lastName: " احمدی ",
+      email: "  MARYAM@EXAMPLE.TEST ",
+      phone: "۰۹۱۲ ۱۲۳ ۴۵۶۷",
+      password: "Secret123!",
+      role: "admin" as const,
+    };
+    const proposal = await manager.proposeCreate(input);
+    assertEqual(proposal.ok, true, "a valid account can be proposed");
+    assertEqual((await manager.list()).users.length, 3, "proposal has not created anything yet");
+    assertEqual(manager.pendingCount(), 1, "the proposal waits for confirmation");
+    const action = proposal.ok ? proposal.change.action : null;
+    assert(action?.kind === "create", "the pending change is a create");
+    assert(!JSON.stringify(proposal).includes(input.password), "the public proposal does not expose the password");
+    assert(proposal.ok && !proposal.change.summary.includes(input.email), "the summary avoids personal details");
+
+    const confirmed = await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual(confirmed.ok, true, "confirmation creates the account");
+    const createdId = confirmed.ok ? confirmed.applied[0] ?? "" : "";
+    const created = await manager.get(createdId);
+    assertEqual(created?.firstName, "مریم", "names are trimmed");
+    assertEqual(created?.lastName, "احمدی", "surname is trimmed");
+    assertEqual(created?.email, "maryam@example.test", "email is trimmed and lowercased");
+    assertEqual(created?.phone, "09121234567", "Iranian phone is normalized");
+    assertEqual(created?.role, "admin", "the selected role is saved");
+    assertEqual(created?.status, "active", "a new account starts active");
+    assert(created !== null && !("password" in created), "dummy data never retains the password");
+  });
+
+  await test("live account creation sends the password only after confirmation", async () => {
+    const api = makeUserApi({ body: { ok: true } });
+    const manager = new UserManager({ baseUrl: "https://users.example.test", fetchImpl: api.impl });
+    const input = {
+      firstName: "مریم", lastName: "احمدی", email: "maryam@example.test",
+      phone: "09121234567", password: "Secret123!", role: "doctor" as const,
+    };
+    const proposal = await manager.proposeCreate(input);
+    assertEqual(proposal.ok, true, "proposal accepted");
+    assertEqual(api.mutating(), 0, "not one write before yes");
+    assert(!JSON.stringify(api.calls).includes(input.password), "the password was not sent while proposing");
+    const result = await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual(result.ok, true, "confirmed request completed");
+    const post = api.calls.find((call) => call.method === "POST");
+    assertEqual(post?.url, "https://users.example.test/users", "POSTs to the users collection");
+    assertEqual((post?.body as Record<string, unknown> | undefined)?.password, input.password, "password goes only in the confirmed request");
+    assertEqual((post?.body as Record<string, unknown> | undefined)?.role, "doctor", "role is included");
+
+    const failingApi = makeUserApi({ status: 500, body: { message: "duplicate email" } });
+    const failingManager = new UserManager({ baseUrl: "https://users.example.test", fetchImpl: failingApi.impl });
+    const failedProposal = await failingManager.proposeCreate(input);
+    const failedResult = await failingManager.confirm(failedProposal.ok ? failedProposal.change.token : "");
+    assertEqual(failedResult.ok, true, "API failure is reported as a failed application, not a thrown error");
+    if (failedResult.ok) {
+      assertEqual(failedResult.applied.length, 0, "failed create applies nothing");
+      assertEqual(failedResult.failed[0]?.reason, "duplicate email", "the API reason is returned");
+    }
+  });
+
+  await test("account creation rejects invalid names, email, phone, password, and role", async () => {
+    const manager = new UserManager();
+    const valid = {
+      firstName: "مریم", lastName: "احمدی", email: "maryam@example.test",
+      phone: "09121234567", password: "Secret123!", role: "customer" as const,
+    };
+    const cases: Array<{ input: unknown; code: string }> = [
+      { input: { ...valid, firstName: "م" }, code: "invalid-name" },
+      { input: { ...valid, lastName: " " }, code: "invalid-name" },
+      { input: { ...valid, email: "not-an-email" }, code: "invalid-email" },
+      { input: { ...valid, password: "Abc1!" }, code: "invalid-password" },
+      { input: { ...valid, password: "Abcdefg!" }, code: "invalid-password" },
+      { input: { ...valid, password: "abcdefg1!" }, code: "invalid-password" },
+      { input: { ...valid, password: "Abcdefg1" }, code: "invalid-password" },
+      { input: { ...valid, phone: "+14155552671" }, code: "bad-phone" },
+      { input: { ...valid, role: "owner" }, code: "invalid-role" },
+    ];
+    for (const item of cases) {
+      const result = await manager.proposeCreate(item.input as never);
+      assertEqual(!result.ok && result.code, item.code, `invalid input refused as ${item.code}`);
+    }
+    assertEqual(manager.pendingCount(), 0, "invalid forms do not create pending actions");
+
+    const missingName = await manager.proposeCreate({ ...valid, firstName: undefined } as never);
+    assertEqual(!missingName.ok && missingName.code, "invalid-name", "missing name is refused safely");
+  });
+
+  await test("editing validates and normalizes name, email, and role fields", async () => {
+    const manager = new UserManager();
+    const badName = await manager.proposeEdit("u-1001", { firstName: "م" });
+    assertEqual(!badName.ok && badName.code, "invalid-name", "short first name refused");
+    const badLastName = await manager.proposeEdit("u-1001", { lastName: " " });
+    assertEqual(!badLastName.ok && badLastName.code, "invalid-name", "blank surname refused");
+    const badEmail = await manager.proposeEdit("u-1001", { email: "bad" });
+    assertEqual(!badEmail.ok && badEmail.code, "invalid-email", "bad email refused");
+    const badRole = await manager.proposeEdit("u-1001", { role: "owner" as never });
+    assertEqual(!badRole.ok && badRole.code, "invalid-role", "unknown role refused");
+
+    const proposal = await manager.proposeEdit("u-1001", {
+      firstName: "  مریم‌سادات ", lastName: " احمدی ",
+      email: " NEW@EXAMPLE.TEST ", role: "reception",
+    });
+    assertEqual(proposal.ok, true, "valid fields proposed");
+    await manager.confirm(proposal.ok ? proposal.change.token : "");
+    const updated = await manager.get("u-1001");
+    assertEqual(updated?.firstName, "مریم‌سادات", "first name trimmed");
+    assertEqual(updated?.lastName, "احمدی", "last name trimmed");
+    assertEqual(updated?.email, "new@example.test", "email canonicalized");
+    assertEqual(updated?.role, "reception", "role changed");
+  });
+
   await test("search finds by name, phone, and id — including Persian digits", async () => {
     const manager = new UserManager();
 
     assertEqual((await manager.search("مریم")).users.length, 2, "both Maryams by first name");
     assertEqual((await manager.search("رضایی")).users.length, 1, "one by surname");
     assertEqual((await manager.search("u-1001")).users.length, 1, "by id");
+    assertEqual((await manager.search("maryam.ahmadi@example.test")).users[0]?.id, "u-1001", "by email");
     assertEqual((await manager.search("0935")).users[0]?.id, "u-1002", "by part of the phone");
     assertEqual((await manager.search("۰۹۱۲")).users[0]?.id, "u-1001", "Persian digits match too");
     assertEqual((await manager.search("")).users.length, 3, "an empty query lists everyone");
@@ -1933,7 +2046,7 @@ async function main(): Promise<void> {
     assertEqual(!badPhone.ok && badPhone.code, "bad-phone", "a foreign number is refused");
     assert(!badPhone.ok && badPhone.message.includes("۰۹۱۲"), "and the reply shows the right shape");
 
-    const missing = await manager.proposeEdit("u-nope", { firstName: "x" });
+    const missing = await manager.proposeEdit("u-nope", { firstName: "نام" });
     assertEqual(!missing.ok && missing.code, "not-found", "editing a user who is not there");
 
     const gone = await manager.proposeDelete("u-nope");
@@ -2079,7 +2192,7 @@ async function main(): Promise<void> {
     });
     const manager = new UserManager({ baseUrl: "https://api.test", fetchImpl: failing.impl });
 
-    const edit = await manager.proposeEdit("u-1001", { firstName: "x" });
+    const edit = await manager.proposeEdit("u-1001", { firstName: "نام" });
     const editResult = await manager.confirm(edit.ok ? edit.change.token : "");
     if (editResult.ok) {
       assertEqual(editResult.applied.length, 0, "the edit did not apply");
@@ -2109,7 +2222,7 @@ async function main(): Promise<void> {
       body: { id: "u-1001" },
     });
     const okEditManager = new UserManager({ baseUrl: "https://api.test", fetchImpl: okEdit.impl });
-    const okEditProposal = await okEditManager.proposeEdit("u-1001", { lastName: "y" });
+    const okEditProposal = await okEditManager.proposeEdit("u-1001", { lastName: "نام" });
     const okEditResult = await okEditManager.confirm(okEditProposal.ok ? okEditProposal.change.token : "");
     if (okEditResult.ok) assertEqual(okEditResult.applied.join(","), "u-1001", "a 2xx edit applies");
   });
@@ -2149,7 +2262,7 @@ async function main(): Promise<void> {
 
     // Propose both, then let the bulk one land first — the single edit and
     // delete are now aimed at a row that is no longer there.
-    const edit = await manager.proposeEdit("u-1002", { firstName: "ز" });
+    const edit = await manager.proposeEdit("u-1002", { firstName: "رضا" });
     const del = await manager.proposeDelete("u-1003");
     const bulk = await manager.proposeBulk(["u-1002", "u-1003"], "delete");
     await manager.confirm(bulk.ok ? bulk.change.token : "");
@@ -2230,9 +2343,9 @@ async function main(): Promise<void> {
 
     // u-1001 and u-1002 are gone now; the last one leaves through an edit and
     // then a delete, which also covers the single-user paths against the store.
-    const singleEdit = await manager.proposeEdit("u-1003", { firstName: "ز" });
+    const singleEdit = await manager.proposeEdit("u-1003", { firstName: "رضا" });
     assertEqual((await manager.confirm(singleEdit.ok ? singleEdit.change.token : "")).ok, true, "edit applied");
-    assertEqual((await manager.get("u-1003"))?.firstName, "ز", "and took effect");
+    assertEqual((await manager.get("u-1003"))?.firstName, "رضا", "and took effect");
 
     const singleDelete = await manager.proposeDelete("u-1003");
     assertEqual((await manager.confirm(singleDelete.ok ? singleDelete.change.token : "")).ok, true, "delete applied");

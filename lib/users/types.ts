@@ -10,11 +10,14 @@ import type { Locale } from "@/lib/config";
 
 /** A user is either usable or switched off. There is no third state. */
 export type UserStatus = "active" | "disabled";
+export type UserRole = "admin" | "doctor" | "reception" | "customer";
 
 export type ManagedUser = {
   id: string;
   firstName: string;
   lastName: string;
+  email: string;
+  role: UserRole;
   /** Iranian mobile in stored form (`09XXXXXXXXX`), or null if never given. */
   phone: string | null;
   status: UserStatus;
@@ -31,8 +34,20 @@ export type ManagedUser = {
 export type UserPatch = {
   firstName?: string;
   lastName?: string;
+  email?: string;
+  role?: UserRole;
   phone?: string | null;
   status?: UserStatus;
+};
+
+/** Details required when creating an account. Password is never part of a user record. */
+export type UserCreateInput = {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  password: string;
+  role: UserRole;
 };
 
 /** The three things that can be done to a whole list at once. */
@@ -40,6 +55,7 @@ export type BulkAction = "enable" | "disable" | "delete";
 
 /** What a pending change intends to do, before anybody has agreed to it. */
 export type PendingAction =
+  | { kind: "create"; user: ManagedUser }
   | { kind: "edit"; userId: string; patch: UserPatch }
   | { kind: "delete"; userId: string }
   | { kind: "bulk"; action: BulkAction; userIds: string[] };
@@ -64,6 +80,10 @@ export type PendingChange = {
 
 /** Why a proposal was refused. Every one of these is worth telling the user. */
 export type ProposalFailure =
+  | "invalid-name"
+  | "invalid-email"
+  | "invalid-password"
+  | "invalid-role"
   | "not-found"
   | "no-change"
   | "empty-list"
