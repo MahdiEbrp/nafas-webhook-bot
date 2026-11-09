@@ -17,6 +17,9 @@
     "telegram:setup": "tsx scripts/telegram-setup.ts"
   },
   "dependencies": {
+    "@date-fns/tz": "^1.5.0",
+    "date-fns": "^4.4.0",
+    "date-fns-jalali": "^4.4.0-0",
     "next": "^16.4.5",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

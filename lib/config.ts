@@ -36,6 +36,12 @@ export type AppConfig = {
   history: { maxMessages: number; ttlMs: number };
   /** Name the bot uses for itself in the system prompt and greetings */
   botName: string;
+  /** The clinic the bot introduces itself as the assistant of */
+  clinicName: string;
+  /** IANA zone used for "what time is it" — the server usually runs UTC */
+  timeZone: string;
+  /** Kill switch for the deterministic date/calendar layer */
+  dateAssistant: boolean;
   /** Bot entry-point protection (optional but recommended) */
   botApiKey: string | null;
   /** Requests per minute per client for /api/chat */
@@ -129,6 +135,9 @@ export function getConfig(): AppConfig {
       ttlMs: int(process.env.HISTORY_TTL_MS, 30 * 60 * 1000),
     },
     botName: process.env.BOT_NAME?.trim() || "نفَس",
+    clinicName: process.env.CLINIC_NAME?.trim() || "کلینیک زیبایی نفس",
+    timeZone: process.env.TIME_ZONE?.trim() || "Asia/Tehran",
+    dateAssistant: bool(process.env.DATE_ASSISTANT, true),
     botApiKey: process.env.BOT_API_KEY?.trim() || null,
     chatRateLimit: {
       limit: int(process.env.CHAT_RATE_LIMIT, 20),
