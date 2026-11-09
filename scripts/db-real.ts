@@ -73,16 +73,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { setRunnerForTesting } = await import("@/lib/db/client");
-  const { ensureSchema, resetSchemaCache, TABLE_NAME } = await import("@/lib/db/schema");
-  const {
-    ensureChatSession,
-    setChatPhone,
-    phoneFor,
-    resolveSessionId,
-    resetChatSessionCacheForTesting,
-  } = await import("@/lib/db/chat-sessions");
-
   const pg = new EmbeddedPostgres({
     databaseDir: "./.pgdata",
     user: "postgres",
@@ -93,6 +83,30 @@ async function main(): Promise<void> {
 
   await pg.initialise();
   await pg.start();
+
+  try {
+    await runChecks(pg);
+  } finally {
+    /*
+     * Always stop the cluster. A crashed check otherwise leaves Postgres holding
+     * the port, and every later run dies with "could not create any TCP/IP
+     * sockets" — a confusing failure that has nothing to do with the SQL.
+     */
+    await pg.stop().catch(() => undefined);
+  }
+}
+
+async function runChecks(pg: Embedded): Promise<void> {
+  const { setRunnerForTesting } = await import("@/lib/db/client");
+  const { ensureSchema, resetSchemaCache, TABLE_NAME } = await import("@/lib/db/schema");
+  const {
+    ensureChatSession,
+    setChatPhone,
+    phoneFor,
+    resolveSessionId,
+    resetChatSessionCacheForTesting,
+  } = await import("@/lib/db/chat-sessions");
+
   await pg.createDatabase("nafas");
 
   const client = pg.getPgClient("nafas");
@@ -122,7 +136,9 @@ async function main(): Promise<void> {
   resetSchemaCache();
   check("applying it a second time is harmless", await ensureSchema(run));
 
-  /* ── 2. The migration path: a table that predates phone ──────────────── */
+  /* ── 2. The migration path: a table from before both changes ─────────── */
+  // Shaped exactly like the one #18 created: keyed by chat id, no phone column,
+  // and a row already in it. This is what a real deployment looks like.
   await client.query(`drop table if exists ${TABLE_NAME}`);
   await client.query(`create table ${TABLE_NAME} (
     telegram_chat_id bigint primary key,
@@ -131,30 +147,57 @@ async function main(): Promise<void> {
     updated_at timestamptz not null default now(),
     last_seen_at timestamptz not null default now()
   )`);
+  await client.query(
+    `insert into ${TABLE_NAME} (telegram_chat_id, session_id) values ($1, $2)`,
+    [4242, "11111111-1111-4111-8111-111111111111"],
+  );
+
   resetSchemaCache();
-  await ensureSchema(run);
+  check("the schema migrates an old table without throwing", await ensureSchema(run));
   const widened = await columns();
-  check("an existing table is widened, not left phone-less", widened.includes("phone"), widened.join(", "));
+  check("the key column was renamed, not added alongside", widened.includes("telegram_user_id"), widened.join(", "));
+  check("the old column name is gone", !widened.includes("telegram_chat_id"));
+  check("and the phone column was added", widened.includes("phone"));
+
+  const migrated = (await client.query(`select telegram_user_id, session_id from ${TABLE_NAME}`)).rows;
+  check("the existing row survived the rename", migrated.length === 1, `${migrated.length} rows`);
+  check(
+    "with its data intact",
+    String(migrated[0]?.telegram_user_id) === "4242" &&
+      String(migrated[0]?.session_id) === "11111111-1111-4111-8111-111111111111",
+  );
+
+  // A bare RENAME COLUMN throws on the second boot, and this list runs on every
+  // boot. The information_schema guard is what makes that safe.
+  resetSchemaCache();
+  check("running the migration a second time is harmless", await ensureSchema(run));
 
   /* ── 3. The upsert, for real ─────────────────────────────────────────── */
   resetChatSessionCacheForTesting();
   const first = await ensureChatSession(4242);
-  check("a new chat is inserted", first?.isNew === true, `session=${first?.sessionId}`);
+  check(
+    "a user who was already there is not re-created",
+    first?.isNew === false && first?.sessionId === "11111111-1111-4111-8111-111111111111",
+    `session=${first?.sessionId}`,
+  );
   check("phone starts empty", first?.phone === null, `phone=${String(first?.phone)}`);
-  check("the session id is a uuid", /^[0-9a-f-]{36}$/.test(first?.sessionId ?? ""));
+
+  const brandNew = await ensureChatSession(9000);
+  check("a user we have never seen is inserted", brandNew?.isNew === true, `session=${brandNew?.sessionId}`);
+  check("the new session id is a uuid", /^[0-9a-f-]{36}$/.test(brandNew?.sessionId ?? ""));
 
   // A warm instance answers from memory, so clear the cache to force real SQL.
   resetChatSessionCacheForTesting();
   const second = await ensureChatSession(4242);
-  check("a returning chat keeps its session id", second?.sessionId === first?.sessionId);
+  check("a returning user keeps their session id", second?.sessionId === first?.sessionId);
   check("and is not reported as new", second?.isNew === false, `isNew=${String(second?.isNew)}`);
 
-  /* ── 4. The phone upsert, on a chat with no row yet ──────────────────── */
+  /* ── 4. The phone upsert, on a user with no row yet ──────────────────── */
   // This is the case that matters: the gate asks for the number *first*, so the
   // shared contact is often the very first thing seen from a user.
   const savedForNewChat = await setChatPhone(5555, "09121234567");
   check(
-    "a shared contact creates the row it needs",
+    "a shared contact creates the row a new user needs",
     savedForNewChat?.phone === "09121234567",
     `phone=${String(savedForNewChat?.phone)}`,
   );
@@ -173,28 +216,37 @@ async function main(): Promise<void> {
   /* ── 5. What is actually on disk ─────────────────────────────────────── */
   const onDisk = (
     await client.query(
-      `select telegram_chat_id, session_id, phone from ${TABLE_NAME} order by telegram_chat_id`,
+      `select telegram_user_id, session_id, phone from ${TABLE_NAME} order by telegram_user_id`,
     )
   ).rows;
-  console.log("\nrows in the real table:");
+  console.log("\nrows in the real table (keyed by user id):");
   for (const row of onDisk) {
-    console.log(`   ${String(row.telegram_chat_id)}  ${String(row.session_id).slice(0, 8)}…  ${String(row.phone)}`);
+    console.log(
+      `   ${String(row.telegram_user_id)}  ${String(row.session_id).slice(0, 8)}…  ${row.phone === null ? "(no number yet)" : String(row.phone)}`,
+    );
   }
-  check("exactly the two chats are stored", onDisk.length === 2, `${onDisk.length} rows`);
+  check("exactly the three users are stored", onDisk.length === 3, `${onDisk.length} rows`);
+
+  // One of the three never gave a number, so only the stored ones are checked —
+  // and the point is that none of them carry a country code.
+  const withPhone = onDisk.filter((row) => row.phone !== null);
+  check("two of them have a number on file", withPhone.length === 2, `${withPhone.length} with a phone`);
   check(
-    "no country code in the column",
-    onDisk.every((row) => /^09\d{9}$/.test(String(row.phone))),
+    "and none of those carry a country code",
+    withPhone.every((row) => /^09\d{9}$/.test(String(row.phone))),
   );
 
   /* ── 6. The fallback still works ─────────────────────────────────────── */
   check("resolveSessionId returns the stored id", (await resolveSessionId(4242)) === first?.sessionId);
 
   await client.end();
-  await pg.stop();
   setRunnerForTesting(null);
 
   console.log(failures === 0 ? "\n🎉 real Postgres accepted everything\n" : `\n❌ ${failures} problem(s)\n`);
   process.exitCode = failures === 0 ? 0 : 1;
 }
 
-void main();
+void main().catch((error: unknown) => {
+  console.error("\n❌ db:real crashed:", error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

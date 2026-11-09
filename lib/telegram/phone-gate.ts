@@ -1,10 +1,13 @@
 /**
  * The phone gate.
  *
- * The owner's rule: before any message is answered, be sure the chat has a phone
- * number on file. If it does not, ask for it — through Telegram's own contact
- * button, so the number arrives from their Telegram account rather than from
+ * The owner's rule: before any message is answered, be sure we have this
+ * person's phone number on file. If we do not, ask for it — through Telegram's
+ * own contact button, so the number arrives from their account rather than from
  * their thumbs.
+ *
+ * Keyed by Telegram user id, so a number given in one chat is still on file when
+ * the same person opens a new one, and members of a group do not share a row.
  *
  * The number is kept as `09XXXXXXXXX`, Iranian mobiles only. Anything else is
  * refused with a reason the user can act on, and they are asked again.
@@ -34,13 +37,14 @@ export type GateOutcome =
 
 /** What the gate needs in order to ask in the right way. */
 export type GateInput = {
+  /** Whose number this is: the storage key, and what the reply is addressed by. */
+  userId: number;
+  /** Where to send the reply. Not the key — a chat is not a person. */
   chatId: number;
   /** Telegram only offers the contact button in a private chat */
   chatType: string;
   text: string;
   contact?: TelegramContact;
-  /** `message.from.id`, so we can tell their own number from somebody else's */
-  fromId?: number;
   locale: Locale;
   /** sends a line to the user; keeps this module free of the transport */
   say: (text: string, options?: { replyMarkup?: Record<string, unknown> }) => Promise<void>;
@@ -89,9 +93,9 @@ export function confirmPhoneText(locale: Locale, phone: string): string {
  * a failing database can do is make the bot ask again.
  */
 export async function ensurePhone(input: GateInput): Promise<GateOutcome> {
-  const { chatId, chatType, locale, say, keyboard } = input;
+  const { userId, chatType, locale, say, keyboard } = input;
 
-  const existing = await phoneFor(chatId);
+  const existing = await phoneFor(userId);
   if (existing) return { pass: true, phone: existing };
 
   /* ── they shared a contact through the Telegram button ─────────────── */
@@ -111,7 +115,7 @@ export async function ensurePhone(input: GateInput): Promise<GateOutcome> {
       await say(phoneRejectionMessage(check.reason, locale), {
         ...(chatType === "private" && keyboard() ? { replyMarkup: keyboard()! } : {}),
       });
-      logInfo("phone.rejected", { chatId, reason: check.reason, source: "typed" });
+      logInfo("phone.rejected", { userId, reason: check.reason, source: "typed" });
       return { pass: false, status: `phone-rejected:${check.reason}` };
     }
   }
@@ -121,13 +125,13 @@ export async function ensurePhone(input: GateInput): Promise<GateOutcome> {
   await say(markup ? ASK_PRIVATE[locale] : ASK_TYPED[locale], {
     ...(markup ? { replyMarkup: markup } : {}),
   });
-  logInfo("phone.asked", { chatId, chatType, withKeyboard: markup !== null });
+  logInfo("phone.asked", { userId, chatType, withKeyboard: markup !== null });
   return { pass: false, status: "phone-required" };
 }
 
 /** Validates one raw number and stores it, telling the user what happened. */
 async function acceptNumber(input: GateInput & { raw: string }): Promise<GateOutcome> {
-  const { chatId, locale, say, keyboard, chatType } = input;
+  const { userId, locale, say, keyboard, chatType } = input;
 
   const check = normalizeIranPhone(input.raw);
   if (!check.ok) {
@@ -138,27 +142,31 @@ async function acceptNumber(input: GateInput & { raw: string }): Promise<GateOut
     await say(phoneRejectionMessage(reason, locale), {
       ...(markup ? { replyMarkup: markup } : {}),
     });
-    logWarn("phone.rejected", { chatId, reason, source: "contact" });
+    logWarn("phone.rejected", { userId, reason, source: "contact" });
     return { pass: false, status: `phone-rejected:${reason}` };
   }
 
-  const saved = await setChatPhone(chatId, check.normalized);
+  const saved = await setChatPhone(userId, check.normalized);
   if (!saved) {
     // The write did not land. Asking again is better than pretending: a number
     // we cannot store is a number we do not have.
     await say(phoneRejectionMessage("not-iranian-mobile", locale));
-    logWarn("phone.save_failed", { chatId });
+    logWarn("phone.save_failed", { userId });
     return { pass: false, status: "phone-save-failed" };
   }
 
-  // Telegram tells us whether the shared card was really theirs.
-  const sharedSelf =
-    input.contact?.user_id === undefined || input.contact.user_id === input.fromId;
+  /*
+   * Telegram tells us whether the shared card was really theirs: `contact.user_id`
+   * is set when the number came from the sender's own account. Comparing it with
+   * the user id we are storing under catches somebody registering a number that
+   * is not theirs — worth logging even though we still accept it.
+   */
+  const sharedSelf = input.contact?.user_id === undefined || input.contact.user_id === userId;
   if (!sharedSelf) {
-    logWarn("phone.contact_not_self", { chatId, contactUserId: input.contact?.user_id });
+    logWarn("phone.contact_not_self", { userId, contactUserId: input.contact?.user_id });
   }
 
   await say(confirmPhoneText(locale, check.normalized), { replyMarkup: { remove_keyboard: true } });
-  logInfo("phone.saved", { chatId, sharedSelf });
+  logInfo("phone.saved", { userId, sharedSelf });
   return { pass: false, status: "phone-saved" };
 }

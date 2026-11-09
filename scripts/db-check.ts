@@ -26,8 +26,14 @@ import {
   setChatPhone,
 } from "@/lib/db/chat-sessions";
 
-/** A chat id that cannot collide with a real one. */
-const TEST_CHAT_ID = -999_000_001;
+/**
+ * A user id that cannot collide with a real one.
+ *
+ * Positive, because Telegram user ids always are — group and channel chat ids
+ * are the negative ones, and the table is keyed by user now. The row is deleted
+ * again at the end either way.
+ */
+const TEST_USER_ID = 999_000_001;
 
 const OK = "✅";
 const BAD = "❌";
@@ -87,25 +93,25 @@ async function main(): Promise<void> {
 
   // Round-trip: first contact creates, second contact only touches.
   resetChatSessionCacheForTesting();
-  await run(`delete from ${TABLE_NAME} where telegram_chat_id = $1`, [TEST_CHAT_ID]);
+  await run(`delete from ${TABLE_NAME} where telegram_user_id = $1`, [TEST_USER_ID]);
 
   startedAt = Date.now();
-  const first = await ensureChatSession(TEST_CHAT_ID);
+  const first = await ensureChatSession(TEST_USER_ID);
   const firstMs = Date.now() - startedAt;
   if (!first) {
     console.log(`  ${BAD} the upsert returned nothing.`);
     process.exitCode = 1;
     return;
   }
-  console.log(`  ${OK} new chat stored in ${firstMs}ms → session ${first.sessionId} (isNew=${first.isNew})`);
+  console.log(`  ${OK} new user stored in ${firstMs}ms → session ${first.sessionId} (isNew=${first.isNew})`);
 
   // A second warm process would hit the in-memory cache, so clear it to force
-  // the real "existing chat" path through SQL.
+  // the real "existing user" path through SQL.
   resetChatSessionCacheForTesting();
   startedAt = Date.now();
-  const second = await ensureChatSession(TEST_CHAT_ID);
+  const second = await ensureChatSession(TEST_USER_ID);
   const secondMs = Date.now() - startedAt;
-  console.log(`  ${OK} returning chat read in ${secondMs}ms → isNew=${second?.isNew}`);
+  console.log(`  ${OK} returning user read in ${secondMs}ms → isNew=${second?.isNew}`);
 
   const sameSession = second?.sessionId === first.sessionId;
   const notNew = second?.isNew === false;
@@ -120,7 +126,7 @@ async function main(): Promise<void> {
 
   const TEST_PHONE = "09121234567";
   startedAt = Date.now();
-  const withPhone = await setChatPhone(TEST_CHAT_ID, TEST_PHONE);
+  const withPhone = await setChatPhone(TEST_USER_ID, TEST_PHONE);
   const phoneMs = Date.now() - startedAt;
   const phoneSaved = withPhone?.phone === TEST_PHONE;
   console.log(
@@ -128,22 +134,22 @@ async function main(): Promise<void> {
   );
 
   // The stored form must survive the trip, and the session id must not change.
-  const readBack = await phoneFor(TEST_CHAT_ID);
+  const readBack = await phoneFor(TEST_USER_ID);
   const phoneRoundTrip = readBack === TEST_PHONE;
   const sessionSurvived = withPhone?.sessionId === first.sessionId;
   console.log(`  ${phoneRoundTrip ? OK : BAD} phone read back as ${readBack ?? "nothing"}`);
   console.log(`  ${sessionSurvived ? OK : BAD} saving a phone left the session id alone`);
 
   // A foreign number must never reach the column.
-  const refused = await setChatPhone(TEST_CHAT_ID, "+14155552671");
+  const refused = await setChatPhone(TEST_USER_ID, "+14155552671");
   console.log(`  ${refused === null ? OK : BAD} a non-Iranian number is refused before it is written`);
 
-  const leftover = await run(`delete from ${TABLE_NAME} where telegram_chat_id = $1 returning session_id`, [
-    TEST_CHAT_ID,
+  const leftover = await run(`delete from ${TABLE_NAME} where telegram_user_id = $1 returning session_id`, [
+    TEST_USER_ID,
   ]);
   console.log(`  ${OK} cleaned up the test row (${leftover.length} deleted)`);
 
-  console.log(`\n  fallback when the database is gone: ${fallbackSessionId(TEST_CHAT_ID)}`);
+  console.log(`\n  fallback when the database is gone: ${fallbackSessionId(TEST_USER_ID)}`);
   console.log(`  generated session id shape: ${newSessionId()}`);
 
   const failed =

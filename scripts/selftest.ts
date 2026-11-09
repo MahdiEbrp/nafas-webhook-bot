@@ -34,7 +34,9 @@ process.env.DATE_ASSISTANT = "true";
 process.env.TELEGRAM_BOT_TOKEN = "123456:TEST-TOKEN";
 process.env.TELEGRAM_WEBHOOK_SECRET = "secret-abc";
 process.env.PUBLIC_APP_URL = "https://bot.example.com";
-process.env.TELEGRAM_ALLOWED_CHAT_IDS = "777";
+// 777 is the private chat; the negative ids are the groups the user-id tests
+// post from. Both kinds have to be allowed or the gate is never reached.
+process.env.TELEGRAM_ALLOWED_CHAT_IDS = "777,-100200300,-100999,-100555";
 
 type Call = { url: string; method: string; body?: unknown; headers: Record<string, string> };
 
@@ -1139,8 +1141,8 @@ async function main(): Promise<void> {
 
     const stamp = () => new Date("2026-11-09T12:00:00Z").toISOString();
 
-    const shape = (chatId: number, row: FakeRow, inserted: boolean) => ({
-      telegram_chat_id: chatId,
+    const shape = (userId: number, row: FakeRow, inserted: boolean) => ({
+      telegram_user_id: userId,
       session_id: row.session_id,
       phone: row.phone,
       created_at: row.created_at.toISOString(),
@@ -1190,17 +1192,17 @@ async function main(): Promise<void> {
       }
 
       if (/insert into chat_sessions/i.test(query)) {
-        const chatId = Number(params[0]);
+        const userId = Number(params[0]);
         const proposed = String(params[1]);
         // The phone upsert carries the number in $3 and overwrites it on
         // conflict; the session upsert carries no number at all.
         const setsPhone = /set\s+phone\s*=\s*excluded\.phone/i.test(query);
         const incoming = params[2] === null || params[2] === undefined ? null : String(params[2]);
 
-        const existing = rows.get(chatId);
+        const existing = rows.get(userId);
         if (existing) {
           if (setsPhone) existing.phone = incoming;
-          return [shape(chatId, existing, false)];
+          return [shape(userId, existing, false)];
         }
 
         const created: FakeRow = {
@@ -1208,11 +1210,11 @@ async function main(): Promise<void> {
           phone: setsPhone ? incoming : null,
           created_at: new Date(stamp()),
         };
-        rows.set(chatId, created);
-        return [shape(chatId, created, true)];
+        rows.set(userId, created);
+        return [shape(userId, created, true)];
       }
 
-      if (/select .* from chat_sessions where telegram_chat_id/i.test(query)) {
+      if (/select .* from chat_sessions where telegram_user_id/i.test(query)) {
         const row = rows.get(Number(params[0]));
         return row ? [shape(Number(params[0]), row, false)] : [];
       }
@@ -1246,7 +1248,7 @@ async function main(): Promise<void> {
 
   await test("the schema is idempotent, so it can run on every boot", () => {
     for (const statement of SCHEMA_STATEMENTS) {
-      assert(/if not exists/i.test(statement), "every statement is IF NOT EXISTS");
+      assert(isIdempotent(statement), "every statement can be re-run safely");
     }
     assert(SCHEMA_STATEMENTS.some((statement) => /create table/i.test(statement)), "creates the table");
     assert(SCHEMA_STATEMENTS.some((statement) => /create index/i.test(statement)), "creates the index");
@@ -1277,7 +1279,7 @@ async function main(): Promise<void> {
       assertEqual(db.rows.size, 1, "still exactly one row for that chat");
 
       assert(
-        db.queries.some((query) => /on conflict \(telegram_chat_id\) do update/i.test(query)),
+        db.queries.some((query) => /on conflict \(telegram_user_id\) do update/i.test(query)),
         "it is a real upsert, not select-then-insert",
       );
       assert(
@@ -1410,7 +1412,7 @@ async function main(): Promise<void> {
     assertEqual(isStoredPhone(null), false, "null is not a phone");
   });
 
-  await test("the schema carries a phone column and widens a table that predates it", () => {
+  await test("the schema is safe to apply on every boot", () => {
     const create = SCHEMA_STATEMENTS.find((statement) => /create table/i.test(statement)) ?? "";
     assert(/phone\s+text/.test(create), "a fresh install gets the column");
     assert(
@@ -1420,8 +1422,32 @@ async function main(): Promise<void> {
       "an existing table is widened rather than left phone-less",
     );
     for (const statement of SCHEMA_STATEMENTS) {
-      assert(/if not exists/i.test(statement), "still idempotent");
+      assert(isIdempotent(statement), `still idempotent: ${(statement.split("\n")[0] ?? "").slice(0, 40)}…`);
     }
+  });
+
+  /**
+   * Idempotent means "safe to run on every boot", and there are two shapes:
+   * `if not exists` for create/alter, and a guard against information_schema for
+   * the rename — a bare RENAME COLUMN throws the second time round.
+   */
+  function isIdempotent(statement: string): boolean {
+    return /if not exists/i.test(statement) || /if exists[\s\S]*rename column/i.test(statement);
+  }
+
+  await test("the key is the user id, and an old chat-id table is migrated", () => {
+    const create = SCHEMA_STATEMENTS.find((statement) => /create table/i.test(statement)) ?? "";
+    assert(/telegram_user_id\s+bigint\s+primary key/.test(create), "a fresh install is keyed by user id");
+    assert(!/telegram_chat_id/.test(create), "and not by chat id");
+
+    const rename = SCHEMA_STATEMENTS.find((statement) => /rename column/i.test(statement));
+    assert(rename !== undefined, "there is a rename for databases that predate the change");
+    // A bare RENAME COLUMN throws on the second boot, and this list runs on
+    // every boot. The guard is what keeps it idempotent.
+    assert(
+      /information_schema\.columns/.test(rename ?? "") && /if exists/i.test(rename ?? ""),
+      "the rename is guarded, so running it twice is harmless",
+    );
   });
 
   await test("a phone number is stored against the chat id and read back", async () => {
@@ -1546,6 +1572,97 @@ async function main(): Promise<void> {
       resetChatSessionCacheForTesting();
       resetSessionsForTesting();
     }
+  });
+
+  await test("in a group each member is keyed by their own user id, not the group", async () => {
+    await withGateDb(async (db) => {
+      const GROUP = -100_200_300;
+      const groupUpdate = (userId: number, updateId: number, text: string): TelegramUpdate => ({
+        update_id: updateId,
+        message: {
+          message_id: updateId,
+          date: 1,
+          from: { id: userId, is_bot: false, first_name: "کاربر" },
+          chat: { id: GROUP, type: "group" },
+          text,
+        },
+      });
+
+      await handleTelegramUpdate(groupUpdate(101, 5001, "۰۹۱۲۱۲۳۴۵۶۷"));
+      await handleTelegramUpdate(groupUpdate(202, 5002, "۰۹۳۵۱۲۳۴۵۶۷"));
+
+      assertEqual(db.rows.get(101)?.phone, "09121234567", "the first member has their own number");
+      assertEqual(db.rows.get(202)?.phone, "09351234567", "the second keeps theirs, not the group's");
+      assertEqual(db.rows.get(GROUP), undefined, "the group id itself owns no row");
+      assert(db.rows.get(101)?.session_id !== db.rows.get(202)?.session_id, "and separate sessions");
+    });
+  });
+
+  await test("/id reports both ids, because they mean different things now", async () => {
+    await withGateDb(async () => {
+      const GROUP = -100_200_300;
+      const outcome = await handleTelegramUpdate({
+        update_id: 5100,
+        message: {
+          message_id: 5100,
+          date: 1,
+          from: { id: 101, is_bot: false, first_name: "کاربر" },
+          chat: { id: GROUP, type: "group" },
+          text: "/id",
+        },
+      });
+      assertEqual(outcome.status, "id", "the command ran");
+
+      const sent = lastSent();
+      assert(sent.includes("101"), "the user id — what settings are stored under");
+      assert(sent.includes(String(GROUP)), "and the chat id — what the allowlist takes");
+      assert(
+        sent.includes("101") && sent.includes("-100200300") && sent.indexOf("101") !== sent.indexOf("-100200300"),
+        "as two distinct numbers, not one",
+      );
+    });
+  });
+
+  await test("the same person in two different chats keeps one record", async () => {
+    await withGateDb(async (db) => {
+      const fromPrivate = telegramUpdate({ text: "۰۹۱۲۱۲۳۴۵۶۷" });
+      await handleTelegramUpdate(fromPrivate);
+
+      // Same user id, entirely different chat.
+      const fromGroup: TelegramUpdate = {
+        update_id: 6001,
+        message: {
+          message_id: 6001,
+          date: 1,
+          from: { id: 777, is_bot: false, first_name: "کاربر" },
+          chat: { id: -100_999, type: "group" },
+          text: "سلام",
+        },
+      };
+      const answered = await handleTelegramUpdate(fromGroup);
+
+      assertEqual(answered.status, "answered", "the number from the other chat still counts");
+      assertEqual(db.rows.size, 1, "still exactly one row for that person");
+      assertEqual(db.rows.get(777)?.phone, "09121234567", "with their number on it");
+    });
+  });
+
+  await test("an update with no user is declined rather than misattributed", async () => {
+    await withGateDb(async (db) => {
+      const channelPost: TelegramUpdate = {
+        update_id: 7001,
+        message: {
+          message_id: 7001,
+          date: 1,
+          chat: { id: -100_555, type: "channel" },
+          text: "سلام",
+        },
+      };
+      const outcome = await handleTelegramUpdate(channelPost);
+      assertEqual(outcome.handled, false, "not handled");
+      assertEqual(outcome.reason, "no user id on the update", "and the reason says why");
+      assertEqual(db.rows.size, 0, "guessing at the chat id would have pooled strangers into one row");
+    });
   });
 
   await test("Telegram: the stored session id is what the conversation is keyed by", async () => {

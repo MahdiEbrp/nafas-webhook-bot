@@ -69,14 +69,16 @@ function isAllowed(chatId: number): boolean {
 }
 
 /**
- * The conversation key for a chat.
+ * The conversation key for a person.
  *
- * Stored in Postgres as chat_id → session_id when a database is configured; the
- * deterministic `tg-<chatId>` otherwise. `resolveSessionId` never throws, so a
- * database outage makes the bot forgetful, never silent.
+ * Keyed by Telegram *user* id, not chat id: a chat id belongs to a conversation,
+ * so a new chat would start from nothing, and in a group one id is shared by
+ * everybody in it. Stored in Postgres as user_id → session_id when a database is
+ * configured; the deterministic `tg-<userId>` otherwise. `resolveSessionId`
+ * never throws, so a database outage makes the bot forgetful, never silent.
  */
-function sessionIdFor(chatId: number): Promise<string> {
-  return resolveSessionId(chatId);
+function sessionIdFor(userId: number): Promise<string> {
+  return resolveSessionId(userId);
 }
 
 const CLEARED: Record<Locale, string> = {
@@ -108,18 +110,19 @@ async function replyText(
 
 async function processTextMessage(input: {
   chatId: number;
+  userId: number;
   text: string;
   locale: Locale;
   replyToMessageId?: number;
 }): Promise<BridgeOutcome> {
-  const { chatId, text, locale, replyToMessageId } = input;
+  const { chatId, userId, text, locale, replyToMessageId } = input;
   sendTyping(chatId);
 
-  const result = await handleChat({ message: text, sessionId: await sessionIdFor(chatId), locale });
+  const result = await handleChat({ message: text, sessionId: await sessionIdFor(userId), locale });
 
   await replyText(chatId, result.reply, { replyToMessageId });
 
-  logInfo("telegram.message", { chatId, status: result.status, model: result.model, ms: result.ms });
+  logInfo("telegram.message", { chatId, userId, status: result.status, model: result.model, ms: result.ms });
 
   return {
     handled: true,
@@ -156,12 +159,29 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     return { handled: false, reason: "chat not allowed", chatId };
   }
 
+  /*
+   * Two different ids, and keeping them apart is the whole point:
+   *
+   *   chatId — where to send the reply. Telegram addressing, nothing else.
+   *   userId — whose settings these are. The key for session and phone.
+   *
+   * `from` is absent on channel posts and from anonymous group admins, where
+   * there is no user to attribute anything to. Guessing at the chat id instead
+   * would silently pool strangers into one record, so we decline instead.
+   */
+  const userId = message.from?.id;
+  if (userId === undefined) {
+    logWarn("telegram.no_user", { chatId });
+    return { handled: false, reason: "no user id on the update", chatId };
+  }
+
   const text = (message.text ?? "").trim();
 
   /* ── 3. The phone gate ─────────────────────────────────────────────────
    *
-   * Before anything is answered, this chat must have an Iranian mobile on
-   * file. That is the owner's rule, so it sits ahead of the commands too:
+   * Before anything is answered, this *user* must have an Iranian mobile on
+   * file — keyed by user id, so a number given in one chat still counts in
+   * another. That is the owner's rule, so it sits ahead of the commands too:
    * `/start` from somebody without a number gets the ask, not the welcome.
    *
    * `/id` is the one exception. It stores nothing, it only echoes back what
@@ -183,11 +203,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     };
 
     const gate = await ensurePhone({
+      userId,
       chatId,
       chatType: message.chat.type,
       text,
       ...(message.contact ? { contact: message.contact } : {}),
-      ...(message.from ? { fromId: message.from.id } : {}),
       locale,
       say,
       // Telegram only puts the contact button in a private chat.
@@ -205,7 +225,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     // is still worth taking rather than answering "I only read text".
     if (message.contact?.phone_number) {
       const check = normalizeIranPhone(message.contact.phone_number);
-      if (check.ok && (await setChatPhone(chatId, check.normalized))) {
+      if (check.ok && (await setChatPhone(userId, check.normalized))) {
         await sendMessage({
           chatId,
           text: confirmPhoneText(locale, check.normalized),
@@ -233,21 +253,25 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
 
   if (/^\/(clear|reset|new)\b/.test(text)) {
-    resetConversation(await sessionIdFor(chatId));
+    resetConversation(await sessionIdFor(userId));
     await replyText(chatId, CLEARED[locale]);
     logInfo("telegram.clear", { chatId });
     return { handled: true, chatId, status: "cleared" };
   }
 
   if (/^\/id\b/.test(text)) {
+    // Both, and labelled: the chat id is what TELEGRAM_ALLOWED_CHAT_IDS takes,
+    // the user id is what settings are stored under. In a private chat they are
+    // the same number, in a group they are not.
     await replyText(
       chatId,
       locale === "en"
-        ? `Your chat id: ${chatId}`
-        : `شناسهٔ گفت‌وگوی تو: ${chatId}\nاین را در TELEGRAM_ALLOWED_CHAT_IDS بگذار تا فقط تو دسترسی داشته باشی.`,
+        ? `Your user id: ${userId}\nThis chat id: ${chatId}`
+        : `شناسهٔ کاربری تو: ${userId}\nشناسهٔ این گفت‌وگو: ${chatId}\n` +
+            `برای TELEGRAM_ALLOWED_CHAT_IDS شناسهٔ گفت‌وگو را بگذار.`,
     );
     return { handled: true, chatId, status: "id" };
   }
 
-  return await processTextMessage({ chatId, text, locale, replyToMessageId: message.message_id });
+  return await processTextMessage({ chatId, userId, text, locale, replyToMessageId: message.message_id });
 }

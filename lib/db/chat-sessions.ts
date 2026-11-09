@@ -1,10 +1,14 @@
 /**
- * chat_id → session_id and phone, persisted.
+ * user_id → session_id and phone, persisted.
  *
- * The rule the owner asked for: when a user messages, store their Telegram chat
+ * The rule the owner asked for: when a user messages, store their Telegram user
  * id as the key, a session id as the value, and — once they have given it —
- * their Iranian mobile number. A new chat gets a fresh session id; an existing
- * chat keeps the one it already has.
+ * their Iranian mobile number. A user we have not seen gets a fresh session id;
+ * one we have keeps the session id they already had.
+ *
+ * Keyed by *user*, not by chat, so the record follows the person: a new chat
+ * with the bot does not start them from nothing, and in a group each member
+ * keeps their own number instead of everybody sharing the group's row.
  *
  * Three things are worth calling out:
  *
@@ -28,7 +32,7 @@ import { getRunner, tryQuery } from "./client";
 import { ensureSchema, TABLE_NAME } from "./schema";
 
 export type ChatSession = {
-  telegramChatId: number;
+  telegramUserId: number;
   sessionId: string;
   /** Iranian mobile in stored form (`09XXXXXXXXX`), or null until it is given. */
   phone: string | null;
@@ -42,7 +46,7 @@ export type ChatSession = {
 };
 
 type Row = {
-  telegram_chat_id: number | string;
+  telegram_user_id: number | string;
   session_id: string;
   phone: string | null;
   created_at: string | Date;
@@ -63,7 +67,7 @@ type Cached = { sessionId: string; phone: string | null };
 
 const cache = new Map<number, Cached>();
 
-const SELECT_COLUMNS = "telegram_chat_id, session_id, phone, created_at, updated_at, last_seen_at";
+const SELECT_COLUMNS = "telegram_user_id, session_id, phone, created_at, updated_at, last_seen_at";
 
 /**
  * Upsert.
@@ -84,15 +88,15 @@ const SELECT_COLUMNS = "telegram_chat_id, session_id, phone, created_at, updated
  */
 const UPSERT_SQL = `
   insert into ${TABLE_NAME}
-    (telegram_chat_id, session_id, created_at, updated_at, last_seen_at)
+    (telegram_user_id, session_id, created_at, updated_at, last_seen_at)
   values ($1, $2, now(), now(), now())
-  on conflict (telegram_chat_id) do update
+  on conflict (telegram_user_id) do update
     set last_seen_at = now(),
         updated_at   = now()
   returning ${SELECT_COLUMNS}, (xmax = 0) as inserted
 `.trim();
 
-const SELECT_SQL = `select ${SELECT_COLUMNS}, false as inserted from ${TABLE_NAME} where telegram_chat_id = $1`;
+const SELECT_SQL = `select ${SELECT_COLUMNS}, false as inserted from ${TABLE_NAME} where telegram_user_id = $1`;
 
 /**
  * Stores a phone number, creating the row if it is not there yet.
@@ -109,9 +113,9 @@ const SELECT_SQL = `select ${SELECT_COLUMNS}, false as inserted from ${TABLE_NAM
  */
 const SET_PHONE_SQL = `
   insert into ${TABLE_NAME}
-    (telegram_chat_id, session_id, phone, created_at, updated_at, last_seen_at)
+    (telegram_user_id, session_id, phone, created_at, updated_at, last_seen_at)
   values ($1, $2, $3, now(), now(), now())
-  on conflict (telegram_chat_id) do update
+  on conflict (telegram_user_id) do update
     set phone        = excluded.phone,
         updated_at   = now(),
         last_seen_at = now()
@@ -120,7 +124,7 @@ const SET_PHONE_SQL = `
 
 function toSession(row: Row): ChatSession {
   return {
-    telegramChatId: Number(row.telegram_chat_id),
+    telegramUserId: Number(row.telegram_user_id),
     sessionId: String(row.session_id),
     phone: isStoredPhone(row.phone) ? String(row.phone) : null,
     createdAt: new Date(row.created_at),
@@ -137,12 +141,12 @@ function toSession(row: Row): ChatSession {
  * collected the number since we last looked, and blocking a user who has
  * already given their number is worse than one extra read.
  */
-function fromCacheIfSettled(telegramChatId: number): ChatSession | null {
-  const cached = cache.get(telegramChatId);
+function fromCacheIfSettled(telegramUserId: number): ChatSession | null {
+  const cached = cache.get(telegramUserId);
   if (!cached || !cached.phone) return null;
 
   return {
-    telegramChatId,
+    telegramUserId,
     sessionId: cached.sessionId,
     phone: cached.phone,
     createdAt: new Date(0),
@@ -158,27 +162,27 @@ function fromCacheIfSettled(telegramChatId: number): ChatSession | null {
  * Returns null when there is no database — the caller decides what to do then,
  * and the answer is always "keep working without it".
  */
-export async function ensureChatSession(telegramChatId: number): Promise<ChatSession | null> {
+export async function ensureChatSession(telegramUserId: number): Promise<ChatSession | null> {
   const run = getRunner();
   if (!run) return null;
 
-  const settled = fromCacheIfSettled(telegramChatId);
+  const settled = fromCacheIfSettled(telegramUserId);
   if (settled) return settled;
 
   if (!(await ensureSchema(run))) return null;
 
   const sessionId = newSessionId();
-  const rows = await tryQuery<Row>(UPSERT_SQL, [telegramChatId, sessionId]);
+  const rows = await tryQuery<Row>(UPSERT_SQL, [telegramUserId, sessionId]);
   if (!rows || rows.length === 0) return null;
 
   const first = rows[0];
   if (!first) return null;
 
   const session = toSession(first);
-  cache.set(telegramChatId, { sessionId: session.sessionId, phone: session.phone });
+  cache.set(telegramUserId, { sessionId: session.sessionId, phone: session.phone });
 
   logInfo("db.chat_session", {
-    chatId: telegramChatId,
+    chatId: telegramUserId,
     isNew: session.isNew,
     hasPhone: session.phone !== null,
   });
@@ -187,16 +191,16 @@ export async function ensureChatSession(telegramChatId: number): Promise<ChatSes
 }
 
 /** Reads the stored session without creating one. */
-export async function getChatSession(telegramChatId: number): Promise<ChatSession | null> {
-  const settled = fromCacheIfSettled(telegramChatId);
+export async function getChatSession(telegramUserId: number): Promise<ChatSession | null> {
+  const settled = fromCacheIfSettled(telegramUserId);
   if (settled) return settled;
 
-  const rows = await tryQuery<Row>(SELECT_SQL, [telegramChatId]);
+  const rows = await tryQuery<Row>(SELECT_SQL, [telegramUserId]);
   const first = rows?.[0];
   if (!first) return null;
 
   const session = toSession(first);
-  cache.set(telegramChatId, { sessionId: session.sessionId, phone: session.phone });
+  cache.set(telegramUserId, { sessionId: session.sessionId, phone: session.phone });
   return session;
 }
 
@@ -208,11 +212,11 @@ export async function getChatSession(telegramChatId: number): Promise<ChatSessio
  * never reach the column. Returns null when there is no row or no database.
  */
 export async function setChatPhone(
-  telegramChatId: number,
+  telegramUserId: number,
   phone: string,
 ): Promise<ChatSession | null> {
   if (!isStoredPhone(phone)) {
-    logWarn("db.phone_rejected", { chatId: telegramChatId });
+    logWarn("db.phone_rejected", { chatId: telegramUserId });
     return null;
   }
 
@@ -223,17 +227,17 @@ export async function setChatPhone(
   // A session id is needed only if the row does not exist yet; the conflict
   // branch leaves the stored one alone. Generating it unconditionally is cheaper
   // than asking whether we should.
-  const rows = await tryQuery<Row>(SET_PHONE_SQL, [telegramChatId, newSessionId(), phone]);
+  const rows = await tryQuery<Row>(SET_PHONE_SQL, [telegramUserId, newSessionId(), phone]);
   const first = rows?.[0];
   if (!first) {
-    logWarn("db.phone_save_failed", { chatId: telegramChatId });
+    logWarn("db.phone_save_failed", { chatId: telegramUserId });
     return null;
   }
 
   const session = toSession(first);
-  cache.set(telegramChatId, { sessionId: session.sessionId, phone: session.phone });
+  cache.set(telegramUserId, { sessionId: session.sessionId, phone: session.phone });
 
-  logInfo("db.phone_saved", { chatId: telegramChatId, hasPhone: session.phone !== null });
+  logInfo("db.phone_saved", { chatId: telegramUserId, hasPhone: session.phone !== null });
   return session;
 }
 
@@ -244,16 +248,16 @@ export async function setChatPhone(
  * nothing, and it never throws — a database outage reads as "no number yet",
  * which is the same answer as a brand-new user and is handled the same way.
  */
-export async function phoneFor(telegramChatId: number): Promise<string | null> {
-  const cached = cache.get(telegramChatId);
+export async function phoneFor(telegramUserId: number): Promise<string | null> {
+  const cached = cache.get(telegramUserId);
   if (cached?.phone) return cached.phone;
 
   try {
-    const session = await getChatSession(telegramChatId);
+    const session = await getChatSession(telegramUserId);
     return session?.phone ?? null;
   } catch (error) {
     logWarn("db.phone_lookup_failed", {
-      chatId: telegramChatId,
+      chatId: telegramUserId,
       message: error instanceof Error ? error.message : "unknown",
     });
     return null;
@@ -266,22 +270,22 @@ export async function phoneFor(telegramChatId: number): Promise<string | null> {
  *
  * This is the single call site the Telegram bridge needs — it cannot fail.
  */
-export async function resolveSessionId(telegramChatId: number): Promise<string> {
+export async function resolveSessionId(telegramUserId: number): Promise<string> {
   try {
-    const session = await ensureChatSession(telegramChatId);
+    const session = await ensureChatSession(telegramUserId);
     if (session?.sessionId) return session.sessionId;
   } catch (error) {
     logWarn("db.session_resolve_failed", {
-      chatId: telegramChatId,
+      chatId: telegramUserId,
       message: error instanceof Error ? error.message : "unknown",
     });
   }
-  return fallbackSessionId(telegramChatId);
+  return fallbackSessionId(telegramUserId);
 }
 
 /** What the bot uses when there is no database. Stable per chat, forever. */
-export function fallbackSessionId(telegramChatId: number): string {
-  return `tg-${telegramChatId}`;
+export function fallbackSessionId(telegramUserId: number): string {
+  return `tg-${telegramUserId}`;
 }
 
 export function cachedSessionCount(): number {
