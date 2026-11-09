@@ -82,6 +82,47 @@
 قاعدهٔ کبیسه، الگوریتمِ حسابیِ ۳۳‌ساله است (مثل خودِ jalaali-js)؛ در برخی سال‌ها ممکن است
 یک روز با تقویمِ نجومیِ رسمی اختلاف داشته باشد.
 
+## ذخیرهٔ تنظیمات در دیتابیس
+
+هر چتِ تلگرام یک `session_id` دارد که در Postgres ذخیره می‌شود: کلید، شناسهٔ چتِ تلگرام
+است و مقدار، همان session.
+
+| فایل | کار |
+| --- | --- |
+| `lib/db/client.ts` | اتصال به Neon با درایور HTTP خودِ Neon؛ تعمیرِ رشتهٔ اتصال؛ timeout |
+| `lib/db/schema.ts` | جدول `chat_sessions` — idempotent، پس هر بار می‌تواند اجرا شود |
+| `lib/db/chat-sessions.ts` | upsertِ «کلید → session» + کش در حافظهٔ پروسه |
+
+```sql
+create table if not exists chat_sessions (
+  telegram_chat_id bigint      primary key,   -- همان key که خواستی
+  session_id       text        not null,      -- همان session
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  last_seen_at     timestamptz not null default now()
+);
+```
+
+سه تصمیم:
+
+1. **دیتابیس یک وابستگی نیست، یک افزونه است.** اگر `DATABASE_URL` خالی باشد یا Neon
+   نرسد، بات دقیقاً مثل قبل کار می‌کند و session را از `tg-<chatId>` می‌سازد. پیامِ کاربر
+   هیچ‌وقت به خاطر دیتابیس از دست نمی‌رود.
+2. **یک upsert، نه select-بعد-insert.** با `(xmax = 0) as inserted` در همان `RETURNING`
+   می‌فهمیم چت تازه بوده یا نه — بدون کوئری دوم.
+3. **کش در حافظهٔ پروسه.** session یک چت هیچ‌وقت عوض نمی‌شود، پس بعد از اولین پیام، آن
+   چت دیگر به دیتابیس دست نمی‌زند. عمداً شمارندهٔ پیام نگذاشتم: به‌روزش نیازمندِ یک write
+   روی هر پیام بود و روی serverless آن write تضمین‌شده نیست — ستونی که گاهی دروغ می‌گوید
+   از نبودنش بدتر است.
+
+`newSessionId()` در `lib/db/chat-sessions.ts` **تنها** جایی است که session ساخته می‌شود.
+وقتی گفتی session از کجا باید بیاید، فقط همان یک تابع عوض می‌شود.
+
+```bash
+npm run db:check                       # اتصال + ساخت جدول + رفت‌وبرگشتِ واقعی
+curl -s https://<your-app>/api/health?db=1
+```
+
 ## انتخابِ خودکارِ مدل
 
 بات مدل را دستی انتخاب نمی‌کند؛ هر بار **بهترین مدلِ مجانیِ در دسترس** را از فهرست
@@ -126,6 +167,8 @@ curl -s https://<your-app>/api/health   # همان، به‌همراهِ سرع�
 | `lib/dates/intent.ts` | تشخیص اینکه چه عملیاتی خواسته شده |
 | `lib/dates/format.ts` | قالبِ شمسی/میلادی/قمری |
 | `lib/dates/timezone.ts` | «الان» در منطقهٔ زمانیِ درست |
+| `lib/db/chat-sessions.ts` | chat_id → session_id در Postgres |
+| `scripts/db-check.ts` | `npm run db:check` — تستِ واقعیِ اتصال |
 | `lib/openrouter/select.ts` | ساختِ زنجیرهٔ مدل‌ها از فهرست زنده |
 | `lib/openrouter/ranking.ts` | جدولِ کیفیت + فرمولِ نمره |
 | `lib/openrouter/stats.ts` | سرعت و خطاهای اندازه‌گیری‌شدهٔ هر مدل |
@@ -182,6 +225,7 @@ npm run check        # typecheck + خودتستی
 | `CLINIC_NAME` | در جوابِ «تو کی هستی؟» گفته می‌شود |
 | `TIME_ZONE` | منطقهٔ زمانی برای «الان ساعت چنده» (پیش‌فرض `Asia/Tehran`) |
 | `DATE_ASSISTANT` | `false` لایهٔ تقویم را کامل خاموش می‌کند |
+| `DATABASE_URL` | اتصال Postgres/Neon؛ خالی = بدون دیتابیس |
 | `HISTORY_MESSAGES` | چند پیامِ آخر به‌عنوان زمینه به مدل برود |
 | `BOT_API_KEY` | محافظت از `/api/chat` |
 | `ALLOWED_ORIGINS` | چه دامنه‌هایی از مرورگر اجازهٔ صدا زدن دارند |

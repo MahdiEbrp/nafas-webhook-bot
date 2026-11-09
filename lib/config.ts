@@ -42,6 +42,11 @@ export type AppConfig = {
   timeZone: string;
   /** Kill switch for the deterministic date/calendar layer */
   dateAssistant: boolean;
+  /**
+   * Postgres (Neon) connection string for persisted settings. Empty = the bot
+   * runs without a database, exactly as it did before.
+   */
+  databaseUrl: string;
   /** Bot entry-point protection (optional but recommended) */
   botApiKey: string | null;
   /** Requests per minute per client for /api/chat */
@@ -138,6 +143,7 @@ export function getConfig(): AppConfig {
     clinicName: process.env.CLINIC_NAME?.trim() || "کلینیک زیبایی نفس",
     timeZone: process.env.TIME_ZONE?.trim() || "Asia/Tehran",
     dateAssistant: bool(process.env.DATE_ASSISTANT, true),
+    databaseUrl: (process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? "").trim(),
     botApiKey: process.env.BOT_API_KEY?.trim() || null,
     chatRateLimit: {
       limit: int(process.env.CHAT_RATE_LIMIT, 20),
@@ -180,6 +186,9 @@ export function configWarnings(config: AppConfig = getConfig()): string[] {
   }
   if (config.telegram.botToken && config.telegram.allowedChatIds.length === 0) {
     warnings.push("TELEGRAM_ALLOWED_CHAT_IDS is empty — anyone who finds the bot can talk to it.");
+  }
+  if (!config.databaseUrl) {
+    warnings.push("DATABASE_URL is not set — chat sessions are not persisted; every chat uses tg-<chatId>.");
   }
   if (config.allowedOrigins.length === 0) {
     warnings.push("ALLOWED_ORIGINS is empty — browser callers (CORS) will be blocked; server-to-server calls still work.");
