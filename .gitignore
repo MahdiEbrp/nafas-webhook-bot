@@ -10,3 +10,7 @@ out
 
 # throwaway cluster created by `npm run db:real`
 .pgdata
+
+# c8 / monocart output
+coverage
+.nyc_output
