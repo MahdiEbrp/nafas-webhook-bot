@@ -1,18 +1,16 @@
 /**
- * CORS + caller authentication for a middleware that sits between two systems.
+ * CORS + caller authentication for the chat endpoint.
  *
  * Topology:
  *
- *   [nafasbeautyclinic.ir]                 ← upstream: owns the data + webhooks
- *            ▲  Basic Auth (only this app knows the password)
- *            │
- *   [ this middleware on Vercel ]          ← you are here
+ *   [ this bot on Vercel ]                 ← you are here
  *            ▲  x-bot-key  (+ CORS for browsers)
  *            │
- *   [ Vercel-hosted project / bot / staff UI ]
+ *   [ any page or app that wants to chat ]
  *
- * The point of the middleware: the upstream password never leaves the server,
- * every call is rate limited, logged, and validated against the action manifest.
+ * The browser page served at `/` is same-origin, so it needs no CORS at all;
+ * these rules only matter when a *different* site wants to call the bot.
+ * Server-to-server callers (no Origin header) skip CORS and use `x-bot-key`.
  */
 
 import { getConfig } from "@/lib/config";

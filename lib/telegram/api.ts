@@ -1,49 +1,26 @@
 /**
- * Telegram Bot API client — the "login" layer.
+ * Telegram Bot API client — the transport layer.
  *
  * Everything here is plain fetch, so it works on Vercel serverless and in tests.
  * A single `call()` wraps the `{ ok, result } / { ok:false, description }`
  * envelope Telegram uses, so callers never deal with HTTP codes.
+ *
+ * Only text is sent and received: a chat bot needs `sendMessage` and
+ * `sendChatAction`, plus the three calls that register the webhook.
  */
 
 import { getConfig } from "@/lib/config";
 import { logWarn } from "@/lib/log";
 import { truncate } from "@/lib/text";
 
-/**
- * Real Telegram by default. `TELEGRAM_API_BASE` lets you point the bridge at a
- * local fake (see mock/telegram-mock.mjs) or a corporate proxy.
- */
-
-export type TelegramButton =
-  | { text: string; callback_data: string }
-  | { text: string; url: string };
-
-export type InlineKeyboard = { inline_keyboard: TelegramButton[][] };
-/** The other kind of keyboard: replaces the user's keypad (used for phone sharing). */
-export type ReplyKeyboardMarkup = {
-  keyboard: Array<Array<{ text: string; request_contact?: boolean }>>;
-  resize_keyboard?: boolean;
-  one_time_keyboard?: boolean;
-  input_field_placeholder?: string;
-};
-export type RemoveKeyboard = { remove_keyboard: true };
-
 export type TelegramUser = { id: number; is_bot: boolean; first_name: string; username?: string };
 export type TelegramChat = { id: number; type: string; first_name?: string; username?: string; title?: string };
-export type TelegramContact = {
-  phone_number: string;
-  first_name: string;
-  last_name?: string;
-  user_id?: number;
-};
 export type TelegramMessage = {
   message_id: number;
   from?: TelegramUser;
   chat: TelegramChat;
   date: number;
   text?: string;
-  contact?: TelegramContact;
 };
 export type TelegramCallbackQuery = {
   id: string;
@@ -55,6 +32,7 @@ export type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
+  /** still in the type on purpose: buttons from an older build can arrive. */
   callback_query?: TelegramCallbackQuery;
 };
 
@@ -122,7 +100,7 @@ export function setWebhook(input: {
     url: input.url,
     ...(input.secretToken ? { secret_token: input.secretToken } : {}),
     ...(input.dropPendingUpdates ? { drop_pending_updates: true } : {}),
-    allowed_updates: input.allowedUpdates ?? ["message", "callback_query"],
+    allowed_updates: input.allowedUpdates ?? ["message"],
     max_connections: 40,
   });
 }
@@ -149,35 +127,26 @@ export function deleteWebhook(): Promise<TelegramResult<true>> {
 export function sendMessage(input: {
   chatId: number;
   text: string;
-  keyboard?: InlineKeyboard | ReplyKeyboardMarkup;
-  /** explicitly drop whatever keyboard is showing */
-  removeKeyboard?: boolean;
   replyToMessageId?: number;
 }): Promise<TelegramResult<TelegramMessage>> {
   return call<TelegramMessage>("sendMessage", {
     chat_id: input.chatId,
     text: truncate(input.text, 4000),
-    // No parse_mode on purpose: Persian text + user data must never break parsing.
+    // No parse_mode on purpose: Persian text must never break parsing.
     link_preview_options: { is_disabled: true },
-    ...(input.removeKeyboard ? { reply_markup: { remove_keyboard: true } } : {}),
-    ...(input.keyboard ? { reply_markup: input.keyboard } : {}),
     ...(input.replyToMessageId ? { reply_to_message_id: input.replyToMessageId } : {}),
   });
 }
 
-export function answerCallbackQuery(input: {
-  callbackQueryId: string;
-  text?: string;
-  showAlert?: boolean;
-}): Promise<TelegramResult<true>> {
+/** Acknowledges a button press (only reachable from buttons of an older build). */
+export function answerCallbackQuery(input: { callbackQueryId: string; text?: string }): Promise<TelegramResult<true>> {
   return call<true>("answerCallbackQuery", {
     callback_query_id: input.callbackQueryId,
     ...(input.text ? { text: truncate(input.text, 190) } : {}),
-    ...(input.showAlert ? { show_alert: true } : {}),
   });
 }
 
-/** "typing…" so the user knows the AI is thinking. Fire-and-forget. */
+/** "typing…" so the user knows the bot is thinking. Fire-and-forget. */
 export function sendTyping(chatId: number): void {
   void call("sendChatAction", { chat_id: chatId, action: "typing" }, { timeoutMs: 5_000 });
 }

@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     console.log("        openssl rand -hex 32");
   }
   if (telegram.allowedChatIds.length === 0) {
-    console.log(`     ${WARN} TELEGRAM_ALLOWED_CHAT_IDS خالی است — هر کسی که ربات را پیدا کند می‌تواند کارها را اجرا کند.`);
+    console.log(`     ${WARN} TELEGRAM_ALLOWED_CHAT_IDS خالی است — هر کسی که ربات را پیدا کند می‌تواند با او حرف بزند.`);
   }
 
   const warnings = configWarnings().filter((warning) => warning.startsWith("TELEGRAM"));

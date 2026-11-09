@@ -16,8 +16,8 @@ export const maxDuration = 30;
  *   POST /api/telegram/setup            → register/repair the webhook  { force?, dropPendingUpdates? }
  *   POST /api/telegram/setup { logout: true } → unregister (delete webhook)
  *
- * Protected by BOT_API_KEY, because these calls are what connect the bot to the
- * clinic system.
+ * Protected by BOT_API_KEY: whoever can call this decides where Telegram
+ * delivers the bot's messages.
  */
 function requireKey(request: Request): void {
   if (!hasValidBotKey(request)) throw new ApiError(401, "UNAUTHORIZED", "Missing or invalid bot key.");

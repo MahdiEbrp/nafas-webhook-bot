@@ -12,9 +12,9 @@ export const maxDuration = 60;
  * Telegram calls this URL. Three rules matter here:
  *
  *  1. Always answer 200 — a non-2xx makes Telegram retry the same update, which
- *     would run the action twice (imagine a booking created twice).
+ *     would send the user the same answer twice.
  *  2. Verify `X-Telegram-Bot-Api-Secret-Token`, otherwise anyone can POST fake
- *     updates and drive the clinic system.
+ *     updates and make the bot talk to itself (and burn the free model quota).
  *  3. De-duplicate `update_id` for the same reason as (1).
  */
 
