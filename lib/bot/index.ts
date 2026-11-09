@@ -22,6 +22,7 @@ import { complete, type ChatMessage as ModelMessage } from "@/lib/openrouter/cli
 import { normalize } from "@/lib/text";
 
 import { identityAnswer, identityText, isIdentityQuestion } from "./identity";
+import { capabilityAnswer, isCapabilityQuestion } from "@/lib/users/intent";
 import { dateInstruction, systemPrompt } from "./prompt";
 import { answerDateQuestion } from "@/lib/dates/intent";
 import { nowFacts } from "@/lib/dates/engine";
@@ -41,7 +42,7 @@ export type ChatResult = {
   /** which model in the chain actually answered, null when code answered */
   model: string | null;
   /** which layer produced the answer */
-  layer: "identity" | "calendar" | "chat" | "none";
+  layer: "identity" | "users" | "calendar" | "chat" | "none";
   /** date intent, when the calendar layer handled it */
   dateIntent?: string;
   /** true when the model garbled the facts and the deterministic text was used */
@@ -119,6 +120,30 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
       reply,
       model: null,
       layer: "identity",
+      ms: Date.now() - startedAt,
+      contextMessages: 0,
+      truncated: false,
+    };
+  }
+
+  /* ── 1b. Capabilities — read from the list, never paraphrased ────────
+   *
+   * «چه کارهایی بلدی؟» is answered from `lib/users/capabilities.ts` so the
+   * bot cannot claim an ability the UserManager does not have, or forget one
+   * it does. The list is the source of truth for both the code and the model.
+   */
+  if (isCapabilityQuestion(message)) {
+    const reply = capabilityAnswer(locale);
+
+    pushMessage(input.sessionId, "user", message, config.history.maxMessages);
+    pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);
+    logInfo("chat.capabilities", { sessionId: input.sessionId });
+
+    return {
+      status: "answered",
+      reply,
+      model: null,
+      layer: "users",
       ms: Date.now() - startedAt,
       contextMessages: 0,
       truncated: false,

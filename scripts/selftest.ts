@@ -1715,6 +1715,600 @@ async function main(): Promise<void> {
     assertEqual(typeof a, "string", "a string");
   });
 
+  /* ── 11. User management ────────────────────────────────────────────── */
+
+  const { UserManager, seedUsers } = await import("@/lib/users/manager");
+  const {
+    CAPABILITIES,
+    capabilitiesText,
+    capabilitiesPromptBlock,
+    confirmRequiredIds,
+    findCapability,
+  } = await import("@/lib/users/capabilities");
+  const { isCapabilityQuestion, capabilityAnswer } = await import("@/lib/users/intent");
+
+  type ApiCall = { url: string; method: string; body?: unknown };
+
+  /**
+   * A pretend user API.
+   *
+   * It records every request so the tests can assert on *what was sent and
+   * when* — which is the whole point of the confirmation rule. `mutating()`
+   * counts only the verbs that change data, so "proposing sent nothing" is a
+   * check on the wire and not on a return value.
+   */
+  function makeUserApi(options: {
+    status?: number;
+    body?: unknown;
+    rawBody?: string;
+    failWith?: "throw" | "abort";
+    /**
+     * What GETs answer with.
+     *
+     * Needed because a proposal reads the user before offering to change it, so
+     * an API that answers every verb with the same body makes every proposal
+     * fail with not-found and the mutation is never reached.
+     */
+    getUsers?: Array<Record<string, unknown>>;
+  } = {}) {
+    const calls: ApiCall[] = [];
+    const impl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      const raw = typeof init?.body === "string" ? init.body : undefined;
+      calls.push({ url, method, ...(raw ? { body: JSON.parse(raw) } : {}) });
+
+      if (options.failWith === "abort") {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        throw error;
+      }
+      if (options.failWith === "throw") throw new Error("network down");
+
+      const isRead = method === "GET";
+      const payload: unknown = isRead && options.getUsers ? { users: options.getUsers } : undefined;
+      const bodyText =
+        options.rawBody ?? JSON.stringify(payload ?? options.body ?? { users: [] });
+      return new Response(bodyText, {
+        status: isRead && options.getUsers ? 200 : options.status ?? 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    return {
+      impl,
+      calls,
+      mutating: () => calls.filter((call) => call.method !== "GET").length,
+    };
+  }
+
+  const MUTATING_IDS = ["edit", "delete", "bulk-enable", "bulk-disable", "bulk-delete"];
+
+  await test("the dummy store answers without any network at all", async () => {
+    const manager = new UserManager();
+    assertEqual(manager.isLive, false, "not live without a base url");
+    assertEqual(manager.mode, "dummy", "running against the dummy store");
+
+    const all = await manager.list();
+    assertEqual(all.users.length, 3, "three seeded users");
+    assertEqual(all.live, false, "flagged as not from an API");
+    assertEqual(all.error, undefined, "and no error");
+
+    assertEqual((await manager.get("u-1001"))?.firstName, "مریم", "fetched by id");
+    assertEqual(await manager.get("u-9999"), null, "an unknown id is null, not a throw");
+  });
+
+  await test("search finds by name, phone, and id — including Persian digits", async () => {
+    const manager = new UserManager();
+
+    assertEqual((await manager.search("مریم")).users.length, 2, "both Maryams by first name");
+    assertEqual((await manager.search("رضایی")).users.length, 1, "one by surname");
+    assertEqual((await manager.search("u-1001")).users.length, 1, "by id");
+    assertEqual((await manager.search("0935")).users[0]?.id, "u-1002", "by part of the phone");
+    assertEqual((await manager.search("۰۹۱۲")).users[0]?.id, "u-1001", "Persian digits match too");
+    assertEqual((await manager.search("")).users.length, 3, "an empty query lists everyone");
+    assertEqual((await manager.search("   ")).users.length, 3, "whitespace counts as empty");
+    assertEqual((await manager.search("ناموجود")).users.length, 0, "no match is an empty list");
+  });
+
+  await test("proposing a change sends nothing — only confirming does", async () => {
+    const api = makeUserApi({ body: { users: seedUsers() } });
+    const manager = new UserManager({ baseUrl: "https://users.example.com", fetchImpl: api.impl });
+
+    const proposal = await manager.proposeEdit("u-1001", { firstName: "مریم‌سادات" });
+    assertEqual(proposal.ok, true, "the proposal was accepted");
+    assert(!proposal.ok || proposal.change.token.length > 0, "and carries a token");
+    assert(!proposal.ok || proposal.change.summary.includes("u-1001"), "the summary names the user");
+    assertEqual(api.mutating(), 0, "no mutating request went out while proposing");
+
+    const confirmed = await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual(confirmed.ok, true, "confirming worked");
+    assertEqual(api.mutating(), 1, "exactly one mutating request, and only now");
+    const patch = api.calls.find((call) => call.method === "PATCH");
+    assertEqual(patch?.url, "https://users.example.com/users/u-1001", "sent to the right path");
+  });
+
+  await test("a token is single-use, and a cancelled one cannot be revived", async () => {
+    const manager = new UserManager();
+
+    const first = await manager.proposeDelete("u-1001");
+    const token = first.ok ? first.change.token : "";
+    assertEqual((await manager.confirm(token)).ok, true, "the first confirm applies it");
+    assertEqual(await manager.get("u-1001"), null, "and the user is gone");
+
+    const replay = await manager.confirm(token);
+    assertEqual(replay.ok, false, "a second confirm is refused");
+    assertEqual(!replay.ok && replay.code, "unknown-token", "as an unknown token");
+
+    const second = await manager.proposeDelete("u-1002");
+    const other = second.ok ? second.change.token : "";
+    assertEqual(manager.cancel(other), true, "cancelling reports success");
+    assertEqual(manager.cancel(other), false, "cancelling twice does not");
+    assertEqual((await manager.confirm(other)).ok, false, "and the cancelled change cannot run");
+  });
+
+  await test("a proposal that is never confirmed expires on its own", async () => {
+    let clock = 1_000_000;
+    const manager = new UserManager({ now: () => clock, pendingTtlMs: 60_000 });
+
+    const proposal = await manager.proposeDelete("u-1001");
+    const token = proposal.ok ? proposal.change.token : "";
+    assert(manager.pendingChange(token) !== null, "valid right after proposing");
+    assertEqual(manager.pendingCount(), 1, "one change waiting");
+
+    clock += 59_999;
+    assert(manager.pendingChange(token) !== null, "still valid one ms before expiry");
+
+    clock += 2;
+    assertEqual(manager.pendingChange(token), null, "expired, and dropped from the map");
+
+    const late = await manager.confirm(token);
+    assertEqual(late.ok, false, "a late yes does not apply it");
+    assertEqual(!late.ok && late.code, "unknown-token", "the token is already gone");
+  });
+
+  await test("an expired token still held in the map is refused as expired", async () => {
+    let clock = 1_000_000;
+    const manager = new UserManager({ now: () => clock, pendingTtlMs: 60_000 });
+
+    const proposal = await manager.proposeBulk(["u-1001", "u-1002"], "disable");
+    const token = proposal.ok ? proposal.change.token : "";
+
+    // Move past expiry but read it through confirm, which is the path that has
+    // to notice a token that has aged out while nobody looked at it.
+    clock += 60_001;
+    const result = await manager.confirm(token);
+    assertEqual(result.ok, false, "refused");
+    assertEqual(!result.ok && result.code, "expired", "with the expired code");
+    assertEqual((await manager.get("u-1001"))?.status, "active", "and nothing changed");
+  });
+
+  await test("bulk enable, disable and delete all wait for the same confirmation", async () => {
+    const manager = new UserManager();
+
+    const disable = await manager.proposeBulk(["u-1001", "u-1002"], "disable");
+    assertEqual(disable.ok, true, "proposed");
+    assert(!disable.ok || disable.change.summary.includes("۲"), "the summary says how many");
+    assertEqual((await manager.confirm(disable.ok ? disable.change.token : "")).ok, true, "applied");
+    assertEqual((await manager.get("u-1001"))?.status, "disabled", "u-1001 switched off");
+    assertEqual((await manager.get("u-1002"))?.status, "disabled", "u-1002 switched off");
+
+    const enable = await manager.proposeBulk(["u-1001"], "enable");
+    await manager.confirm(enable.ok ? enable.change.token : "");
+    assertEqual((await manager.get("u-1001"))?.status, "active", "and switched back on");
+
+    const remove = await manager.proposeBulk(["u-1001", "u-1003"], "delete");
+    const result = await manager.confirm(remove.ok ? remove.change.token : "");
+    assertEqual(result.ok, true, "bulk delete applied");
+    assertEqual((await manager.list()).users.length, 1, "one user left");
+  });
+
+  await test("bulk proposals dedupe ids and report the ones that do not exist", async () => {
+    const manager = new UserManager();
+
+    const dupes = await manager.proposeBulk(["u-1001", "u-1001", " u-1002 "], "disable");
+    assertEqual(dupes.ok, true, "accepted");
+    assertEqual(dupes.ok ? dupes.change.affected.length : 0, 2, "duplicates collapsed, ids trimmed");
+
+    const partial = await manager.proposeBulk(["u-1001", "u-nope"], "delete");
+    assertEqual(partial.ok, true, "accepted for the ones that exist");
+    assert(
+      !partial.ok || partial.change.summary.includes("u-nope"),
+      "and the summary names the missing one",
+    );
+    assertEqual(partial.ok ? partial.change.affected.join(",") : "", "u-1001", "only real ids are queued");
+
+    const none = await manager.proposeBulk(["u-nope"], "delete");
+    assertEqual(none.ok, false, "refused when nobody in the list exists");
+    assertEqual(!none.ok && none.code, "not-found", "as not-found");
+  });
+
+  await test("proposals are refused, with a reason the user can act on", async () => {
+    const manager = new UserManager();
+
+    const empty = await manager.proposeEdit("u-1001", {});
+    assertEqual(!empty.ok && empty.code, "no-change", "an empty patch changes nothing");
+
+    const badPhone = await manager.proposeEdit("u-1001", { phone: "+14155552671" });
+    assertEqual(!badPhone.ok && badPhone.code, "bad-phone", "a foreign number is refused");
+    assert(!badPhone.ok && badPhone.message.includes("۰۹۱۲"), "and the reply shows the right shape");
+
+    const missing = await manager.proposeEdit("u-nope", { firstName: "x" });
+    assertEqual(!missing.ok && missing.code, "not-found", "editing a user who is not there");
+
+    const gone = await manager.proposeDelete("u-nope");
+    assertEqual(!gone.ok && gone.code, "not-found", "deleting a user who is not there");
+
+    const noIds = await manager.proposeBulk([], "disable");
+    assertEqual(!noIds.ok && noIds.code, "empty-list", "an empty list");
+
+    const junk = await manager.proposeBulk(["u-1001"], "explode" as "delete");
+    assertEqual(!junk.ok && junk.code, "unknown-action", "an action that does not exist");
+
+    // Every refusal message must be real Persian, not a placeholder.
+    for (const failure of [empty, badPhone, missing, gone, noIds, junk]) {
+      assert(!failure.ok && failure.message.length > 5, "each refusal carries a message");
+    }
+  });
+
+  await test("a phone typed in any shape is stored in the canonical one", async () => {
+    const manager = new UserManager();
+
+    const proposal = await manager.proposeEdit("u-1003", { phone: "۰۹۱۲ ۱۲۳ ۴۵۶۷" });
+    assertEqual(proposal.ok, true, "Persian digits with spaces are accepted");
+    const patch = proposal.ok && proposal.change.action.kind === "edit" ? proposal.change.action.patch : {};
+    assertEqual(patch.phone, "09121234567", "normalised before it is even proposed");
+
+    await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual((await manager.get("u-1003"))?.phone, "09121234567", "and stored that way");
+    assertEqual((await manager.get("u-1003"))?.status, "disabled", "the rest of the record is untouched");
+  });
+
+  await test("an edit can also clear a phone number", async () => {
+    const manager = new UserManager();
+    const proposal = await manager.proposeEdit("u-1001", { phone: null });
+    assertEqual(proposal.ok, true, "null is a deliberate value, not a missing one");
+    await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual((await manager.get("u-1001"))?.phone, null, "cleared");
+  });
+
+  await test("live mode talks to the API and accepts either response shape", async () => {
+    const wrapped = makeUserApi({ body: { users: [{ id: "a1", firstName: "A", lastName: "B", phone: null, status: "active", createdAt: "", updatedAt: "" }] } });
+    const wrappedManager = new UserManager({ baseUrl: "https://api.example.com/v1/", fetchImpl: wrapped.impl });
+    assertEqual(wrappedManager.isLive, true, "live once a base url is set");
+    assertEqual(wrappedManager.mode, "live", "mode follows");
+    const wrappedResult = await wrappedManager.search("مریم");
+    assertEqual(wrappedResult.live, true, "flagged as from the API");
+    assertEqual(wrappedResult.users[0]?.id, "a1", "wrapped in { users: [...] }");
+    assertEqual(
+      wrapped.calls[0]?.url,
+      "https://api.example.com/v1/users?q=%D9%85%D8%B1%DB%8C%D9%85",
+      "trailing slash collapsed and the query encoded",
+    );
+
+    const bare = makeUserApi({ body: [{ id: "b1" }] });
+    const bareResult = await new UserManager({ baseUrl: "https://api.example.com", fetchImpl: bare.impl }).list();
+    assertEqual(bareResult.users[0]?.id, "b1", "a bare array is accepted too");
+    assertEqual(bare.calls[0]?.url, "https://api.example.com/users", "listing has no query string");
+
+    for (const key of ["data", "results", "items"]) {
+      const api = makeUserApi({ body: { [key]: [{ id: key }] } });
+      const result = await new UserManager({ baseUrl: "https://x.test", fetchImpl: api.impl }).list();
+      assertEqual(result.users[0]?.id, key, `wrapped in { ${key}: [...] }`);
+    }
+  });
+
+  await test("a live lookup that fails says so instead of inventing an empty list", async () => {
+    const broken = makeUserApi({ status: 500, body: { message: "database is on fire" } });
+    const result = await new UserManager({ baseUrl: "https://api.test", fetchImpl: broken.impl }).search("x");
+    assertEqual(result.users.length, 0, "no users");
+    assertEqual(result.error, "database is on fire", "and the server's own reason is carried");
+
+    const plain = makeUserApi({ status: 404, rawBody: "" });
+    const plainResult = await new UserManager({ baseUrl: "https://api.test", fetchImpl: plain.impl }).list();
+    assertEqual(plainResult.error, "HTTP 404", "a bare status becomes the reason");
+
+    const garbage = makeUserApi({ rawBody: "not json at all" });
+    const garbageResult = await new UserManager({ baseUrl: "https://api.test", fetchImpl: garbage.impl }).list();
+    assertEqual(garbageResult.error, "unparsable response", "unparseable JSON is reported");
+
+    const thrown = makeUserApi({ failWith: "throw" });
+    const thrownResult = await new UserManager({ baseUrl: "https://api.test", fetchImpl: thrown.impl }).list();
+    assertEqual(thrownResult.error, "network down", "a thrown error is caught, not surfaced");
+
+    const aborted = makeUserApi({ failWith: "abort" });
+    const abortedResult = await new UserManager({ baseUrl: "https://api.test", fetchImpl: aborted.impl }).list();
+    assertEqual(abortedResult.error, "timeout", "an abort reads as a timeout");
+  });
+
+  await test("in live mode one bulk action is one request, not one per user", async () => {
+    const api = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      body: { applied: ["u-1001"], failed: [{ id: "u-1002", reason: "locked" }] },
+    });
+    const manager = new UserManager({ baseUrl: "https://api.test", fetchImpl: api.impl });
+
+    const proposal = await manager.proposeBulk(["u-1001", "u-1002"], "disable");
+    const result = await manager.confirm(proposal.ok ? proposal.change.token : "");
+
+    const posts = api.calls.filter((call) => call.method === "POST");
+    assertEqual(posts.length, 1, "a single POST for the whole list");
+    assertEqual(posts[0]?.url, "https://api.test/users/bulk", "to the bulk endpoint");
+    assertEqual(JSON.stringify(posts[0]?.body), JSON.stringify({ action: "disable", ids: ["u-1001", "u-1002"] }), "with the action and the ids");
+    assertEqual(result.ok, true, "confirmed");
+    if (result.ok) {
+      assertEqual(result.applied.join(","), "u-1001", "the server's own accounting is trusted");
+      assertEqual(result.failed[0]?.reason, "locked", "including its failures");
+      assertEqual(result.mode, "live", "and it says where it went");
+    }
+  });
+
+  await test("a bulk request the server rejects fails every id, not silently none", async () => {
+    const api = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      status: 500,
+      body: { message: "nope" },
+    });
+    const manager = new UserManager({ baseUrl: "https://api.test", fetchImpl: api.impl });
+
+    const proposal = await manager.proposeBulk(["u-1001", "u-1002"], "enable");
+    const result = await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual(result.ok, true, "the call itself completed");
+    if (result.ok) {
+      assertEqual(result.applied.length, 0, "nothing applied");
+      assertEqual(result.failed.length, 2, "and both ids are reported as failed");
+    }
+
+    const bare = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      body: { ok: true },
+    });
+    const bareManager = new UserManager({ baseUrl: "https://api.test", fetchImpl: bare.impl });
+    const bareProposal = await bareManager.proposeBulk(["u-1001"], "enable");
+    const bareResult = await bareManager.confirm(bareProposal.ok ? bareProposal.change.token : "");
+    if (bareResult.ok) {
+      assertEqual(bareResult.applied.join(","), "u-1001", "a 2xx with no accounting means all of them");
+    }
+  });
+
+  await test("a live single edit or delete reports its own failure", async () => {
+    const failing = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      status: 409,
+      body: { message: "locked" },
+    });
+    const manager = new UserManager({ baseUrl: "https://api.test", fetchImpl: failing.impl });
+
+    const edit = await manager.proposeEdit("u-1001", { firstName: "x" });
+    const editResult = await manager.confirm(edit.ok ? edit.change.token : "");
+    if (editResult.ok) {
+      assertEqual(editResult.applied.length, 0, "the edit did not apply");
+      assertEqual(editResult.failed[0]?.reason, "locked", "with the reason");
+    }
+
+    const del = await manager.proposeDelete("u-1001");
+    const delResult = await manager.confirm(del.ok ? del.change.token : "");
+    if (delResult.ok) assertEqual(delResult.failed[0]?.id, "u-1001", "nor did the delete");
+
+    const working = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      body: { id: "u-1001" },
+    });
+    const okManager = new UserManager({ baseUrl: "https://api.test", fetchImpl: working.impl });
+    const okDelete = await okManager.proposeDelete("u-1001");
+    const okResult = await okManager.confirm(okDelete.ok ? okDelete.change.token : "");
+    if (okResult.ok) assertEqual(okResult.applied.join(","), "u-1001", "a 2xx delete applies");
+    assertEqual(
+      working.calls.some((call) => call.method === "DELETE"),
+      true,
+      "sent as DELETE",
+    );
+
+    const okEdit = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      body: { id: "u-1001" },
+    });
+    const okEditManager = new UserManager({ baseUrl: "https://api.test", fetchImpl: okEdit.impl });
+    const okEditProposal = await okEditManager.proposeEdit("u-1001", { lastName: "y" });
+    const okEditResult = await okEditManager.confirm(okEditProposal.ok ? okEditProposal.change.token : "");
+    if (okEditResult.ok) assertEqual(okEditResult.applied.join(","), "u-1001", "a 2xx edit applies");
+  });
+
+  await test("a live get reads the single-user path", async () => {
+    const api = makeUserApi({ body: { users: [{ id: "u-1001", firstName: "مریم" }] } });
+    const manager = new UserManager({ baseUrl: "https://api.test", fetchImpl: api.impl });
+    assertEqual((await manager.get("u-1001"))?.id, "u-1001", "found");
+    assertEqual(api.mutating(), 0, "reading sends nothing that changes data");
+    assertEqual(api.calls[0]?.url, "https://api.test/users/u-1001", "on the per-user path");
+
+    const empty = makeUserApi({ body: { users: [] } });
+    assertEqual(
+      await new UserManager({ baseUrl: "https://api.test", fetchImpl: empty.impl }).get("u-x"),
+      null,
+      "an empty result is null",
+    );
+  });
+
+  await test("missing arguments are treated as empty, not as a crash", async () => {
+    const manager = new UserManager();
+
+    // A model or a webhook can hand us undefined where a string belongs. Both
+    // of these must degrade to "no filter" rather than throw.
+    assertEqual((await manager.search(undefined as unknown as string)).users.length, 3, "search(undefined) lists everyone");
+    const none = await manager.proposeBulk(undefined as unknown as string[], "disable");
+    assertEqual(!none.ok && none.code, "empty-list", "proposeBulk(undefined) is an empty list");
+
+    const onlyBlank = await manager.proposeBulk(["", "   "], "disable");
+    assertEqual(!onlyBlank.ok && onlyBlank.code, "empty-list", "and so is a list of blanks");
+
+    assertEqual(manager.pendingChange("never-issued"), null, "an unknown token has no pending change");
+  });
+
+  await test("an edit or delete for a user who vanished mid-flight is reported", async () => {
+    const manager = new UserManager();
+
+    // Propose both, then let the bulk one land first — the single edit and
+    // delete are now aimed at a row that is no longer there.
+    const edit = await manager.proposeEdit("u-1002", { firstName: "ز" });
+    const del = await manager.proposeDelete("u-1003");
+    const bulk = await manager.proposeBulk(["u-1002", "u-1003"], "delete");
+    await manager.confirm(bulk.ok ? bulk.change.token : "");
+
+    const editResult = await manager.confirm(edit.ok ? edit.change.token : "");
+    if (editResult.ok) {
+      assertEqual(editResult.applied.length, 0, "the stale edit applied nothing");
+      assertEqual(editResult.failed[0]?.reason, "not-found", "and said why");
+    }
+
+    const delResult = await manager.confirm(del.ok ? del.change.token : "");
+    if (delResult.ok) {
+      assertEqual(delResult.applied.length, 0, "nor did the stale delete");
+      assertEqual(delResult.failed[0]?.id, "u-1003", "for the right id");
+    }
+    assertEqual((await manager.list()).users.length, 1, "only u-1001 is left");
+  });
+
+  await test("a live response is parsed strictly, and a bad one is not trusted", async () => {
+    // An object with none of the known list keys is not a user list.
+    const odd = makeUserApi({ body: { foo: "bar" } });
+    const oddResult = await new UserManager({ baseUrl: "https://api.test", fetchImpl: odd.impl }).list();
+    assertEqual(oddResult.users.length, 0, "no users invented from an unrelated object");
+    assertEqual(oddResult.error, "unparsable response", "and it is called unparsable");
+
+    // A non-Error thrown from fetch must not escape as a crash.
+    const weird = (async () => {
+      throw "just a string";
+    }) as unknown as typeof fetch;
+    const weirdResult = await new UserManager({ baseUrl: "https://api.test", fetchImpl: weird }).list();
+    assertEqual(weirdResult.error, "just a string", "a string throw is stringified, not swallowed");
+
+    // Bulk accounting: `applied` present but no `failed` key at all.
+    const noFailed = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      body: { applied: ["u-1001", "u-1002"] },
+    });
+    const noFailedManager = new UserManager({ baseUrl: "https://api.test", fetchImpl: noFailed.impl });
+    const noFailedProposal = await noFailedManager.proposeBulk(["u-1001", "u-1002"], "disable");
+    const noFailedResult = await noFailedManager.confirm(noFailedProposal.ok ? noFailedProposal.change.token : "");
+    if (noFailedResult.ok) {
+      assertEqual(noFailedResult.applied.length, 2, "both applied");
+      assertEqual(noFailedResult.failed.length, 0, "and a missing failed key means none");
+    }
+
+    // A `failed` list containing a null and an entry with no fields at all.
+    const ragged = makeUserApi({
+      getUsers: seedUsers() as unknown as Array<Record<string, unknown>>,
+      body: { applied: [], failed: [null, {}] },
+    });
+    const raggedManager = new UserManager({ baseUrl: "https://api.test", fetchImpl: ragged.impl });
+    const raggedProposal = await raggedManager.proposeBulk(["u-1001"], "disable");
+    const raggedResult = await raggedManager.confirm(raggedProposal.ok ? raggedProposal.change.token : "");
+    if (raggedResult.ok) {
+      assertEqual(raggedResult.failed.length, 2, "both ragged entries are reported");
+      assertEqual(raggedResult.failed[0]?.id, "", "a null entry gets an empty id");
+      assertEqual(raggedResult.failed[1]?.reason, "failed", "and a bare object a default reason");
+    }
+  });
+
+  await test("a change against a store that lost the user reports it, not a silent pass", async () => {
+    const manager = new UserManager();
+    const proposal = await manager.proposeBulk(["u-1001", "u-1002"], "delete");
+    const token = proposal.ok ? proposal.change.token : "";
+
+    // Delete one behind the manager's back, the way a second process would.
+    const sneak = await manager.proposeDelete("u-1001");
+    await manager.confirm(sneak.ok ? sneak.change.token : "");
+
+    const result = await manager.confirm(token);
+    assertEqual(result.ok, true, "the change completed");
+    if (result.ok) {
+      assertEqual(result.applied.join(","), "u-1002", "only the one still there was applied");
+      assertEqual(result.failed[0]?.id, "u-1001", "and the missing one is reported");
+      assertEqual(result.sent, true, "it did go somewhere");
+      assertEqual(result.mode, "dummy", "the dummy store");
+    }
+
+    // u-1001 and u-1002 are gone now; the last one leaves through an edit and
+    // then a delete, which also covers the single-user paths against the store.
+    const singleEdit = await manager.proposeEdit("u-1003", { firstName: "ز" });
+    assertEqual((await manager.confirm(singleEdit.ok ? singleEdit.change.token : "")).ok, true, "edit applied");
+    assertEqual((await manager.get("u-1003"))?.firstName, "ز", "and took effect");
+
+    const singleDelete = await manager.proposeDelete("u-1003");
+    assertEqual((await manager.confirm(singleDelete.ok ? singleDelete.change.token : "")).ok, true, "delete applied");
+    assertEqual((await manager.list()).users.length, 0, "the store can be emptied");
+  });
+
+  await test("the capability list is real, unique, and honest about confirmation", () => {
+    const manager = new UserManager();
+    assertEqual(manager.capabilities(), CAPABILITIES, "the class exposes the same list");
+
+    const ids = CAPABILITIES.map((capability) => capability.id);
+    assertEqual(new Set(ids).size, ids.length, "no duplicate ids");
+
+    for (const id of MUTATING_IDS) {
+      assert(findCapability(id)?.needsConfirm === true, `${id} needs confirmation`);
+    }
+    for (const id of ["search", "view", "list", "confirm"]) {
+      assert(findCapability(id)?.needsConfirm === false, `${id} is a read`);
+    }
+    assertEqual(findCapability("nope"), undefined, "an unknown id is undefined");
+    assertEqual(confirmRequiredIds().sort().join(","), MUTATING_IDS.slice().sort().join(","), "the mutating set matches");
+  });
+
+  await test("the capability prose names every ability, in both languages", () => {
+    for (const locale of ["fa", "en"] as const) {
+      const text = capabilitiesText(locale);
+      for (const capability of CAPABILITIES) {
+        assert(text.includes(capability.title[locale]), `${locale}: lists ${capability.id}`);
+      }
+      assert(text.includes("🔒"), `${locale}: explains the confirmation mark`);
+
+      const block = capabilitiesPromptBlock(locale);
+      for (const capability of CAPABILITIES) {
+        assert(block.includes(capability.title[locale]), `${locale}: prompt lists ${capability.id}`);
+      }
+      assert(block.includes(String(MUTATING_IDS.length)), `${locale}: prompt counts the mutating ones`);
+    }
+    assertEqual(capabilityAnswer("fa"), capabilitiesText("fa"), "the answer is the list");
+    assertEqual(capabilityAnswer(), capabilitiesText("fa"), "and it defaults to Persian");
+  });
+
+  await test("«چه کارهایی بلدی؟» is recognised and answered from the list", async () => {
+    for (const question of [
+      "چه کارهایی بلدی؟",
+      "چیکارا بلدی",
+      "چه قابلیت‌هایی داری",
+      "what can you do?",
+      "what are your capabilities",
+    ]) {
+      assertEqual(isCapabilityQuestion(question), true, `"${question}" is a capability question`);
+    }
+    for (const other of ["امروز چندمه؟", "سلام", "حال تو چطوره", "what is the time"]) {
+      assertEqual(isCapabilityQuestion(other), false, `"${other}" is not`);
+    }
+
+    const result = await handleChat({ message: "چه کارهایی بلدی؟", sessionId: "cap-1", locale: "fa" });
+    assertEqual(result.layer, "users", "answered by the users layer");
+    assertEqual(result.model, null, "without asking a model");
+    for (const capability of CAPABILITIES) {
+      assert(result.reply.includes(capability.title.fa), `the reply lists ${capability.id}`);
+    }
+    assert(result.reply.includes("🔒"), "and the confirmation promise");
+  });
+
+  await test("the system prompt tells the model what it may claim", async () => {
+    const { systemPrompt } = await import("@/lib/bot/prompt");
+    for (const locale of ["fa", "en"] as const) {
+      const prompt = systemPrompt(locale, "الان ۱۴۰۵ است");
+      assert(prompt.includes("حساب‌های کاربری") || prompt.includes("user accounts"), `${locale}: mentions user management`);
+      assert(
+        prompt.includes("بلدی") || prompt.includes("You are able to"),
+        `${locale}: lists the abilities`,
+      );
+    }
+  });
+
   await test("long answers are cut at a sentence, not mid-word", () => {
     const long = `${"این یک جملهٔ کامل است. ".repeat(60)}پایان`;
     const cut = truncateAtSentence(long, 300);

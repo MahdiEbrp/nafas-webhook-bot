@@ -9,6 +9,7 @@
 
 import { getConfig, type Locale } from "@/lib/config";
 import type { DateFacts } from "@/lib/dates/engine";
+import { capabilitiesPromptBlock } from "@/lib/users/capabilities";
 
 function rulesFa(botName: string, clinicName: string): string {
   return `
@@ -56,6 +57,7 @@ export function systemPrompt(locale: Locale = "fa", clock?: string): string {
     return [
       `You are "${botName}", the smart assistant of ${clinicName} — a friendly conversational assistant chatting one-on-one.`,
       "Today you are simply a good conversation partner: you listen, answer, and keep the chat going.",
+      capabilitiesPromptBlock("en"),
       clock ? `\nCurrent date and time (from the server, do not recompute):\n${clock}` : "",
       rulesEn(botName, clinicName),
     ]
@@ -66,6 +68,7 @@ export function systemPrompt(locale: Locale = "fa", clock?: string): string {
   return [
     `تو «${botName}» هستی، دستیار هوشمند ${clinicName}؛ یک هم‌صحبتِ خوش‌برخورد و صمیمی که دارد با یک نفر گفت‌وگوی دونفره می‌کند.`,
     "کار تو گفت‌وگوست: گوش بده، جواب بده و گفت‌وگو را زنده نگه دار.",
+    capabilitiesPromptBlock("fa"),
     clock ? `\nتاریخ و ساعت فعلی (از سرور خوانده شده، خودت محاسبه نکن):\n${clock}` : "",
     rulesFa(botName, clinicName),
   ]

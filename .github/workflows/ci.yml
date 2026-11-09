@@ -31,6 +31,12 @@ jobs:
       # Offline: OpenRouter and Telegram are faked, so no secrets are needed.
       - name: Self-test
         run: npm run selftest
+      # lib/users is held at 100% on every metric. It is the one module where a
+      # silent gap is expensive: it changes user data, and the guarantee that
+      # nothing is sent before a confirmation is exactly the kind of thing a
+      # missing test lets rot.
+      - name: Coverage (lib/users at 100%)
+        run: npm run coverage
       - name: Build
         run: npm run build
         env:
