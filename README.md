@@ -203,12 +203,33 @@ if (proposal.ok) {
 
 مسیرهای مورد انتظار: `GET/POST /api/v1/rules`، `GET/PATCH/DELETE /api/v1/rules/:id` و `POST /api/v1/rules/bulk`. کلاینت status و `x-request-id` را به فراخواننده منتقل می‌کند. API مقصد باید خودش مجوزهای `rules.read` برای GET، `rules.write` برای POST/PATCH و `rules.manage` برای DELETE، session-cookie، CSRF، rate limit، audit event حذف (`action: "deleted"`, `entityType: "rule"`) و header `x-request-id` را اجرا/ثبت کند؛ کلاینت این کنترل‌های سمت سرور را جایگزین نمی‌کند.
 
-Cookie و CSRF هر دو به‌صورت context **برای هر فراخوانی** داده می‌شوند و داخل manager یا `RULES_API_BASE_URL` ذخیره نمی‌شوند. تأیید به `actorId` پیشنهاددهنده بسته است و فراخوانی با کاربر دیگر رد می‌شود. مقدارهای cookie/token را در log یا env مشترک نگذار. نقطهٔ ورود فعلی بات برای این library-only client bridge احراز هویت کاربر ندارد؛ بنابراین این قابلیت عمداً به Telegram/chat یا فهرست ادعاهای توانایی بات وصل نشده است. تا وقتی یک لایهٔ قابل‌اعتماد session کاربر را فراهم نکند، ربات نباید از این کلاینت برای انجام درخواست استفاده کند.
+Cookie و CSRF هر دو به‌صورت context **برای هر فراخوانی** داده می‌شوند و داخل manager یا `RULES_API_BASE_URL` ذخیره نمی‌شوند. تأیید به `actorId` پیشنهاددهنده بسته است و فراخوانی با کاربر دیگر رد می‌شود. مقدارهای cookie/token را در log یا env مشترک نگذار.
+
+برای اتصال کتابخانه به مدل، `RulesAssistant` در `lib/rules/assistant.ts` از function calling در OpenRouter استفاده می‌کند و `handleChat` هم می‌تواند به‌صورت اختیاری آن را دریافت کند:
+
+```ts
+import { handleChat } from "@/lib/bot";
+import { RulesAssistant } from "@/lib/rules/assistant";
+
+const rulesAI = new RulesAssistant({ manager: apiRules }); // یک instance مشترک در محدودهٔ اجرای میزبان
+const answer = await handleChat({
+  message,
+  sessionId: conversationId,
+  locale: "fa",
+  rulesAssistant: rulesAI,
+  ruleContext: authenticatedContext, // فقط از adapter احراز هویت معتبر
+});
+```
+
+مدل برای خواندن از ابزارهای `list_rules` و `get_rule` و برای تغییر از `create_rule`، `update_rule`، `delete_rule` و `bulk_rules` استفاده می‌کند. خواندن پس از مجوزسنجی API انجام می‌شود؛ هر تغییر ابتدا proposal است و فقط جواب روشن «تأیید» یا «لغو» به‌صورت قطعی پردازش می‌شود، نه برداشت مدل از موافقت مبهم. محتوای API به مدل می‌رود تا پاسخ خواندنی بسازد، اما cookie و CSRF هرگز به مدل فرستاده نمی‌شوند. مدل انتخاب‌شده باید از function calling پشتیبانی کند.
+
+مسیرهای فعلی `/api/chat` و Telegram عمداً auth context قوانین تزریق نمی‌کنند؛ این APIها هویت session مرورگر را ندارند. برای فعال‌کردن آن‌ها، میزبان باید `RulesAssistant` و context احراز هویتِ همان کاربر را از adapter قابل‌اعتماد تزریق کند. proposalها و توکن‌های تأیید در حافظهٔ instance نگهداری می‌شوند؛ در استقرار چندنمونه‌ای یا serverless، برای تأیید بین درخواست‌ها باید میزبان عمر instance را تضمین کند یا ذخیره‌ساز پایدار اضافه شود. فیلد `icon` نام export آیکون `lucide-react` را به‌صورت رشته نگه می‌دارد؛ اگر UI ساخته شد، آن را با نگاشت/allowlist ثابت به کامپوننت تبدیل کن، نه import پویا از مقدار API.
 
 | فایل | کار |
 | --- | --- |
 | `lib/rules/types.ts` | مدل‌ها، context احراز هویت و نتیجه‌ها |
 | `lib/rules/manager.ts` | کلاینت HTTP، دادهٔ دامی و پیشنهاد/تأیید تغییرها |
+| `lib/rules/assistant.ts` | ابزارهای function-calling هوش مصنوعی و گردش تأیید |
 | `scripts/selftest.ts` | تست‌های آفلاین اعتبارسنجی، مرز احراز هویت و درخواست‌های API |
 
 ## مدیریت کاربران

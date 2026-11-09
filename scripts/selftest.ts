@@ -44,6 +44,7 @@ const calls: Call[] = [];
 
 /** Canned model behaviour. */
 let modelReply = "سلام! خوشحالم که اینجایی. 🙂";
+let modelToolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | null = null;
 let modelStatus = 200;
 /** Force the first model in the chain to fail so the fallback is exercised. */
 let failFirstModel = false;
@@ -113,7 +114,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       JSON.stringify({
         choices: [
           {
-            message: { content: `${modelReply} [${lastUserMessage(body)}]` },
+            message: modelToolCalls
+              ? { content: null, tool_calls: modelToolCalls }
+              : { content: `${modelReply} [${lastUserMessage(body)}]` },
             finish_reason: modelFinishReason,
           },
         ],
@@ -258,6 +261,7 @@ async function main(): Promise<void> {
   const { rankModels, scoreModel, speedDelta, UNKNOWN_QUALITY } = await import("@/lib/openrouter/ranking");
   const { recordSuccess, recordFailure, getStat, resetStatsForTesting } = await import("@/lib/openrouter/stats");
   const { selectChain } = await import("@/lib/openrouter/select");
+  const { complete } = await import("@/lib/openrouter/client");
   const { resetModelCache } = await import("@/lib/openrouter/models");
   const { answerDateQuestion } = await import("@/lib/dates/intent");
   const { extractDates } = await import("@/lib/dates/parse");
@@ -292,6 +296,23 @@ async function main(): Promise<void> {
     assertEqual(config.modelChain.join(","), "test/free-a:free,test/free-b:free", "model chain");
     assertEqual(config.history.maxMessages, 4, "history window");
     assert(configWarnings(config).some((w) => w.includes("OPENROUTER_API_KEY")) === false, "no API-key warning");
+  });
+
+  await test("OpenRouter accepts a function-tool response without text content", async () => {
+    modelToolCalls = [{ id: "call-rules-1", type: "function", function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }];
+    try {
+      const result = await complete({
+        messages: [{ role: "user", content: "قوانین فعال را نشان بده" }],
+        tools: [{ type: "function", function: { name: "list_rules", description: "List rules", parameters: { type: "object" } } }],
+        modelChain: ["test/free-a:free"],
+      });
+      assertEqual(result.content, "", "tool-only result has empty content");
+      assertEqual(result.toolCalls?.[0]?.function.name, "list_rules", "tool call is exposed to the caller");
+      const request = calls.filter((call) => call.url.includes("chat/completions")).at(-1);
+      assertEqual((request?.body as { tools?: unknown[] } | undefined)?.tools?.length, 1, "tool schema is sent to OpenRouter");
+    } finally {
+      modelToolCalls = null;
+    }
   });
 
   await test("system prompt is a conversation prompt, not an instruction sheet", () => {
@@ -1718,6 +1739,7 @@ async function main(): Promise<void> {
   /* ── 11. Rules client ────────────────────────────────────────────────── */
 
   const { RuleManager, seedRules } = await import("@/lib/rules/manager");
+  const { RulesAssistant } = await import("@/lib/rules/assistant");
   const RULE_CONTEXT = { actorId: "operator-1", sessionCookie: "session=private-cookie", csrfToken: "private-csrf" };
   const RULE_CREATE = {
     slug: "new-clinic-rule",
@@ -1726,6 +1748,98 @@ async function main(): Promise<void> {
       en: { name: "  New rule  ", description: null },
     },
   };
+
+  await test("AI rules assistant executes read tools and summarizes trusted results", async () => {
+    const ruleCalls: Array<{ name: string; arguments: string }> = [];
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      assert((options.messages[0]?.content ?? "").includes("دستیار دقیق مدیریت قوانین"), "rules safety prompt is sent to the model");
+      if (options.tools) {
+        assert(options.tools.length >= 5, "AI receives rule function tools");
+        assert(!JSON.stringify(options.messages).includes(RULE_CONTEXT.sessionCookie), "session cookie is never sent to AI");
+        ruleCalls.push({ name: "list_rules", arguments: "" });
+        return {
+          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+          toolCalls: [{ id: "read-1", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+        };
+      }
+      assertEqual(options.messages.at(-1)?.role, "tool", "API results are returned to the model as tool output");
+      return { content: "یک قانون فعال پیدا شد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete;
+    const manager = new RuleManager();
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    const result = await assistant.handle({ conversationId: "rules-ai-1", message: "قوانین فعال را نشان بده", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(result.kind, "read", "read action completes through the library");
+    assertEqual(result.reply, "یک قانون فعال پیدا شد.", "AI phrases the API result");
+    assertEqual(ruleCalls[0]?.name, "list_rules", "only the requested read function is selected");
+  });
+
+  await test("AI-proposed rule mutations wait for an explicit deterministic confirmation", async () => {
+    let modelCalls = 0;
+    const fakeComplete = (async () => {
+      modelCalls += 1;
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "create-1", type: "function" as const, function: { name: "create_rule", arguments: JSON.stringify(RULE_CREATE) } }],
+      };
+    }) as typeof complete;
+    const manager = new RuleManager();
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    const proposed = await assistant.handle({ conversationId: "rules-ai-2", message: "قانون تازه‌ای بساز", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(proposed.kind, "proposed", "AI action creates only a proposal");
+    assert(proposed.reply.includes("تأیید") && proposed.reply.includes("هنوز هیچ تغییری انجام نشده"), "the user sees explicit confirmation wording");
+    assert(proposed.reply.includes("دادهٔ آزمایشی محلی"), "dummy mode is clearly labeled before confirmation");
+    assertEqual((await manager.list()).total, 2, "proposal has not changed data");
+
+    const ambiguous = await assistant.handle({ conversationId: "rules-ai-2", message: "فکر کنم خوبه", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(ambiguous.kind, "proposed", "ambiguous assent does not execute");
+    assertEqual(modelCalls, 1, "confirmation is not delegated to model interpretation");
+    assertEqual((await manager.list()).total, 2, "ambiguous answer leaves store unchanged");
+
+    const confirmed = await assistant.handle({ conversationId: "rules-ai-2", message: "بله", locale: "fa", context: RULE_CONTEXT });
+    assertEqual(confirmed.kind, "confirmed", "explicit yes applies the mutation");
+    assert(confirmed.reply.includes("چیزی به API بیرونی ارسال نشد"), "dummy confirmation cannot claim a remote write");
+    assertEqual((await manager.list()).total, 3, "only the explicit yes changes data");
+    assertEqual(modelCalls, 1, "confirmation is deterministic, not another model call");
+
+    const cancelledAssistant = new RulesAssistant({ manager: new RuleManager(), completeImpl: fakeComplete });
+    await cancelledAssistant.handle({ conversationId: "rules-ai-3", message: "قانونی بساز", context: RULE_CONTEXT });
+    const cancelled = await cancelledAssistant.handle({ conversationId: "rules-ai-3", message: "لغو", context: RULE_CONTEXT });
+    assertEqual(cancelled.kind, "cancelled", "explicit cancel discards the proposal");
+  });
+
+  await test("handleChat can opt into the library rules assistant without exposing secrets to the model", async () => {
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      if (options.tools) {
+        return {
+          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+          toolCalls: [{ id: "chat-rule-read", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+        };
+      }
+      return { content: "یک قانون فعال وجود دارد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete;
+    const manager = new RuleManager();
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    resetSessionsForTesting();
+    const result = await handleChat({
+      message: "قوانین فعال را نشان بده",
+      sessionId: "chat-rules-ai",
+      locale: "fa",
+      rulesAssistant: assistant,
+      ruleContext: RULE_CONTEXT,
+    });
+    assertEqual(result.layer, "rules", "rules tool flow is integrated into handleChat when injected");
+    assertEqual(result.reply, "یک قانون فعال وجود دارد.", "AI answer is returned by the chat library");
+
+    const capabilities = await handleChat({
+      message: "چه کارهایی بلدی؟",
+      sessionId: "chat-rules-caps",
+      locale: "fa",
+      rulesAssistant: assistant,
+      ruleContext: RULE_CONTEXT,
+    });
+    assert(capabilities.reply.includes("قوانین را هم می‌توانم مدیریت کنم"), "capabilities mention rules only when integration is enabled");
+    assert(capabilities.reply.includes("فهرست‌کردن قوانین"), "rules capabilities come from the rule capability list");
+  });
 
   await test("dummy rules validate, paginate, filter, and require confirmation for writes", async () => {
     const manager = new RuleManager({ now: () => Date.parse("2026-06-01T00:00:00.000Z") });
