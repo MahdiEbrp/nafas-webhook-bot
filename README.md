@@ -176,6 +176,41 @@ npm run db:check                       # اتصال + ساخت جدول + رفت
 curl -s https://<your-app>/api/health?db=1
 ```
 
+## کلاینت مدیریت قوانین
+
+`RuleManager` در `lib/rules/manager.ts` یک کلاینت برای **API بیرونی** قوانین است؛ این مخزن endpoint یا داشبورد قوانین پیاده نمی‌کند. بدون `baseUrl` دادهٔ دامی و حافظه‌ای برای تست فراهم است. در حالت زنده، origin را از `RULES_API_BASE_URL` یا گزینهٔ `baseUrl` می‌گیرد و فقط روی HTTPS درخواست می‌فرستد.
+
+```ts
+import { RuleManager } from "@/lib/rules/manager";
+import type { RuleRequestContext } from "@/lib/rules/types";
+
+const rules = new RuleManager({ baseUrl: process.env.RULES_API_BASE_URL });
+// این context را فقط از لایهٔ احراز هویت قابل‌اعتماد بگیر؛ نه از متن چت.
+const auth: RuleRequestContext = {
+  actorId: authenticatedActor.id,
+  sessionCookie: authenticatedRequest.cookieHeader,
+  csrfToken: authenticatedRequest.csrfToken,
+};
+const page = await rules.list({ page: 1, perPage: 10, status: "active" }, auth);
+const proposal = await rules.proposeDelete(ruleId, auth);
+if (proposal.ok) {
+  // تغییر تنها پس از تأیید صریح همان actor ارسال می‌شود.
+  const result = await rules.confirm(proposal.change.token, auth);
+}
+```
+
+اعتبارسنجی‌های ورودی همان محدودیت‌های قرارداد Rules API را اعمال می‌کنند: slug به‌شکل kebab-case و حداکثر ۱۶۰ نویسه؛ نام fa/en از ۱ تا ۲۵۶؛ توضیح تا ۲۰۰۰؛ icon تا ۱۰۰، image تا ۲۰۴۸ و color تا ۵۰؛ displayOrder از ۰ تا ۱۰۰۰۰؛ صفحه ۱ تا ۱۰۰۰۰۰ و perPage از ۱ تا ۱۰۰؛ جست‌وجو تا ۱۰۰ نویسه؛ و bulk با حداکثر ۱۰۰ UUID در scope=`page` یا فقط search/status در scope=`filtered`. پیش‌فرض‌ها `highlighted=false`، `displayOrder=0` و `isActive=true` هستند. PATCH فقط فیلدهای داده‌شده را می‌فرستد و ترجمه‌های fa/en را مستقل نگه می‌دارد.
+
+مسیرهای مورد انتظار: `GET/POST /api/v1/rules`، `GET/PATCH/DELETE /api/v1/rules/:id` و `POST /api/v1/rules/bulk`. کلاینت status و `x-request-id` را به فراخواننده منتقل می‌کند. API مقصد باید خودش مجوزهای `rules.read` برای GET، `rules.write` برای POST/PATCH و `rules.manage` برای DELETE، session-cookie، CSRF، rate limit، audit event حذف (`action: "deleted"`, `entityType: "rule"`) و header `x-request-id` را اجرا/ثبت کند؛ کلاینت این کنترل‌های سمت سرور را جایگزین نمی‌کند.
+
+Cookie و CSRF هر دو به‌صورت context **برای هر فراخوانی** داده می‌شوند و داخل manager یا `RULES_API_BASE_URL` ذخیره نمی‌شوند. تأیید به `actorId` پیشنهاددهنده بسته است و فراخوانی با کاربر دیگر رد می‌شود. مقدارهای cookie/token را در log یا env مشترک نگذار. نقطهٔ ورود فعلی بات برای این library-only client bridge احراز هویت کاربر ندارد؛ بنابراین این قابلیت عمداً به Telegram/chat یا فهرست ادعاهای توانایی بات وصل نشده است. تا وقتی یک لایهٔ قابل‌اعتماد session کاربر را فراهم نکند، ربات نباید از این کلاینت برای انجام درخواست استفاده کند.
+
+| فایل | کار |
+| --- | --- |
+| `lib/rules/types.ts` | مدل‌ها، context احراز هویت و نتیجه‌ها |
+| `lib/rules/manager.ts` | کلاینت HTTP، دادهٔ دامی و پیشنهاد/تأیید تغییرها |
+| `scripts/selftest.ts` | تست‌های آفلاین اعتبارسنجی، مرز احراز هویت و درخواست‌های API |
+
 ## مدیریت کاربران
 
 یک کلاس، `UserManager` در `lib/users/manager.ts`. ساخت حساب، جست‌وجو (نام، ایمیل، شماره یا UUID)، ویرایش، حذف نرم، فعال/غیرفعال، مسدودسازی و رفع مسدودی، تغییر رمز و بازنشانی رمز.

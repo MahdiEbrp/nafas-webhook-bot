@@ -1715,7 +1715,176 @@ async function main(): Promise<void> {
     assertEqual(typeof a, "string", "a string");
   });
 
-  /* ── 11. User management ────────────────────────────────────────────── */
+  /* ── 11. Rules client ────────────────────────────────────────────────── */
+
+  const { RuleManager, seedRules } = await import("@/lib/rules/manager");
+  const RULE_CONTEXT = { actorId: "operator-1", sessionCookie: "session=private-cookie", csrfToken: "private-csrf" };
+  const RULE_CREATE = {
+    slug: "new-clinic-rule",
+    translations: {
+      fa: { name: "  قانون تازه  ", description: "  توضیح  " },
+      en: { name: "  New rule  ", description: null },
+    },
+  };
+
+  await test("dummy rules validate, paginate, filter, and require confirmation for writes", async () => {
+    const manager = new RuleManager({ now: () => Date.parse("2026-06-01T00:00:00.000Z") });
+    assertEqual((await manager.list()).total, 2, "two rules are seeded");
+    assertEqual((await manager.list({ status: "active" })).rules.length, 1, "active filter");
+    assertEqual((await manager.list({ status: "inactive" })).rules.length, 1, "inactive filter");
+    assertEqual((await manager.list({ search: "CANCELLATION" })).total, 1, "case-insensitive bilingual search");
+    assertEqual((await manager.list({ page: 2, perPage: 1 })).rules[0]?.slug, "cancellation-policy", "pagination is applied");
+    assertEqual((await manager.list({ page: 0 })).error, "page باید عدد صحیحی بین ۱ تا ۱۰۰۰۰۰ باشد.", "invalid page is rejected");
+
+    const invalidSlug = await manager.proposeCreate({ ...RULE_CREATE, slug: "Bad Slug" });
+    assertEqual(invalidSlug.ok ? "ok" : invalidSlug.code, "invalid-slug", "slug is kebab-case");
+    const invalidOrder = await manager.proposeCreate({ ...RULE_CREATE, displayOrder: 10001 });
+    assertEqual(invalidOrder.ok ? "ok" : invalidOrder.code, "invalid-display-order", "display order is bounded");
+    const invalidCases: Array<[string, () => Promise<{ ok: boolean; code?: string }>]> = [
+      ["invalid-name", () => manager.proposeCreate({ ...RULE_CREATE, translations: { ...RULE_CREATE.translations, fa: { name: " ", description: null } } })],
+      ["invalid-description", () => manager.proposeCreate({ ...RULE_CREATE, translations: { ...RULE_CREATE.translations, en: { name: "Valid", description: "x".repeat(2001) } } })],
+      ["invalid-icon", () => manager.proposeCreate({ ...RULE_CREATE, icon: "x".repeat(101) })],
+      ["invalid-image", () => manager.proposeCreate({ ...RULE_CREATE, image: "x".repeat(2049) })],
+      ["invalid-color", () => manager.proposeCreate({ ...RULE_CREATE, color: "x".repeat(51) })],
+      ["invalid-highlighted", () => manager.proposeCreate({ ...RULE_CREATE, highlighted: "yes" as unknown as boolean })],
+      ["invalid-is-active", () => manager.proposeCreate({ ...RULE_CREATE, isActive: 1 as unknown as boolean })],
+    ];
+    for (const [expected, operation] of invalidCases) {
+      const result = await operation();
+      assertEqual(result.ok ? "ok" : result.code, expected, `${expected} is rejected`);
+    }
+    assert((await manager.list({ perPage: 101 })).error?.includes("perPage"), "perPage is bounded");
+    assert((await manager.list({ search: "x".repeat(101) })).error?.includes("جست‌وجو"), "search length is bounded");
+
+    const proposal = await manager.proposeCreate(RULE_CREATE);
+    assertEqual(proposal.ok, true, "valid create is proposed");
+    assertEqual((await manager.list()).total, 2, "proposal alone does not mutate the store");
+    const confirmed = await manager.confirm(proposal.ok ? proposal.change.token : "");
+    assertEqual(confirmed.ok, true, "confirmed create applies");
+    const created = confirmed.ok ? (await manager.get(confirmed.applied[0] ?? "")).rule : null;
+    assertEqual(created?.slug, "new-clinic-rule", "created slug is stored");
+    assertEqual(created?.translations.fa.name, "قانون تازه", "names are trimmed");
+    assertEqual(created?.translations.fa.description, "توضیح", "descriptions are trimmed");
+    assertEqual(created?.highlighted, false, "highlighted default is false");
+    assertEqual(created?.displayOrder, 0, "display order default is zero");
+    assertEqual(created?.isActive, true, "active default is true");
+
+    const id = created?.id ?? "";
+    const update = await manager.proposeUpdate(id, { translations: { en: { name: "Updated name" } } });
+    const changed = await manager.confirm(update.ok ? update.change.token : "");
+    const after = (await manager.get(id)).rule;
+    assertEqual(changed.ok, true, "confirmed patch applies");
+    assertEqual(after?.translations.en.name, "Updated name", "only the requested locale/name changes");
+    assertEqual(after?.translations.fa.name, "قانون تازه", "other locale is retained");
+    assertEqual(after?.translations.en.description, null, "unmentioned description remains null");
+
+    const bulk = await manager.proposeBulk({ action: "deactivate", scope: "filtered", filters: { search: "new-clinic-rule" } });
+    const bulkResult = await manager.confirm(bulk.ok ? bulk.change.token : "");
+    assertEqual(bulkResult.ok, true, "filtered bulk change is confirmed");
+    assertEqual((await manager.get(id)).rule?.isActive, false, "filtered bulk deactivates the match");
+
+    const tooMany = await manager.proposeBulk({ action: "delete", scope: "page", ids: Array.from({ length: 101 }, () => id) });
+    assertEqual(tooMany.ok ? "ok" : tooMany.code, "too-many-ids", "bulk page is capped at 100 ids");
+    const deleteProposal = await manager.proposeDelete(id);
+    assertEqual(deleteProposal.ok, true, "delete requires an explicit proposal");
+    assert((await manager.get(id)).rule !== null, "delete proposal leaves the rule in place");
+    const deleted = await manager.confirm(deleteProposal.ok ? deleteProposal.change.token : "");
+    assertEqual(deleted.ok, true, "confirmed deletion applies");
+    assertEqual((await manager.get(id)).rule, null, "deleted rule is gone");
+  });
+
+  await test("live rules client sends per-call session and CSRF context only on requests", async () => {
+    const calls: Array<{ url: string; method: string; headers: Headers; body?: unknown; credentials?: RequestCredentials }> = [];
+    let responseBody: unknown = { rules: seedRules(), page: 1, perPage: 10, total: 2 };
+    let responseStatus = 200;
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      const headers = new Headers(init.headers);
+      calls.push({
+        url: typeof input === "string" ? input : String(input),
+        method: init.method ?? "GET",
+        headers,
+        body: init.body ? JSON.parse(String(init.body)) as unknown : undefined,
+        credentials: init.credentials,
+      });
+      return new Response(JSON.stringify(responseBody), {
+        status: responseStatus,
+        headers: { "content-type": "application/json", "x-request-id": "rules-request-1" },
+      });
+    };
+    const manager = new RuleManager({ baseUrl: "https://rules.example.test", fetchImpl });
+    const missingContext = await manager.list();
+    assertEqual(missingContext.status, 401, "live request without context is unauthorized");
+    assertEqual(calls.length, 0, "missing auth makes no network request");
+
+    const listed = await manager.list({ page: 2, perPage: 5, search: " policy ", status: "active" }, RULE_CONTEXT);
+    assertEqual(listed.total, 2, "live list parses pagination");
+    assertEqual(listed.requestId, "rules-request-1", "request id is surfaced");
+    const get = calls[0];
+    assert(get?.url.includes("/api/v1/rules?page=2&perPage=5&status=active&search=policy"), "list query is normalized and encoded");
+    assertEqual(get?.headers.get("cookie"), RULE_CONTEXT.sessionCookie, "cookie comes from this call context");
+    assertEqual(get?.headers.get("x-csrf-token"), RULE_CONTEXT.csrfToken, "CSRF token comes from this call context");
+    assertEqual(get?.credentials, "omit", "fetch does not add ambient credentials");
+
+    const rejected = await manager.proposeCreate(RULE_CREATE);
+    assertEqual(rejected.ok ? "ok" : rejected.code, "missing-auth-context", "live mutation proposal needs auth context");
+    const proposal = await manager.proposeCreate(RULE_CREATE, RULE_CONTEXT);
+    assertEqual(proposal.ok, true, "authenticated mutation is proposed");
+    assertEqual(calls.length, 1, "proposal sends no request");
+    assert(!JSON.stringify(proposal).includes(RULE_CONTEXT.sessionCookie), "pending change never exposes cookie");
+    const wrongActor = await manager.confirm(proposal.ok ? proposal.change.token : "", { ...RULE_CONTEXT, actorId: "operator-2" });
+    assertEqual(wrongActor.ok ? "ok" : wrongActor.code, "forbidden", "confirmation is bound to proposing actor");
+    assertEqual(calls.length, 1, "wrong actor cannot trigger a request");
+
+    responseBody = { rule: { ...seedRules()[0], id: "22222222-2222-4222-8222-222222222299", slug: "new-clinic-rule" } };
+    const result = await manager.confirm(proposal.ok ? proposal.change.token : "", RULE_CONTEXT);
+    assertEqual(result.ok, true, "same actor can confirm");
+    const post = calls[1];
+    assertEqual(post?.method, "POST", "create uses POST");
+    assertEqual(post?.url, "https://rules.example.test/api/v1/rules", "create endpoint");
+    assertEqual((post?.body as { slug?: string } | undefined)?.slug, "new-clinic-rule", "create body is normalized");
+    assertEqual(result.ok ? result.requestId : undefined, "rules-request-1", "write request id is surfaced");
+
+    responseStatus = 429;
+    responseBody = { message: "Too many requests" };
+    const limited = await manager.list({}, RULE_CONTEXT);
+    assertEqual(limited.status, 429, "rate limit status is preserved");
+    assertEqual(limited.error, "Too many requests", "API error message is returned");
+  });
+
+  await test("live rules client uses PATCH, DELETE, and bulk endpoints with safe validation", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const rule = seedRules()[0]!;
+    const fetchImpl: typeof fetch = async (input, init = {}) => {
+      calls.push({ url: typeof input === "string" ? input : String(input), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) as unknown : undefined });
+      const body = init.method === "GET" ? { rule } : { applied: [rule.id], failed: [] };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const manager = new RuleManager({ baseUrl: "https://rules.example.test", fetchImpl });
+    const patch = await manager.proposeUpdate(rule.id, { translations: { fa: { description: null }, en: { name: "Changed" } } }, RULE_CONTEXT);
+    assertEqual(patch.ok, true, "patch proposal can read target rule");
+    const patched = await manager.confirm(patch.ok ? patch.change.token : "", RULE_CONTEXT);
+    assertEqual(patched.ok, true, "patch confirmation succeeds");
+    const patchRequest = calls.find((call) => call.method === "PATCH");
+    assertEqual(patchRequest?.url, `https://rules.example.test/api/v1/rules/${rule.id}`, "PATCH endpoint");
+    assertEqual((patchRequest?.body as { translations?: { en?: { name?: string } } } | undefined)?.translations?.en?.name, "Changed", "patch body stays partial");
+
+    const bulk = await manager.proposeBulk({ action: "activate", scope: "page", ids: [rule.id] }, RULE_CONTEXT);
+    const bulkResult = await manager.confirm(bulk.ok ? bulk.change.token : "", RULE_CONTEXT);
+    assertEqual(bulkResult.ok, true, "bulk confirmation succeeds");
+    const bulkRequest = calls.find((call) => call.url.endsWith("/bulk"));
+    assertEqual(bulkRequest?.method, "POST", "bulk uses POST");
+    assertEqual((bulkRequest?.body as { scope?: string } | undefined)?.scope, "page", "scope is transmitted");
+
+    const deletion = await manager.proposeDelete(rule.id, RULE_CONTEXT);
+    const deleted = await manager.confirm(deletion.ok ? deletion.change.token : "", RULE_CONTEXT);
+    assertEqual(deleted.ok, true, "delete confirmation succeeds");
+    assert(calls.some((call) => call.method === "DELETE" && call.url.endsWith(`/${rule.id}`)), "delete endpoint uses DELETE");
+
+    const insecure = await new RuleManager({ baseUrl: "http://rules.example.test", fetchImpl }).list({}, RULE_CONTEXT);
+    assertEqual(insecure.status, 0, "session cookies are never sent over plain HTTP");
+  });
+
+  /* ── 12. User management ────────────────────────────────────────────── */
 
   const { UserManager, seedUsers } = await import("@/lib/users/manager");
   const {
