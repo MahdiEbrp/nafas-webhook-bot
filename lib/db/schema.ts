@@ -81,6 +81,13 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      updated_at        timestamptz not null default now()
    )`,
   `create index if not exists ${AUTH_SESSION_TABLE_NAME}_expires_at_idx on ${AUTH_SESSION_TABLE_NAME} (expires_at)`,
+  `create table if not exists auth_login_flows (
+     flow_id_hash      text        primary key,
+     encrypted_payload text        not null,
+     expires_at        timestamptz not null,
+     updated_at        timestamptz not null default now()
+   )`,
+  `create index if not exists auth_login_flows_expires_at_idx on auth_login_flows (expires_at)`,
   `create index if not exists ${TABLE_NAME}_session_id_idx on ${TABLE_NAME} (session_id)`,
   `create index if not exists ${TABLE_NAME}_phone_idx on ${TABLE_NAME} (phone)`,
 ];

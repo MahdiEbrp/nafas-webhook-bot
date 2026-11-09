@@ -10,8 +10,10 @@ const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const VERSION = "v1";
 
 export type StoredAuthSession = {
-  /** Account identifier used by the trusted caller; encrypted in the row payload. */
+  /** Authenticated account identifier (usually the verified phone), encrypted in the row payload. */
   actorId: string;
+  /** Optional trusted owner key for lookup (for example a Telegram user's stable session id). Also encrypted. */
+  lookupId?: string;
   sessionCookie: string;
   csrfToken?: string;
   /** Optional upstream cookie/API expiry in Unix milliseconds. */
@@ -99,6 +101,7 @@ function decryptPayload(value: unknown, key: Buffer, digest: string): StoredAuth
       typeof record.actorId !== "string"
       || typeof record.sessionCookie !== "string"
       || !record.sessionCookie
+      || (record.lookupId !== undefined && typeof record.lookupId !== "string")
       || (record.csrfToken !== undefined && typeof record.csrfToken !== "string")
       || (record.expiresAt !== undefined && typeof record.expiresAt !== "number")
     ) return null;
@@ -111,6 +114,7 @@ function decryptPayload(value: unknown, key: Buffer, digest: string): StoredAuth
 function validSession(session: StoredAuthSession): boolean {
   return typeof session.actorId === "string" && session.actorId.trim().length > 0
     && typeof session.sessionCookie === "string" && session.sessionCookie.trim().length > 0
+    && (session.lookupId === undefined || (typeof session.lookupId === "string" && session.lookupId.trim().length > 0))
     && (session.csrfToken === undefined || typeof session.csrfToken === "string");
 }
 
@@ -137,11 +141,12 @@ export class EncryptedAuthSessionStore implements AuthSessionStore {
     if (!key || !run) return false;
 
     const actorId = input.actorId.trim();
-    const digest = actorDigest(actorId, key);
+    const lookupId = input.lookupId?.trim() || actorId;
+    const digest = actorDigest(lookupId, key);
     const expiryCap = this.now() + this.maxAgeMs;
     const expiry = Math.min(input.expiresAt ?? expiryCap, expiryCap);
     if (!Number.isFinite(expiry) || expiry <= this.now()) return false;
-    const session = { ...input, actorId, expiresAt: expiry };
+    const session = { ...input, actorId, lookupId, expiresAt: expiry };
     const encrypted = encryptPayload(session, key, digest);
     const sql = `
       insert into ${AUTH_SESSION_TABLE} (actor_id_hash, encrypted_payload, expires_at, created_at, updated_at)
@@ -167,8 +172,8 @@ export class EncryptedAuthSessionStore implements AuthSessionStore {
     const key = readKey(this.keyOverride ?? process.env.AUTH_SESSION_ENCRYPTION_KEY);
     const run = getRunner();
     if (!key || !run) return null;
-    const actorId = actorIdInput.trim();
-    const digest = actorDigest(actorId, key);
+    const lookupId = actorIdInput.trim();
+    const digest = actorDigest(lookupId, key);
     const sql = `
       select encrypted_payload
         from ${AUTH_SESSION_TABLE}
@@ -182,7 +187,7 @@ export class EncryptedAuthSessionStore implements AuthSessionStore {
       const row = rows[0] as SessionRow | undefined;
       if (!row) return null;
       const session = decryptPayload(row.encrypted_payload, key, digest);
-      if (!session || session.actorId !== actorId || (session.expiresAt !== undefined && session.expiresAt <= this.now())) return null;
+      if (!session || (session.lookupId ?? session.actorId) !== lookupId || (session.expiresAt !== undefined && session.expiresAt <= this.now())) return null;
       return session;
     } catch {
       logWarn("db.auth_session_read_failed", { operation: "select" });

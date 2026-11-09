@@ -484,6 +484,25 @@ async function main(): Promise<void> {
     assert(!welcome.includes('.,"') && !welcome.endsWith(","), "no stray punctuation in the greeting");
   });
 
+  await test("Telegram handles natural-language login before the AI and does not record the message", async () => {
+    const previousKey = process.env.AUTH_SESSION_ENCRYPTION_KEY;
+    delete process.env.AUTH_SESSION_ENCRYPTION_KEY;
+    setRunnerForTesting(null);
+    resetSessionsForTesting();
+    const beforeModels = calls.filter((call) => call.url.includes("openrouter.ai/api/v1/chat/completions")).length;
+    const beforeHistory = conversationLength("tg-777");
+    try {
+      const result = await handleTelegramUpdate(telegramUpdate({ text: "میخوام لاگین کنم" }));
+      assertEqual(result.status, "login-error", "login intent is routed to the secure OTP flow");
+      assert(lastSent().includes("ذخیره‌سازی امن نشست پیکربندی نشده"), "missing DB/key fails closed with a clear response");
+      assertEqual(calls.filter((call) => call.url.includes("openrouter.ai/api/v1/chat/completions")).length, beforeModels, "login phrase is not sent to the AI");
+      assertEqual(conversationLength("tg-777"), beforeHistory, "login phrase is not saved in AI chat history");
+    } finally {
+      if (previousKey === undefined) delete process.env.AUTH_SESSION_ENCRYPTION_KEY;
+      else process.env.AUTH_SESSION_ENCRYPTION_KEY = previousKey;
+    }
+  });
+
   await test("Telegram: /start sends the greeting", async () => {
     resetSessionsForTesting();
     calls.length = 0;
@@ -1762,6 +1781,7 @@ async function main(): Promise<void> {
     try {
       const session = {
         actorId: "+989121234567",
+        lookupId: "telegram-user-777",
         sessionCookie: "session=highly-private-cookie",
         csrfToken: "highly-private-csrf",
       };
@@ -1769,20 +1789,21 @@ async function main(): Promise<void> {
       assert(dbState.row !== undefined, "row written");
       const rowText = JSON.stringify(dbState.row);
       assert(!rowText.includes(session.actorId), "phone is not persisted as cleartext");
+      assert(!rowText.includes(session.lookupId), "owner id is not persisted as cleartext");
       assert(!rowText.includes(session.sessionCookie), "session cookie is not persisted as cleartext");
       assert(!rowText.includes(session.csrfToken), "CSRF token is not persisted as cleartext");
-      assert(typeof dbState.row?.actorHash === "string" && dbState.row.actorHash !== session.actorId, "actor lookup uses an HMAC digest");
+      assert(typeof dbState.row?.actorHash === "string" && dbState.row.actorHash !== session.lookupId, "actor lookup uses an HMAC digest");
       assert(statements.some((statement) => statement.includes("create table if not exists auth_sessions")), "auth_sessions table schema is ensured");
-      const restored = await store.get(session.actorId);
+      const restored = await store.get(session.lookupId);
       assertEqual(restored?.sessionCookie, session.sessionCookie, "cookie decrypts on read");
       assertEqual(restored?.csrfToken, session.csrfToken, "CSRF decrypts on read");
       assertEqual(restored?.expiresAt, now + 60_000, "local max age caps session retention");
 
       const wrongKey = new EncryptedAuthSessionStore({ encryptionKey: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", now: () => now });
-      assertEqual(await wrongKey.get(session.actorId), null, "different key cannot decrypt or locate session");
+      assertEqual(await wrongKey.get(session.lookupId), null, "different key cannot decrypt or locate session");
       if (dbState.row) dbState.row.payload = `${String(dbState.row.payload).slice(0, -2)}aa`;
-      assertEqual(await store.get(session.actorId), null, "tampered ciphertext is rejected");
-      assertEqual(await store.delete(session.actorId), true, "local session deletion succeeds");
+      assertEqual(await store.get(session.lookupId), null, "tampered ciphertext is rejected");
+      assertEqual(await store.delete(session.lookupId), true, "local session deletion succeeds");
     } finally {
       setRunnerForTesting(null);
       resetSchemaCache();
@@ -1796,6 +1817,80 @@ async function main(): Promise<void> {
     assertEqual(await noDatabase.save({ actorId: "owner", sessionCookie: "session=secret" }), false, "missing database refuses to save");
     const invalidKey = new EncryptedAuthSessionStore({ encryptionKey: "not-a-32-byte-key" });
     assertEqual(await invalidKey.save({ actorId: "owner", sessionCookie: "session=secret" }), false, "invalid encryption key refuses to save");
+  });
+
+  await test("Telegram OTP flow state is encrypted and indexed without plaintext phone or Telegram id", async () => {
+    const { EncryptedOtpLoginFlowStore } = await import("@/lib/auth/login-flow-store");
+    let row: { hash: unknown; payload: unknown; expiresAt: unknown } | undefined;
+    const statements: string[] = [];
+    const run: import("@/lib/db/client").SqlRunner = async (query, params = []) => {
+      statements.push(query);
+      if (/^insert into auth_login_flows/u.test(query)) {
+        row = { hash: params[0], payload: params[1], expiresAt: params[2] };
+        return [];
+      }
+      if (/^select encrypted_payload from auth_login_flows/u.test(query)) {
+        return row ? [{ encrypted_payload: row.payload }] : [];
+      }
+      return [];
+    };
+    setRunnerForTesting(run);
+    resetSchemaCache();
+    const store = new EncryptedOtpLoginFlowStore({ encryptionKey: masterKey, now: () => 1_800_000_000_000 });
+    try {
+      const flow = { step: "code" as const, phone: "+989121234567", expiresAt: 1_800_000_300_000 };
+      assertEqual(await store.save("telegram-user-777", flow), true, "flow saved");
+      assert(row !== undefined, "encrypted flow row written");
+      const rowText = JSON.stringify(row);
+      assert(!rowText.includes("telegram-user-777"), "Telegram user id is not plaintext");
+      assert(!rowText.includes(flow.phone), "pending phone is not plaintext");
+      assert(typeof row?.hash === "string" && row.hash !== "telegram-user-777", "flow index is HMACed");
+      assert(statements.some((statement) => statement.includes("create table if not exists auth_login_flows")), "encrypted flow table schema is ensured");
+      assertEqual((await store.get("telegram-user-777"))?.step, "code", "flow decrypts across requests");
+    } finally {
+      setRunnerForTesting(null);
+      resetSchemaCache();
+    }
+  });
+
+  await test("Telegram natural-language OTP login handles Persian digits and never returns secrets", async () => {
+    const { TelegramOtpLogin, isOtpLoginIntent } = await import("@/lib/auth/telegram-login");
+    const flows = new Map<string, import("@/lib/auth/login-flow-store").OtpLoginFlow>();
+    const calls: Array<{ method: string; values: string[] }> = [];
+    const otpClient = {
+      request: async (phone: string) => {
+        calls.push({ method: "request", values: [phone] });
+        return { ok: true as const, expiresInMs: 300_000 };
+      },
+      resend: async (phone: string) => {
+        calls.push({ method: "resend", values: [phone] });
+        return { ok: true as const, expiresInMs: 300_000 };
+      },
+      verify: async (phone: string, code: string, lookupId?: string) => {
+        calls.push({ method: "verify", values: [phone, code, lookupId ?? ""] });
+        return { ok: true as const, sessionStored: true, ruleContextAvailable: true };
+      },
+    };
+    const flowStore: import("@/lib/auth/login-flow-store").OtpLoginFlowStore = {
+      save: async (id, flow) => { flows.set(id, structuredClone(flow)); return true; },
+      get: async (id) => flows.get(id) ?? null,
+      delete: async (id) => flows.delete(id),
+    };
+    const login = new TelegramOtpLogin({ otpClient, flowStore, now: () => 1_800_000_000_000 });
+    assertEqual(isOtpLoginIntent("میخوام لاگین کنم"), true, "Persian login phrase recognized without asking the model");
+    const started = await login.handle("telegram-user-777", "میخوام لاگین کنم");
+    assertEqual(started.handled && started.status, "login-started", "login flow starts");
+    const requested = await login.handle("telegram-user-777", "شماره من +۹۸۹۱۲۱۲۳۴۵۶۷ است");
+    assertEqual(requested.handled && requested.status, "phone-requested", "SMS code requested");
+    assertEqual(calls[0]?.values[0], "+989121234567", "Persian phone digits are normalized");
+    const resent = await login.handle("telegram-user-777", "کد رو دوباره بفرست");
+    assertEqual(resent.handled && resent.status, "code-resent", "resend phrase handled");
+    const verified = await login.handle("telegram-user-777", "۱۲۳۴۵۶");
+    assertEqual(verified.handled && verified.status, "authenticated", "six-digit code verifies");
+    assertEqual(JSON.stringify(calls[2]?.values), JSON.stringify(["+989121234567", "123456", "telegram-user-777"]), "OTP and Telegram owner are passed to the secure client");
+    assert(!JSON.stringify([started, requested, resent, verified]).includes("+989121234567"), "responses never echo the phone");
+    assert(!JSON.stringify([started, requested, resent, verified]).includes("123456"), "responses never echo the OTP");
+    assertEqual(flows.has("telegram-user-777"), false, "flow is removed after success");
   });
 
   /* ── 12. SMS OTP client ──────────────────────────────────────────────── */
@@ -1815,7 +1910,7 @@ async function main(): Promise<void> {
     const savedSessions: import("@/lib/auth/session-store").StoredAuthSession[] = [];
     const sessionStore: import("@/lib/auth/session-store").AuthSessionStore = {
       save: async (session) => { savedSessions.push(structuredClone(session)); return true; },
-      get: async (actorId) => savedSessions.find((session) => session.actorId === actorId) ?? null,
+      get: async (actorId) => savedSessions.find((session) => (session.lookupId ?? session.actorId) === actorId) ?? null,
       delete: async (actorId) => {
         const index = savedSessions.findIndex((session) => session.actorId === actorId);
         if (index < 0) return false;
@@ -1840,7 +1935,7 @@ async function main(): Promise<void> {
     cookieHeaders.append("set-cookie", "session=server-session; Path=/; HttpOnly; Secure; SameSite=Lax");
     responseHeaders = cookieHeaders;
     responseBody = { ok: true };
-    const verified = await otp.verify("+989121234567", "123456");
+    const verified = await otp.verify("+989121234567", "123456", "telegram-user-777");
     assertEqual(verified.ok, true, "valid verification accepted");
     assertEqual(calls[2]?.url, "https://nafasbeautyclinic.ir/api/v1/auth/otp/verify", "verify path");
     assertEqual(JSON.stringify(calls[2]?.body), JSON.stringify({ phone: "+989121234567", code: "123456" }), "verify body has phone and six-digit code");
@@ -1848,13 +1943,14 @@ async function main(): Promise<void> {
       assertEqual(verified.sessionStored, true, "session is persisted before verify returns");
       assertEqual(verified.ruleContextAvailable, true, "session and CSRF are available for Rules API");
       assertEqual(verified.requestId, "otp-verify-1", "request id is returned");
-      const context = await otp.getRuleRequestContext("+989121234567");
+      const context = await otp.getRuleRequestContext("telegram-user-777");
       assertEqual(context?.actorId, "+989121234567", "verified phone binds the actor");
       assertEqual(context?.csrfToken, "csrf-private", "CSRF response header is recovered from storage");
       assert(context?.sessionCookie.includes("session=server-session"), "server session cookie is recovered from storage");
       assert(!JSON.stringify(verified).includes("server-session"), "raw session cookie is not returned in the verification result");
       assert(!JSON.stringify(verified).includes("csrf-private"), "raw CSRF token is not returned in the verification result");
       assert(savedSessions[0]?.sessionCookie.includes("session=server-session"), "the injected store received the session for secure persistence");
+      assertEqual(savedSessions[0]?.lookupId, "telegram-user-777", "session is indexed to the trusted Telegram owner id");
     }
 
     const beforeInvalid = calls.length;
@@ -1997,7 +2093,7 @@ async function main(): Promise<void> {
 
     const defaultCapabilities = await handleChat({ message: "چه کارهایی بلدی؟", sessionId: "chat-rules-caps-default", locale: "fa" });
     assert(defaultCapabilities.reply.includes("قوانین را هم می‌توانم مدیریت کنم"), "rules are listed even for the default route");
-    assert(defaultCapabilities.reply.includes("مسیرهای پیش‌فرض chat و Telegram هنوز"), "default integration limits are disclosed");
+    assert(defaultCapabilities.reply.includes("این درخواست نشست احراز هویت معتبر ندارد"), "default integration limits are disclosed");
     assert(defaultCapabilities.reply.includes("فهرست‌کردن قوانین"), "rules capabilities come from the rule capability list");
 
     const activeCapabilities = await handleChat({
@@ -2008,6 +2104,15 @@ async function main(): Promise<void> {
       ruleContext: RULE_CONTEXT,
     });
     assert(activeCapabilities.reply.includes("در این اتصال، دستیار قوانین با نشست احراز هویت‌شده فعال است"), "enabled integration is described accurately");
+
+    const telegramCapabilities = await handleChat({
+      message: "چه کارهایی بلدی؟",
+      sessionId: "chat-otp-caps",
+      locale: "fa",
+      otpLoginAvailable: true,
+    });
+    assert(telegramCapabilities.reply.includes("ورود به حساب نفس با کد یک‌بارمصرف پیامکی"), "Telegram capabilities disclose the OTP login flow");
+    assert(telegramCapabilities.reply.includes("می‌خواهم لاگین کنم"), "capabilities show the natural-language login example");
   });
 
   await test("dummy rules validate, paginate, filter, and require confirmation for writes", async () => {

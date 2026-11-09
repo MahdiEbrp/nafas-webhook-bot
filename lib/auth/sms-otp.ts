@@ -156,9 +156,11 @@ export class SmsOtpClient {
     return this.post("resend", phoneInput);
   }
 
-  async verify(phoneInput: string, codeInput: string): Promise<SmsOtpResult> {
+  async verify(phoneInput: string, codeInput: string, lookupIdInput?: string): Promise<SmsOtpResult> {
     const phone = normalizedPhone(phoneInput);
     if (!phone) return this.invalid("شماره باید با + اختیاری و ۷ تا ۱۵ رقم نوشته شود.");
+    const lookupId = lookupIdInput?.trim() || phone;
+    if (lookupId.length > 256) return this.invalid("شناسهٔ نشست معتبر نیست.");
     if (typeof codeInput !== "string" || !CODE_PATTERN.test(codeInput)) {
       return this.invalid("کد یک‌بارمصرف باید دقیقاً ۶ رقم باشد.");
     }
@@ -183,6 +185,7 @@ export class SmsOtpClient {
     try {
       saved = await this.sessionStore.save({
         actorId: phone,
+        ...(lookupId === phone ? {} : { lookupId }),
         sessionCookie,
         ...(csrfToken ? { csrfToken } : {}),
         ...(expiresAt === undefined ? {} : { expiresAt }),
@@ -208,25 +211,25 @@ export class SmsOtpClient {
   }
 
   /** Decrypts a session only when needed; callers must keep the result server-side. */
-  async getRuleRequestContext(phoneInput: string): Promise<RuleRequestContext | null> {
-    const phone = normalizedPhone(phoneInput);
-    if (!phone) return null;
+  async getRuleRequestContext(lookupIdInput: string): Promise<RuleRequestContext | null> {
+    const lookupId = lookupIdInput.trim();
+    if (!lookupId || lookupId.length > 256) return null;
     let stored: Awaited<ReturnType<AuthSessionStore["get"]>>;
     try {
-      stored = await this.sessionStore.get(phone);
+      stored = await this.sessionStore.get(lookupId);
     } catch {
       return null;
     }
-    if (!stored || stored.actorId !== phone || !stored.sessionCookie.trim() || !stored.csrfToken?.trim()) return null;
+    if (!stored || (stored.lookupId ?? stored.actorId) !== lookupId || !stored.actorId.trim() || !stored.sessionCookie.trim() || !stored.csrfToken?.trim()) return null;
     return { actorId: stored.actorId, sessionCookie: stored.sessionCookie, csrfToken: stored.csrfToken };
   }
 
   /** Removes the locally stored encrypted session; it does not revoke it upstream. */
-  async clearStoredSession(phoneInput: string): Promise<boolean> {
-    const phone = normalizedPhone(phoneInput);
-    if (!phone) return false;
+  async clearStoredSession(lookupIdInput: string): Promise<boolean> {
+    const lookupId = lookupIdInput.trim();
+    if (!lookupId || lookupId.length > 256) return false;
     try {
-      return await this.sessionStore.delete(phone);
+      return await this.sessionStore.delete(lookupId);
     } catch {
       return false;
     }

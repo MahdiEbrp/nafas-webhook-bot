@@ -223,7 +223,7 @@ const answer = await handleChat({
 
 مدل برای خواندن از ابزارهای `list_rules` و `get_rule` و برای تغییر از `create_rule`، `update_rule`، `delete_rule` و `bulk_rules` استفاده می‌کند. خواندن پس از مجوزسنجی API انجام می‌شود؛ هر تغییر ابتدا proposal است و فقط جواب روشن «تأیید» یا «لغو» به‌صورت قطعی پردازش می‌شود، نه برداشت مدل از موافقت مبهم. محتوای API به مدل می‌رود تا پاسخ خواندنی بسازد، اما cookie و CSRF هرگز به مدل فرستاده نمی‌شوند. مدل انتخاب‌شده باید از function calling پشتیبانی کند. پاسخ «چه کارهایی بلدی؟» همیشه توانایی‌های قوانین را هم فهرست می‌کند و اگر context معتبر تزریق نشده باشد، روشن می‌گوید که این قابلیت در مسیر پیش‌فرض فعال نیست.
 
-مسیرهای فعلی `/api/chat` و Telegram عمداً auth context قوانین تزریق نمی‌کنند؛ این APIها هویت session مرورگر را ندارند. برای فعال‌کردن آن‌ها، میزبان باید `RulesAssistant` و context احراز هویتِ همان کاربر را از adapter قابل‌اعتماد تزریق کند. proposalها و توکن‌های تأیید در حافظهٔ instance نگهداری می‌شوند؛ در استقرار چندنمونه‌ای یا serverless، برای تأیید بین درخواست‌ها باید میزبان عمر instance را تضمین کند یا ذخیره‌ساز پایدار اضافه شود. فیلد `icon` نام export آیکون `lucide-react` را به‌صورت رشته نگه می‌دارد؛ اگر UI ساخته شد، آن را با نگاشت/allowlist ثابت به کامپوننت تبدیل کن، نه import پویا از مقدار API.
+مسیر `/api/chat` عمداً auth context قوانین تزریق نمی‌کند، چون شناسهٔ session مرورگر به‌تنهایی هویت قابل‌اعتماد نیست. در Telegram، ورود پیامکی فقط در گفت‌وگوی خصوصی فعال است؛ بعد از OTP معتبر، context هر درخواست از نشست رمز‌شدهٔ همان کاربر بارگذاری می‌شود. proposalها و توکن‌های تأیید قوانین همچنان در حافظهٔ instance نگهداری می‌شوند؛ در استقرار چندنمونه‌ای یا serverless، برای تأیید بین درخواست‌ها باید میزبان عمر instance را تضمین کند یا ذخیره‌ساز پایدار اضافه شود. فیلد `icon` نام export آیکون `lucide-react` را به‌صورت رشته نگه می‌دارد؛ اگر UI ساخته شد، آن را با نگاشت/allowlist ثابت به کامپوننت تبدیل کن، نه import پویا از مقدار API.
 
 | فایل | کار |
 | --- | --- |
@@ -235,6 +235,8 @@ const answer = await handleChat({
 ## ورود پیامکی OTP به API نفس
 
 کلاینت `SmsOtpClient` در `lib/auth/sms-otp.ts` برای سرویس `https://nafasbeautyclinic.ir` سه درخواست `request`، `verify` و `resend` را می‌فرستد. شماره با قالب عمومی ۷ تا ۱۵ رقم و `+` اختیاری پذیرفته می‌شود؛ کد تأیید دقیقاً ۶ رقم ASCII است. حساب باید از قبل در سامانه با همان شماره فعال و غیرمسدود باشد؛ این کلاینت ثبت‌نام یا رمز عبور ندارد.
+
+در ربات Telegram و فقط در گفت‌وگوی خصوصی، کاربر می‌تواند به زبان طبیعی بنویسد «می‌خواهم لاگین کنم» یا “I want to log in”. ربات شماره را می‌پرسد، کد پیامک را می‌گیرد و پس از تأیید، context احراز هویت را به دستیار AI قوانین وصل می‌کند. شماره و کد در این گردش به OpenRouter یا تاریخچهٔ چت فرستاده نمی‌شوند. وضعیت موقت ورود تا ۱۰ دقیقه در جدول `auth_login_flows` رمز‌شده نگهداری می‌شود. پاسخ «چه کارهایی بلدی؟» در Telegram هم ورود پیامکی را به‌عنوان قابلیت فهرست می‌کند. مسیر وب `/api/chat` عمداً این هویت را نمی‌پذیرد.
 
 ```ts
 import { SmsOtpClient } from "@/lib/auth/sms-otp";
@@ -252,13 +254,15 @@ if (verified.ok && verified.ruleContextAvailable) {
 
 `resend(phone)` همان بدنهٔ درخواست را به مسیر resend می‌فرستد. مقدارهای `expiresInMs` و `resendInMs` از پاسخ سرور خوانده می‌شوند؛ محدودیت ۵ درخواست در ۱۵ دقیقه برای IP و ۵ در ۵ دقیقه برای شماره باید توسط API مقصد اعمال شود و کلاینت آن‌ها را دور نمی‌زند. پاسخ verify می‌تواند Set-Cookie و CSRF header `x-csrf-token` داشته باشد. اگر CSRF در cookie برمی‌گردد، نامش را با `csrfCookieName` تنظیم کن. بدون cookie و CSRF، `ruleRequestContext` ساخته نمی‌شود؛ API contract ارسالی این جزئیات را تضمین نکرده بود، پس کلاینت حدس نمی‌زند.
 
-شماره و کد در log نوشته نمی‌شوند. پس از verify، cookie و CSRF فقط به شکل AES-256-GCM ciphertext در جدول `auth_sessions` ذخیره می‌شوند؛ actor lookup با HMAC انجام می‌شود تا شماره در ستون‌های دیتابیس آشکار نباشد. برای این مسیر، `DATABASE_URL` و کلید مستقل ۳۲‌بایتی `AUTH_SESSION_ENCRYPTION_KEY` الزامی‌اند؛ کلید را با `openssl rand -hex 32` بساز، در secret manager نگه دار و بین deployها ثابت نگه‌دار. بدون DB یا کلید معتبر، ذخیره‌سازی fail-closed است و verify موفقیت‌آمیز گزارش نمی‌شود. نشست حداکثر ۷ روز و در صورت وجود expiry کوتاه‌تر کوکی، تا همان زمان نگهداری می‌شود. با `getRuleRequestContext(phone)` context از DB بازیابی می‌شود و با `clearStoredSession(phone)` رکورد محلی حذف می‌شود (این حذف نشست را در سرویس upstream revoke نمی‌کند). نشست خام را به مدل یا log نفرست. این ورود پیامکی از phone-gate تلگرام و شناسهٔ مکالمهٔ بات مستقل است.
+شماره و کد در log نوشته نمی‌شوند. پس از verify، cookie و CSRF فقط به شکل AES-256-GCM ciphertext در جدول `auth_sessions` ذخیره می‌شوند؛ actor lookup با HMAC انجام می‌شود تا شماره در ستون‌های دیتابیس آشکار نباشد. برای این مسیر، `DATABASE_URL` و کلید مستقل ۳۲‌بایتی `AUTH_SESSION_ENCRYPTION_KEY` الزامی‌اند؛ کلید را با `openssl rand -hex 32` بساز، در secret manager نگه دار و بین deployها ثابت نگه‌دار. بدون DB یا کلید معتبر، ذخیره‌سازی fail-closed است و verify موفقیت‌آمیز گزارش نمی‌شود. نشست حداکثر ۷ روز و در صورت وجود expiry کوتاه‌تر کوکی، تا همان زمان نگهداری می‌شود. با `getRuleRequestContext(lookupId)` context از DB بازیابی می‌شود؛ در استفادهٔ مستقیم، lookupId همان شماره است و adapter تلگرام آن را به شناسهٔ پایدار کاربر محدود می‌کند. `clearStoredSession(lookupId)` رکورد محلی را حذف می‌کند (این حذف نشست را در سرویس upstream revoke نمی‌کند). نشست خام را به مدل یا log نفرست. ورود OTP از phone-gate تلگرام مستقل است و در صورت معتبر بودن context احراز‌شده می‌تواند phone gate را برآورده کند.
 
 | فایل | کار |
 | --- | --- |
 | `lib/auth/sms-otp.ts` | کلاینت OTP و بازیابی server-side context نشست از store رمز‌شده |
-| `lib/auth/session-store.ts` | ذخیرهٔ AES-256-GCM در Postgres با actor index مبتنی بر HMAC |
-| `scripts/selftest.ts` | تست آفلاین OTP، رمزنگاری و خطاهای API |
+| `lib/auth/session-store.ts` | ذخیرهٔ AES-256-GCM نشست در Postgres با lookup مبتنی بر HMAC |
+| `lib/auth/login-flow-store.ts` | نگهداری رمز‌شدهٔ کوتاه‌مدت phone/code stage برای ورود Telegram |
+| `lib/auth/telegram-login.ts` | گردش طبیعی و امن «می‌خواهم لاگین کنم» |
+| `scripts/selftest.ts` | تست آفلاین OTP، گردش ورود، رمزنگاری و خطاهای API |
 
 ## مدیریت کاربران
 
