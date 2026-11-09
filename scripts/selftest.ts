@@ -28,6 +28,9 @@ process.env.HISTORY_MESSAGES = "4";
 process.env.ALLOWED_ORIGINS = "https://app.example.com";
 process.env.BOT_API_KEY = "bot-key-123";
 process.env.BOT_NAME = "ربات تست";
+process.env.CLINIC_NAME = "کلینیک تست";
+process.env.TIME_ZONE = "Asia/Tehran";
+process.env.DATE_ASSISTANT = "true";
 process.env.TELEGRAM_BOT_TOKEN = "123456:TEST-TOKEN";
 process.env.TELEGRAM_WEBHOOK_SECRET = "secret-abc";
 process.env.PUBLIC_APP_URL = "https://bot.example.com";
@@ -231,7 +234,7 @@ function jsonRequest(payload: unknown, headers: Record<string, string> = {}): Re
 async function main(): Promise<void> {
   /* ── 1. Import the real code (after the fetch fake is installed) ────── */
   const { handleChat, resetConversation, conversationLength } = await import("@/lib/bot");
-  const { systemPrompt, welcomeText } = await import("@/lib/bot/prompt");
+  const { systemPrompt, welcomeText, helpText } = await import("@/lib/bot/prompt");
   const { resetSessionsForTesting, getMessages } = await import("@/lib/bot/session");
   const { handleTelegramUpdate } = await import("@/lib/telegram/handler");
   const { getConfig, resetConfigCache, configWarnings } = await import("@/lib/config");
@@ -243,6 +246,11 @@ async function main(): Promise<void> {
   const { recordSuccess, recordFailure, getStat, resetStatsForTesting } = await import("@/lib/openrouter/stats");
   const { selectChain } = await import("@/lib/openrouter/select");
   const { resetModelCache } = await import("@/lib/openrouter/models");
+  const { answerDateQuestion } = await import("@/lib/dates/intent");
+  const { extractDates } = await import("@/lib/dates/parse");
+  const { nowFacts, betweenFacts, leapYearFacts, addFacts } = await import("@/lib/dates/engine");
+  const { nowInZone } = await import("@/lib/dates/timezone");
+  const { isIdentityQuestion, identityText } = await import("@/lib/bot/identity");
 
   console.log("\n🤖 chat bot self-test (offline)\n");
   resetConfigCache();
@@ -412,6 +420,16 @@ async function main(): Promise<void> {
     );
     assertEqual(payload.data.openrouter.fallbackChain.join(","), "test/free-a:free,test/free-b:free", "fallback chain");
     assertEqual(payload.data.telegram.webhookUrl, "https://bot.example.com/api/telegram/webhook", "webhook url");
+  });
+
+  await test("the greeting and help mention the clinic and the date skills", () => {
+    const welcome = welcomeText("fa", "کاربر");
+    const help = helpText("fa");
+    assert(welcome.includes("کلینیک تست"), "welcome names the clinic");
+    assert(welcome.includes("تاریخ"), "welcome mentions dates");
+    assert(help.includes("کلینیک تست"), "help names the clinic");
+    assert(help.includes("شمسی") || help.includes("میلادی"), "help mentions the calendars");
+    assert(!welcome.includes('.,"') && !welcome.endsWith(","), "no stray punctuation in the greeting");
   });
 
   await test("Telegram: /start sends the greeting", async () => {
@@ -757,6 +775,266 @@ async function main(): Promise<void> {
       failFirstModel = false;
       resetStatsForTesting();
       resetModelCache();
+    }
+  });
+
+  /* ── 5. Identity ────────────────────────────────────────────────────── */
+
+  await test("who-are-you is recognised, in every common phrasing", () => {
+    for (const text of ["تو کی هستی؟", "چی هستی", "اسمت چیه", "خودتو معرفی کن", "who are you"]) {
+      assert(isIdentityQuestion(text), `"${text}" recognised`);
+    }
+    for (const text of ["سلام خوبی", "امروز چندمه", "حالم بده"]) {
+      assert(!isIdentityQuestion(text), `"${text}" is not an identity question`);
+    }
+  });
+
+  await test("the identity answer names the clinic, without asking any model", async () => {
+    resetSessionsForTesting();
+    calls.length = 0;
+
+    const result = await handleChat({ message: "تو کی هستی؟", sessionId: "s-id", locale: "fa" });
+
+    assertEqual(result.layer, "identity", "handled by the identity layer");
+    assertEqual(result.model, null, "no model was needed");
+    assert(result.reply.includes("کلینیک تست"), "names the clinic");
+    assert(result.reply.includes("دستیار"), "calls itself the assistant");
+    assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, 0, "no model call");
+    assert(identityText().includes("کلینیک تست"), "identityText uses the configured clinic");
+  });
+
+  /* ── 6. Reading dates ───────────────────────────────────────────────── */
+
+  const fixedNow = new Date("2026-11-09T12:00:00Z"); // Monday, 1405/08/18 in Tehran
+  const ref = nowInZone(fixedNow);
+
+  const oneDate = (text: string) => extractDates(text, ref)[0];
+
+  await test("every date format a Persian user actually types", () => {
+    const cases: Array<[string, string]> = [
+      ["1403/05/12", "2024-08-02"],
+      ["1403-05-12", "2024-08-02"],
+      ["1403.5.12", "2024-08-02"],
+      ["12/05/1403", "2024-08-02"],
+      ["۱۲ مرداد ۱۴۰۳", "2024-08-02"],
+      ["مرداد ۱۴۰۳", "2024-07-22"],
+      ["2024-08-15", "2024-08-15"],
+      ["15 August 2024", "2024-08-15"],
+      ["امروز", "2026-11-09"],
+      ["فردا", "2026-11-10"],
+      ["دیروز", "2026-11-08"],
+      ["پریروز", "2026-11-07"],
+      ["عید", "2027-03-21"],
+      ["۱۴۰۳", "2024-03-20"],
+    ];
+
+    for (const [text, expected] of cases) {
+      const parsed = oneDate(text);
+      const gregorian = parsed ? new Date(parsed.date.getTime()).toISOString().slice(0, 10) : "(none)";
+      // Compare on the Tehran-local date, not UTC: the instant is midnight in Tehran.
+      const local = parsed
+        ? `${parsed.date.getFullYear()}-${String(parsed.date.getMonth() + 1).padStart(2, "0")}-${String(parsed.date.getDate()).padStart(2, "0")}`
+        : "(none)";
+      assertEqual(local, expected, `"${text}" → ${expected} (got ${gregorian} utc / ${local} local)`);
+    }
+  });
+
+  await test("«پنجشنبه» is Thursday, not Saturday", () => {
+    const thursday = oneDate("پنجشنبه چندمه");
+    const saturday = oneDate("شنبه چندمه");
+    assertEqual(thursday?.date.getDay(), 4, "پنجشنبه = Thursday (4)");
+    assertEqual(saturday?.date.getDay(), 6, "شنبه = Saturday (6)");
+  });
+
+  await test("impossible dates are rejected instead of rolled over", () => {
+    assertEqual(extractDates("1403/07/31", ref).length, 0, "Mehr has 30 days");
+    assertEqual(extractDates("1403/12/31", ref).length, 0, "Esfand 1403 has 30 days");
+    assertEqual(extractDates("2023-02-30", ref).length, 0, "February 2023 has 28 days");
+    assert(extractDates("1399/12/30", ref).length === 1, "Esfand 1399 really has 30 days (leap)");
+  });
+
+  await test("an ordinary sentence that merely mentions a day is not a date question", () => {
+    assertEqual(answerDateQuestion("دیروز خیلی خسته بودم", fixedNow), null, "venting, not asking");
+    assertEqual(answerDateQuestion("شنبه تعطیله؟", fixedNow), null, "chatting about a holiday");
+    assertEqual(answerDateQuestion("حال تو چطوره", fixedNow), null, "small talk");
+    assert(answerDateQuestion("دیروز چه روزی بود", fixedNow) !== null, "an explicit question still works");
+  });
+
+  /* ── 7. The engine ──────────────────────────────────────────────────── */
+
+  await test("«now» reads the server clock in the configured zone", () => {
+    const facts = nowFacts(fixedNow);
+    assertEqual(facts.intent, "now", "intent");
+    assert(facts.summary.includes("۱۴۰۵/۰۸/۱۸") || facts.dates[0]?.jalali === "۱۴۰۵/۰۸/۱۸", `jalali ${facts.dates[0]?.jalali}`);
+    assert(facts.dates[0]?.gregorian === "2026-11-09", `gregorian ${facts.dates[0]?.gregorian}`);
+    assert((facts.time ?? "").startsWith("۱۵:۳۰"), `tehran time ${facts.time}`);
+    assert(facts.summary.includes("به وقت تهران"), "says which zone");
+    assert(facts.dates[0]?.hijri !== null, "hijri present");
+  });
+
+  await test("the same instant is a different day in Tehran than in UTC", () => {
+    const lateUtc = new Date("2026-11-09T21:30:00Z");
+    const tehran = nowInZone(lateUtc, "Asia/Tehran");
+    const utc = nowInZone(lateUtc, "UTC");
+    assertEqual(tehran.getDate(), 10, "already the 10th in Tehran");
+    assertEqual(utc.getDate(), 9, "still the 9th in UTC");
+  });
+
+  await test("a bad TIME_ZONE falls back instead of throwing", () => {
+    const zone = nowInZone(fixedNow, "Not/AZone");
+    assert(Number.isFinite(zone.getTime()), "still produced a date");
+  });
+
+  await test("converting a date gives all three calendars", () => {
+    const facts = answerDateQuestion("تبدیل 2024-08-15 به شمسی", fixedNow);
+    assertEqual(facts?.intent, "convert", "intent");
+    assertEqual(facts?.dates[0]?.jalali, "۱۴۰۳/۰۵/۲۵", "jalali");
+    assertEqual(facts?.dates[0]?.gregorian, "2024-08-15", "gregorian");
+    assertEqual(facts?.dates[0]?.hijri, "1446/02/11", "hijri");
+    assert((facts?.dates[0]?.hijriLong ?? "").includes("صفر"), `hijri month name: ${facts?.dates[0]?.hijriLong}`);
+  });
+
+  await test("the gap between two dates, in either order", () => {
+    const forward = answerDateQuestion("بین 1403/01/01 و 1403/01/10 چند روزه", fixedNow);
+    assertEqual(forward?.intent, "between", "intent");
+    assertEqual(forward?.days, 9, "9 days apart");
+
+    const backward = answerDateQuestion("بین 1403/01/10 و 1403/01/01 چند روزه", fixedNow);
+    assertEqual(backward?.days, 9, "order does not change the answer");
+
+    const facts = betweenFacts(
+      { date: ref, calendar: "jalali", raw: "", label: "امروز", source: "relative" },
+      { date: ref, calendar: "jalali", raw: "", label: "امروز", source: "relative" },
+    );
+    assertEqual(facts.days, 0, "the same day is zero days apart");
+  });
+
+  await test("counting days across a leap year boundary", () => {
+    const facts = answerDateQuestion("از 1403/12/29 تا 1404/01/02 چند روزه", fixedNow);
+    assertEqual(facts?.days, 3, "1403 is leap: 12/29 → 12/30 → 01/01 → 01/02");
+  });
+
+  await test("listing a range, and stopping when it is long", () => {
+    const short = answerDateQuestion("لیست روزهای بین 1403/01/01 و 1403/01/05", fixedNow);
+    assertEqual(short?.intent, "range", "intent");
+    assertEqual(short?.range?.length, 5, "five days listed");
+    assertEqual(short?.rangeTruncated, false, "not truncated");
+
+    const long = answerDateQuestion("لیست روزهای بین 1403/01/01 و 1403/12/29", fixedNow);
+    assertEqual(long?.range?.length, 31, "caps the list at 31");
+    assertEqual(long?.rangeTruncated, true, "says it was truncated");
+    assert((long?.rangeTotal ?? 0) > 31, "still reports the real total");
+  });
+
+  await test("adding and subtracting time uses Jalali months, not Gregorian", () => {
+    const plus = answerDateQuestion("۲۰ روز بعد از امروز", fixedNow);
+    assertEqual(plus?.intent, "add", "intent");
+    assert(plus?.dates[1]?.jalali === "۱۴۰۵/۰۹/۰۸", `20 days on: ${plus?.dates[1]?.jalali}`);
+
+    // Six months after 31 Farvardin must clamp to 30 Mehr, not 28.
+    const facts = addFacts(
+      { date: ref, calendar: "jalali", raw: "", label: "۱۴۰۳/۰۱/۳۱", source: "explicit" },
+      6,
+      "month",
+    );
+    void facts;
+    const clamped = answerDateQuestion("۶ ماه بعد از 1403/01/31", fixedNow);
+    assertEqual(clamped?.dates[1]?.jalali, "۱۴۰۳/۰۷/۳۰", "clamps to the last day of Mehr");
+
+    const minus = answerDateQuestion("۳ ماه قبل از عید", fixedNow);
+    assertEqual(minus?.intent, "add", "intent");
+    assert(minus?.summary.includes("قبل از"), "worded as before");
+  });
+
+  await test("month length and leap years, in the right calendar", () => {
+    const mehr = answerDateQuestion("مرداد ۱۴۰۳ چند روزه", fixedNow);
+    assertEqual(mehr?.intent, "monthLength", "intent");
+    assertEqual(mehr?.daysInMonth, 31, "Mordad has 31 days");
+
+    const esfand = answerDateQuestion("اسفند ۱۴۰۳ چند روزه", fixedNow);
+    assertEqual(esfand?.daysInMonth, 30, "Esfand 1403 has 30 days (leap year)");
+
+    const jalali = answerDateQuestion("۱۴۰۳ کبیسه است؟", fixedNow);
+    assertEqual(jalali?.isLeap, true, "1403 is a Jalali leap year");
+
+    const gregorian = answerDateQuestion("2024 کبیسه بود؟", fixedNow);
+    assertEqual(gregorian?.isLeap, true, "2024 is a Gregorian leap year");
+    assertEqual(gregorian?.daysInMonth, 29, "February 2024 has 29 days");
+
+    const plain = answerDateQuestion("2023 کبیسه بود؟", fixedNow);
+    assertEqual(plain?.isLeap, false, "2023 is not");
+
+    void leapYearFacts;
+  });
+
+  /* ── 8. Wiring: the model words it, the engine decides it ───────────── */
+
+  await test("the system prompt carries the clinic name and the server clock", () => {
+    const prompt = systemPrompt("fa", "دوشنبه ۱۸ آبان ۱۴۰۵");
+    assert(prompt.includes("کلینیک تست"), "clinic name");
+    assert(prompt.includes("دوشنبه ۱۸ آبان ۱۴۰۵"), "the clock line");
+    assert(prompt.includes("هرگز از حفظ نگو"), "forbids guessing dates");
+  });
+
+  await test("a date question reaches the model together with the computed facts", async () => {
+    resetSessionsForTesting();
+    calls.length = 0;
+
+    const facts = answerDateQuestion("امروز چندمه؟");
+    modelReply = `امروز ${facts?.dates[0]?.jalali} است`;
+
+    const result = await handleChat({ message: "امروز چندمه؟", sessionId: "s-now", locale: "fa" });
+
+    assertEqual(result.layer, "calendar", "calendar layer");
+    assertEqual(result.dateIntent, "now", "intent");
+    assertEqual(result.fellBackToDeterministic, false, "the model's wording was kept");
+    assert(result.reply.includes(facts?.dates[0]?.jalali ?? ""), "the computed date is in the answer");
+
+    const lastCall = calls.filter((call) => call.url.includes("chat/completions")).at(-1);
+    const sent = (lastCall?.body as { messages: Array<{ role: string; content: string }> }).messages;
+    assert(sent[0]?.content.includes("تاریخ و ساعت فعلی"), "the clock is in the system prompt");
+    assert(
+      sent.some((entry) => entry.role === "system" && entry.content.includes(`intent: ${facts?.intent ?? ""}`)),
+      "the computed facts were sent to the model",
+    );
+  });
+
+  await test("if the model changes a date, the computed answer wins", async () => {
+    resetSessionsForTesting();
+    const facts = answerDateQuestion("امروز چندمه؟");
+    modelReply = "فکر کنم سال ۱۳۹۰ باشه";
+
+    const result = await handleChat({ message: "امروز چندمه؟", sessionId: "s-garbled", locale: "fa" });
+
+    assertEqual(result.fellBackToDeterministic, true, "fallback engaged");
+    assertEqual(result.reply, facts?.summary, "the deterministic summary was sent");
+    modelReply = "سلام! خوشحالم که اینجایی. 🙂";
+  });
+
+  await test("a date answer survives every model failing", async () => {
+    resetSessionsForTesting();
+    failAllModels = true;
+    const facts = answerDateQuestion("تبدیل 2024-08-15 به شمسی");
+
+    try {
+      const result = await handleChat({ message: "تبدیل 2024-08-15 به شمسی", sessionId: "s-down", locale: "fa" });
+      assertEqual(result.status, "answered", "still answered");
+      assertEqual(result.layer, "calendar", "by the calendar layer");
+      assert(result.reply.includes("۱۴۰۳/۰۵/۲۵"), "with the right date");
+      assertEqual(result.reply, facts?.summary, "exactly the computed text");
+    } finally {
+      failAllModels = false;
+    }
+  });
+
+  await test("DATE_ASSISTANT=false turns the calendar layer off", async () => {
+    process.env.DATE_ASSISTANT = "false";
+    resetConfigCache();
+    try {
+      assertEqual(answerDateQuestion("امروز چندمه؟", fixedNow), null, "no date answer");
+    } finally {
+      process.env.DATE_ASSISTANT = "true";
+      resetConfigCache();
     }
   });
 
