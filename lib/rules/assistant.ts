@@ -153,13 +153,30 @@ export function isRulesRequestCandidate(message: string): boolean {
   return /قانون|قوانین|مقررات|rule|rules|polic(?:y|ies)/iu.test(message);
 }
 
-export function rulesCapabilitiesText(locale: "fa" | "en"): string {
+export function rulesCapabilitiesText(locale: "fa" | "en", enabled = false): string {
   const lines = RULE_CAPABILITIES.map((capability) =>
     `• ${capability.title[locale]}${capability.needsConfirm ? " 🔒" : ""} — ${capability.example[locale]}`,
   );
-  return locale === "en"
-    ? ["I can also manage rules:", "", ...lines, "", "🔒 Changes are only sent after your explicit confirmation."].join("\n")
-    : ["قوانین را هم می‌توانم مدیریت کنم:", "", ...lines, "", "🔒 تغییرها فقط پس از تأیید صریح تو ارسال می‌شوند."].join("\n");
+  if (locale === "en") {
+    return [
+      "I can also manage rules:",
+      "",
+      ...lines,
+      "",
+      enabled
+        ? "This connection has the authenticated rules assistant enabled. 🔒 Changes still require your explicit confirmation."
+        : "This is a library capability; the default chat and Telegram routes do not have the required authenticated session adapter enabled.",
+    ].join("\n");
+  }
+  return [
+    "قوانین را هم می‌توانم مدیریت کنم:",
+    "",
+    ...lines,
+    "",
+    enabled
+      ? "در این اتصال، دستیار قوانین با نشست احراز هویت‌شده فعال است. 🔒 تغییرها همچنان فقط پس از تأیید صریح تو انجام می‌شوند."
+      : "این قابلیت به‌صورت کتابخانه‌ای پیاده شده؛ مسیرهای پیش‌فرض chat و Telegram هنوز adapter نشستِ احراز هویت‌شده ندارند.",
+  ].join("\n");
 }
 
 function asRecord(value: unknown): ToolArguments | null {

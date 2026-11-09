@@ -1807,7 +1807,7 @@ async function main(): Promise<void> {
     assertEqual(cancelled.kind, "cancelled", "explicit cancel discards the proposal");
   });
 
-  await test("handleChat can opt into the library rules assistant without exposing secrets to the model", async () => {
+  await test("handleChat lists rules capabilities honestly with and without an authenticated integration", async () => {
     const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
       if (options.tools) {
         return {
@@ -1830,15 +1830,19 @@ async function main(): Promise<void> {
     assertEqual(result.layer, "rules", "rules tool flow is integrated into handleChat when injected");
     assertEqual(result.reply, "یک قانون فعال وجود دارد.", "AI answer is returned by the chat library");
 
-    const capabilities = await handleChat({
+    const defaultCapabilities = await handleChat({ message: "چه کارهایی بلدی؟", sessionId: "chat-rules-caps-default", locale: "fa" });
+    assert(defaultCapabilities.reply.includes("قوانین را هم می‌توانم مدیریت کنم"), "rules are listed even for the default route");
+    assert(defaultCapabilities.reply.includes("مسیرهای پیش‌فرض chat و Telegram هنوز"), "default integration limits are disclosed");
+    assert(defaultCapabilities.reply.includes("فهرست‌کردن قوانین"), "rules capabilities come from the rule capability list");
+
+    const activeCapabilities = await handleChat({
       message: "چه کارهایی بلدی؟",
-      sessionId: "chat-rules-caps",
+      sessionId: "chat-rules-caps-active",
       locale: "fa",
       rulesAssistant: assistant,
       ruleContext: RULE_CONTEXT,
     });
-    assert(capabilities.reply.includes("قوانین را هم می‌توانم مدیریت کنم"), "capabilities mention rules only when integration is enabled");
-    assert(capabilities.reply.includes("فهرست‌کردن قوانین"), "rules capabilities come from the rule capability list");
+    assert(activeCapabilities.reply.includes("در این اتصال، دستیار قوانین با نشست احراز هویت‌شده فعال است"), "enabled integration is described accurately");
   });
 
   await test("dummy rules validate, paginate, filter, and require confirmation for writes", async () => {
