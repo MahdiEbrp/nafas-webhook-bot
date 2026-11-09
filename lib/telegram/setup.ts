@@ -102,7 +102,8 @@ export async function ensureWebhook(options: { force?: boolean; dropPendingUpdat
     url: desiredUrl,
     secretToken: telegram.webhookSecret || undefined,
     dropPendingUpdates: options.dropPendingUpdates ?? false,
-    allowedUpdates: ["message", "callback_query"],
+    // Plain messages only: this bot has no inline buttons to press.
+    allowedUpdates: ["message"],
   });
 
   if (!registered.ok) {

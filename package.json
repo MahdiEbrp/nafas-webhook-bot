@@ -2,7 +2,7 @@
   "name": "nafas-webhook-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Backend-only Next.js (Vercel) AI bot that talks to the clinic webhooks API using free OpenRouter models. Persian-speaking, kid-simple answers.",
+  "description": "Persian-first conversational chat bot: a Next.js backend for Vercel that answers over HTTP and Telegram using free OpenRouter models.",
   "engines": {
     "node": ">=20"
   },
@@ -11,16 +11,10 @@
     "build": "next build",
     "start": "next start -p 3000",
     "typecheck": "tsc --noEmit",
-    "models": "tsx scripts/list-free-models.ts",
-    "build:catalog": "tsx scripts/build-catalog.ts",
-    "smoke": "tsx scripts/smoke-test.ts",
-    "mock-api": "node mock/webhooks-mock.mjs",
     "selftest": "tsx scripts/selftest.ts",
     "check": "tsc --noEmit && tsx scripts/selftest.ts",
-    "doctor": "tsx scripts/doctor.ts",
-    "telegram:setup": "tsx scripts/telegram-setup.ts",
-    "telegram:mock": "node mock/telegram-mock.mjs",
-    "demo": "node scripts/demo.mjs"
+    "models": "tsx scripts/list-free-models.ts",
+    "telegram:setup": "tsx scripts/telegram-setup.ts"
   },
   "dependencies": {
     "next": "^16.4.5",

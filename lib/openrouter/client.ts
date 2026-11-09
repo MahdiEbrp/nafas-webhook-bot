@@ -1,5 +1,5 @@
 /**
- * Minimal OpenRouter client tuned for FREE models.
+ * Minimal OpenRouter client tuned for FREE models — the bot's only brain.
  *
  * Free models on OpenRouter are rate limited (429) and sometimes momentarily
  * unavailable (5xx / empty content). A single call therefore walks a *chain* of
@@ -81,7 +81,7 @@ async function callOnce(
         "Content-Type": "application/json",
         // OpenRouter uses these for attribution / rankings.
         "HTTP-Referer": process.env.PUBLIC_APP_URL ?? "https://localhost",
-        "X-Title": "Clinic Webhook AI Bot",
+        "X-Title": "Nafas Chat Bot",
       },
       body: JSON.stringify({
         model,

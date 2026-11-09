@@ -13,19 +13,9 @@ export const maxDuration = 60;
 
 const chatBodySchema = z
   .object({
-    message: z.string().trim().min(1, "message is required").max(2000).default("تأیید می‌کنم"),
+    message: z.string().trim().min(1, "message is required").max(4000),
     sessionId: z.string().trim().min(1).max(100).optional(),
     locale: z.enum(["fa", "en"]).optional(),
-    /** answer to a confirmation card returned by a previous call */
-    confirm: z
-      .object({
-        token: z.string().trim().min(8).max(100),
-        approve: z.boolean(),
-      })
-      .strict()
-      .optional(),
-    /** describe a write instead of executing it (useful for previews/demos) */
-    dryRun: z.boolean().optional(),
   })
   .strict();
 
@@ -34,7 +24,7 @@ export const POST = withApiHandler(async (request) => {
   const origin = request.headers.get("origin");
 
   if (isOriginBlocked(origin)) {
-    throw new ApiError(403, "ORIGIN_NOT_ALLOWED", "This origin is not allowed to call the middleware.");
+    throw new ApiError(403, "ORIGIN_NOT_ALLOWED", "This origin is not allowed to call the bot.");
   }
 
   const limit = rateLimit(`chat:${clientKey(request)}`, config.chatRateLimit.limit, config.chatRateLimit.windowMs);
@@ -58,16 +48,13 @@ export const POST = withApiHandler(async (request) => {
     message: body.data.message,
     sessionId,
     locale: body.data.locale ?? config.defaultLocale,
-    confirm: body.data.confirm,
-    dryRun: body.data.dryRun,
   });
 
   logInfo("chat.handled", {
     sessionId,
     status: result.status,
-    actionId: result.actionId,
-    planner: result.trace.planner,
-    writer: result.trace.writer,
+    model: result.model,
+    contextMessages: result.contextMessages,
     ms: Date.now() - startedAt,
   });
 
@@ -81,15 +68,13 @@ export const GET = withApiHandler(async () =>
     endpoint: "POST /api/chat",
     body: {
       message: "string (Persian or English)",
-      sessionId: "string (optional, keeps context + confirmations)",
+      sessionId: "string (optional, keeps the conversation together)",
       locale: "'fa' | 'en' (optional)",
-      confirm: "{ token, approve } (optional, answers a confirmation card)",
-      dryRun: "boolean (optional, never execute writes)",
     },
     example: {
-      message: "نوبت‌های امروز رو نشون بده",
+      message: "سلام، حالت چطوره؟",
       sessionId: "demo-session",
     },
-    statuses: ["answered", "needs_info", "needs_confirmation", "done", "error"],
+    statuses: ["answered", "empty", "error"],
   }),
 );
