@@ -8,19 +8,29 @@
 
 import type { Locale } from "@/lib/config";
 
-/** A user is either usable or switched off. There is no third state. */
-export type UserStatus = "active" | "disabled";
-export type UserRole = "admin" | "doctor" | "reception" | "customer";
+/** The displayed state; the API keeps active and banned as separate flags. */
+export type UserStatus = "active" | "disabled" | "banned";
+/** Role keys are data-driven by the backend roles table. */
+export type UserRole = string;
 
 export type ManagedUser = {
   id: string;
-  firstName: string;
-  lastName: string;
+  /** Canonical API field; split names are optional legacy aliases. */
+  fullName: string;
+  firstName?: string;
+  lastName?: string;
   email: string;
-  role: UserRole;
-  /** Iranian mobile in stored form (`09XXXXXXXXX`), or null if never given. */
+  /** Canonical role field from the API; `role` is a legacy alias. */
+  roleKey: UserRole;
+  role?: UserRole;
+  /** A phone number with 7–15 digits, optionally prefixed with `+`. */
   phone: string | null;
-  status: UserStatus;
+  status?: UserStatus;
+  isActive: boolean;
+  isBanned: boolean;
+  bannedAt: string | null;
+  banReason: string | null;
+  deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -32,22 +42,27 @@ export type ManagedUser = {
  * there is no way to ask for a change that would corrupt the record.
  */
 export type UserPatch = {
+  fullName?: string;
   firstName?: string;
   lastName?: string;
   email?: string;
+  roleKey?: UserRole;
+  /** Legacy alias; live requests translate it to `roleKey`. */
   role?: UserRole;
   phone?: string | null;
-  status?: UserStatus;
+  status?: "active" | "disabled";
+  isActive?: boolean;
+  isBanned?: boolean;
+  banReason?: string | null;
 };
 
 /** Details required when creating an account. Password is never part of a user record. */
 export type UserCreateInput = {
-  firstName: string;
-  lastName: string;
+  fullName: string;
   email: string;
   phone: string;
   password: string;
-  role: UserRole;
+  roleKey: UserRole;
 };
 
 /** The three things that can be done to a whole list at once. */
@@ -57,6 +72,10 @@ export type BulkAction = "enable" | "disable" | "delete";
 export type PendingAction =
   | { kind: "create"; user: ManagedUser }
   | { kind: "edit"; userId: string; patch: UserPatch }
+  | { kind: "ban"; userId: string; reason: string | null }
+  | { kind: "unban"; userId: string }
+  | { kind: "password-change"; userId: string }
+  | { kind: "password-reset"; userId: string }
   | { kind: "delete"; userId: string }
   | { kind: "bulk"; action: BulkAction; userIds: string[] };
 
@@ -82,13 +101,17 @@ export type PendingChange = {
 export type ProposalFailure =
   | "invalid-name"
   | "invalid-email"
+  | "email-taken"
   | "invalid-password"
   | "invalid-role"
+  | "invalid-phone"
+  | "invalid-user-id"
+  | "invalid-ban-reason"
+  | "password-mismatch"
   | "not-found"
   | "no-change"
   | "empty-list"
-  | "unknown-action"
-  | "bad-phone";
+  | "unknown-action";
 
 export type Proposal =
   | { ok: true; change: PendingChange }
@@ -102,11 +125,15 @@ export type ConfirmResult =
       /** ids the change really applied to */
       applied: string[];
       /** ids it could not apply to, each with a reason */
-      failed: Array<{ id: string; reason: string }>;
+      failed: Array<{ id: string; reason: string; status?: number }>;
       /** true once the change reached a backend */
       sent: boolean;
       /** which backend carried it out */
       mode: "live" | "dummy";
+      /** Present after a live password reset; never written to logs. */
+      temporaryPassword?: string;
+      /** The API should set this for reset-password responses. */
+      passwordChangeRequired?: boolean;
     }
   | { ok: false; code: ConfirmFailure; message: string };
 
@@ -116,6 +143,8 @@ export type SearchResult = {
   live: boolean;
   /** set when the lookup failed; the list is then empty, not silently wrong */
   error?: string;
+  /** upstream HTTP status when a live lookup fails (401/403/404/429, etc.) */
+  status?: number;
 };
 
 /** One thing the class can do, in a shape both code and prose can use. */
