@@ -38,6 +38,8 @@ export type ChatInput = {
   rulesAssistant?: RulesAssistant;
   /** Fresh, authenticated caller context for this turn; never read from model text. */
   ruleContext?: RuleRequestContext;
+  /** Set only by the Telegram adapter after wiring the secure OTP login flow. */
+  otpLoginAvailable?: boolean;
 };
 
 export type ChatStatus = "answered" | "empty" | "error";
@@ -140,8 +142,13 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
    */
   if (isCapabilityQuestion(message)) {
     const userCapabilities = capabilityAnswer(locale);
+    const loginCapability = input.otpLoginAvailable
+      ? locale === "en"
+        ? "\n\n• Sign in to a Nafas account with an SMS one-time code — for example: “I want to log in.” Secure database storage must be configured."
+        : "\n\n• ورود به حساب نفس با کد یک‌بارمصرف پیامکی — مثلاً: «می‌خواهم لاگین کنم». ذخیره‌سازی امن باید پیکربندی شده باشد."
+      : "";
     const rulesEnabled = Boolean(input.rulesAssistant && input.ruleContext);
-    const reply = `${userCapabilities}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}`;
+    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}`;
 
     pushMessage(input.sessionId, "user", message, config.history.maxMessages);
     pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);

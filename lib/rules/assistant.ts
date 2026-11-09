@@ -165,7 +165,7 @@ export function rulesCapabilitiesText(locale: "fa" | "en", enabled = false): str
       "",
       enabled
         ? "This connection has the authenticated rules assistant enabled. 🔒 Changes still require your explicit confirmation."
-        : "This is a library capability; the default chat and Telegram routes do not have the required authenticated session adapter enabled.",
+        : "This request has no trusted authenticated session. Complete SMS sign-in in a private Telegram chat; the web chat route remains unauthenticated.",
     ].join("\n");
   }
   return [
@@ -175,7 +175,7 @@ export function rulesCapabilitiesText(locale: "fa" | "en", enabled = false): str
     "",
     enabled
       ? "در این اتصال، دستیار قوانین با نشست احراز هویت‌شده فعال است. 🔒 تغییرها همچنان فقط پس از تأیید صریح تو انجام می‌شوند."
-      : "این قابلیت به‌صورت کتابخانه‌ای پیاده شده؛ مسیرهای پیش‌فرض chat و Telegram هنوز adapter نشستِ احراز هویت‌شده ندارند.",
+      : "این درخواست نشست احراز هویت معتبر ندارد. برای فعال‌کردن دستیار قوانین، در گفت‌وگوی خصوصی Telegram با پیامک وارد شو؛ مسیر وب chat همچنان context احراز هویت‌شده نمی‌پذیرد.",
   ].join("\n");
 }
 

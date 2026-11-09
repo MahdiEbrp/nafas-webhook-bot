@@ -32,6 +32,10 @@ import { resolveSessionId, setChatPhone } from "@/lib/db/chat-sessions";
 import { getRunner } from "@/lib/db/client";
 import { normalizeIranPhone } from "@/lib/phone";
 import { confirmPhoneText, ensurePhone } from "@/lib/telegram/phone-gate";
+import { EncryptedOtpLoginFlowStore } from "@/lib/auth/login-flow-store";
+import { SmsOtpClient } from "@/lib/auth/sms-otp";
+import { TelegramOtpLogin, isOtpCodeLikeMessage, isOtpLoginIntent, isPhoneNumberMessage } from "@/lib/auth/telegram-login";
+import { RulesAssistant } from "@/lib/rules/assistant";
 
 export type BridgeOutcome = {
   handled: boolean;
@@ -45,6 +49,22 @@ export type BridgeOutcome = {
 
 /** Telegram caps a message at 4096 characters; leave room for the ellipsis. */
 const MAX_TEXT = 3900;
+const otpClient = new SmsOtpClient();
+const otpLogin = new TelegramOtpLogin({ otpClient, flowStore: new EncryptedOtpLoginFlowStore() });
+const rulesAssistant = new RulesAssistant();
+
+function sixDigitCode(text: string): boolean {
+  return isOtpCodeLikeMessage(text);
+}
+
+function sensitiveOtpInput(text: string): boolean {
+  return sixDigitCode(text) || isPhoneNumberMessage(text);
+}
+
+const PRIVATE_LOGIN_ONLY: Record<Locale, string> = {
+  fa: "برای حفظ حریم خصوصی، ورود پیامکی فقط در گفت‌وگوی خصوصی با ربات انجام می‌شود؛ لطفاً در خصوصی بنویس «می‌خواهم لاگین کنم».",
+  en: "For privacy, SMS sign-in is available only in a private chat with the bot. Please message me privately and say “I want to log in.”",
+};
 
 /**
  * Whether the phone gate is in force.
@@ -113,12 +133,21 @@ async function processTextMessage(input: {
   userId: number;
   text: string;
   locale: Locale;
+  sessionId: string;
+  ruleContext: Awaited<ReturnType<SmsOtpClient["getRuleRequestContext"]>>;
   replyToMessageId?: number;
 }): Promise<BridgeOutcome> {
-  const { chatId, userId, text, locale, replyToMessageId } = input;
+  const { chatId, userId, text, locale, sessionId, ruleContext, replyToMessageId } = input;
   sendTyping(chatId);
 
-  const result = await handleChat({ message: text, sessionId: await sessionIdFor(userId), locale });
+  const result = await handleChat({
+    message: text,
+    sessionId,
+    locale,
+    rulesAssistant,
+    otpLoginAvailable: true,
+    ...(ruleContext ? { ruleContext } : {}),
+  });
 
   await replyText(chatId, result.reply, { replyToMessageId });
 
@@ -176,6 +205,24 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
 
   const text = (message.text ?? "").trim();
+  const authOwnerId = `telegram-user-${userId}`;
+
+  if (message.chat.type !== "private" && (isOtpLoginIntent(text) || sixDigitCode(text))) {
+    await replyText(chatId, PRIVATE_LOGIN_ONLY[locale], { replyToMessageId: message.message_id });
+    return { handled: true, chatId, status: "otp-private-only" };
+  }
+
+  if (message.chat.type === "private" && text) {
+    const loginResult = await otpLogin.handle(authOwnerId, text, locale);
+    if (loginResult.handled) {
+      await replyText(chatId, loginResult.reply, { replyToMessageId: message.message_id });
+      return { handled: true, chatId, status: loginResult.status, text: loginResult.reply };
+    }
+  }
+
+  const ruleContext = message.chat.type === "private"
+    ? await otpClient.getRuleRequestContext(authOwnerId)
+    : null;
 
   /* ── 3. The phone gate ─────────────────────────────────────────────────
    *
@@ -189,7 +236,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
    * chat id for TELEGRAM_ALLOWED_CHAT_IDS. Gating it would make the allowlist
    * impossible to set up, with no way back in.
    */
-  if (gateActive() && !/^\/id\b/.test(text)) {
+  if (gateActive() && !ruleContext && !/^\/id\b/.test(text)) {
     const say = async (
       line: string,
       options: { replyMarkup?: Record<string, unknown> } = {},
@@ -218,6 +265,14 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     });
 
     if (!gate.pass) return { handled: true, chatId, status: gate.status };
+  }
+
+  if (text && sensitiveOtpInput(text)) {
+    const reply = message.chat.type === "private"
+      ? locale === "en" ? "Start by saying “I want to log in” before sending a phone number or SMS code." : "پیش از فرستادن شماره یا کد پیامک، بنویس «می‌خواهم لاگین کنم»."
+      : PRIVATE_LOGIN_ONLY[locale];
+    await replyText(chatId, reply, { replyToMessageId: message.message_id });
+    return { handled: true, chatId, status: "otp-login-required" };
   }
 
   if (!text) {
@@ -273,5 +328,5 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     return { handled: true, chatId, status: "id" };
   }
 
-  return await processTextMessage({ chatId, userId, text, locale, replyToMessageId: message.message_id });
+  return await processTextMessage({ chatId, userId, text, locale, sessionId: await sessionIdFor(userId), ruleContext, replyToMessageId: message.message_id });
 }
