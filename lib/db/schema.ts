@@ -1,15 +1,20 @@
 /**
  * Schema, applied lazily and idempotently.
  *
- * Every statement is `IF NOT EXISTS`, so booting a second instance, redeploying,
- * or running `npm run db:check` twice changes nothing. There is no migration
- * tool on purpose: this project has one small table, and a migration framework
- * would be more machinery than the schema.
+ * Every statement is guarded or conditional, so booting a second instance,
+ * redeploying, or running `npm run db:check` twice changes nothing. There is no
+ * migration tool on purpose: these small tables do not justify one.
  */
 
 import type { SqlRunner } from "./client";
 
 export const TABLE_NAME = "chat_sessions";
+export const AUTH_SESSION_TABLE_NAME = "auth_sessions";
+
+/**
+ * Only an HMAC actor lookup key and authenticated ciphertext are persisted here.
+ * The upstream cookie, CSRF token, and actor id are never plaintext columns.
+ */
 
 /**
  * One row per Telegram user.
@@ -68,6 +73,14 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
    * moment a chat writes in, which is before we have its number.
    */
   `alter table ${TABLE_NAME} add column if not exists phone text`,
+  `create table if not exists ${AUTH_SESSION_TABLE_NAME} (
+     actor_id_hash     text        primary key,
+     encrypted_payload text        not null,
+     expires_at        timestamptz not null,
+     created_at        timestamptz not null default now(),
+     updated_at        timestamptz not null default now()
+   )`,
+  `create index if not exists ${AUTH_SESSION_TABLE_NAME}_expires_at_idx on ${AUTH_SESSION_TABLE_NAME} (expires_at)`,
   `create index if not exists ${TABLE_NAME}_session_id_idx on ${TABLE_NAME} (session_id)`,
   `create index if not exists ${TABLE_NAME}_phone_idx on ${TABLE_NAME} (phone)`,
 ];
