@@ -2123,9 +2123,9 @@ async function main(): Promise<void> {
     assertEqual(result.reply, "یک قانون فعال وجود دارد.", "AI answer is returned by the chat library");
 
     const defaultCapabilities = await handleChat({ message: "چه کارهایی بلدی؟", sessionId: "chat-rules-caps-default", locale: "fa" });
-    assert(defaultCapabilities.reply.includes("قوانین را هم می‌توانم مدیریت کنم"), "rules are listed even for the default route");
+    assert(defaultCapabilities.reply.includes("قوانین را هم می‌توانم فهرست و مدیریت کنم"), "rules are listed even for the default route");
     assert(defaultCapabilities.reply.includes("این درخواست نشست احراز هویت معتبر ندارد"), "default integration limits are disclosed");
-    assert(defaultCapabilities.reply.includes("فهرست‌کردن قوانین"), "rules capabilities come from the rule capability list");
+    assert(defaultCapabilities.reply.includes("فهرست و مدیریت"), "the short answer summarizes rules capabilities");
 
     const activeCapabilities = await handleChat({
       message: "چه کارهایی بلدی؟",
@@ -2144,6 +2144,8 @@ async function main(): Promise<void> {
     });
     assert(telegramCapabilities.reply.includes("ورود به حساب نفس با کد یک‌بارمصرف پیامکی"), "Telegram capabilities disclose the OTP login flow");
     assert(telegramCapabilities.reply.includes("می‌خواهم لاگین کنم"), "capabilities show the natural-language login example");
+    assert(telegramCapabilities.reply.includes("ایمیل") && telegramCapabilities.reply.includes("پرداخت"), "the concise summary includes current email and payment tools");
+    assert(telegramCapabilities.reply.length < 500, "the complete Telegram capability answer stays brief");
   });
 
   await test("dummy rules validate, paginate, filter, and require confirmation for writes", async () => {
@@ -3286,21 +3288,19 @@ async function main(): Promise<void> {
     assertEqual(confirmRequiredIds().sort().join(","), MUTATING_IDS.slice().sort().join(","), "the mutating set matches");
   });
 
-  await test("the capability prose names every ability, in both languages", () => {
+  await test("the user-facing capability answer is concise while the system prompt retains exact details", () => {
     for (const locale of ["fa", "en"] as const) {
       const text = capabilitiesText(locale);
-      for (const capability of CAPABILITIES) {
-        assert(text.includes(capability.title[locale]), `${locale}: lists ${capability.id}`);
-      }
-      assert(text.includes("🔒"), `${locale}: explains the confirmation mark`);
+      assert(text.length < 300, `${locale}: answer stays brief`);
+      assert(text.includes(locale === "fa" ? "تأیید" : "confirmation"), `${locale}: still explains the confirmation boundary`);
 
       const block = capabilitiesPromptBlock(locale);
       for (const capability of CAPABILITIES) {
-        assert(block.includes(capability.title[locale]), `${locale}: prompt lists ${capability.id}`);
+        assert(block.includes(capability.title[locale]), `${locale}: detailed system prompt retains ${capability.id}`);
       }
       assert(block.includes(String(MUTATING_IDS.length)), `${locale}: prompt counts the mutating ones`);
     }
-    assertEqual(capabilityAnswer("fa"), capabilitiesText("fa"), "the answer is the list");
+    assertEqual(capabilityAnswer("fa"), capabilitiesText("fa"), "the answer is the short summary");
     assertEqual(capabilityAnswer(), capabilitiesText("fa"), "and it defaults to Persian");
   });
 
@@ -3321,20 +3321,19 @@ async function main(): Promise<void> {
     const result = await handleChat({ message: "چه کارهایی بلدی؟", sessionId: "cap-1", locale: "fa" });
     assertEqual(result.layer, "users", "answered by the users layer");
     assertEqual(result.model, null, "without asking a model");
-    for (const capability of CAPABILITIES) {
-      assert(result.reply.includes(capability.title.fa), `the reply lists ${capability.id}`);
-    }
-    assert(result.reply.includes("🔒"), "and the confirmation promise");
+    assert(result.reply.includes("کاربران"), "the concise answer summarizes account management");
+    assert(result.reply.includes("تأیید"), "and retains the confirmation promise");
+    assert(result.reply.length < 500, "the answer does not dump every operation");
   });
 
   await test("the system prompt tells the model what it may claim", async () => {
     const { systemPrompt } = await import("@/lib/bot/prompt");
     for (const locale of ["fa", "en"] as const) {
       const prompt = systemPrompt(locale, "الان ۱۴۰۵ است");
-      assert(prompt.includes("حساب‌های کاربری") || prompt.includes("user accounts"), `${locale}: mentions user management`);
+      assert(prompt.includes(locale === "fa" ? "حساب‌های کاربری" : "user-account"), `${locale}: mentions user management`);
       assert(
-        prompt.includes("متصل نیست") || prompt.includes("NOT connected"),
-        `${locale}: lists the abilities`,
+        prompt.includes(locale === "fa" ? "مستقیماً به مدل وصل نیست" : "NOT directly connected"),
+        `${locale}: states the model is not an admin integration`,
       );
     }
   });
@@ -3374,6 +3373,23 @@ async function main(): Promise<void> {
     await deleteMessage(777, 42);
     const request = calls.filter(call => call.url.endsWith("/deleteMessage")).at(-1)!;
     assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
+  });
+
+  await test("All email admin API contracts and secure confirmed workflows", async () => {
+    const { testEmailAdmin } = await import("./email-admin-test");
+    await testEmailAdmin();
+  });
+
+  await test("Telegram email management is private, authenticated, and keeps address input out of the model", async () => {
+    const before = calls.length;
+    const result = await handleTelegramUpdate(telegramUpdate({ text: "گزارش ایمیل را نشان بده" }));
+    assertEqual(result.status, "email-auth-required", "email admin requires login");
+    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/api/v1/admin/email")), "no model or email API call without authentication");
+    const group = await handleTelegramUpdate(telegramUpdate({ text: "گزارش ایمیل را نشان بده", chat: { id: -100200300, type: "group" } }));
+    assertEqual(group.status, "email-private-only", "email management is private-only");
+    const address = await handleTelegramUpdate(telegramUpdate({ text: "ایمیل به private@example.test بفرست" }));
+    assertEqual(address.status, "email-auth-required", "recipient addresses are intercepted before the model");
+    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/api/v1/admin/email")), "email addresses never reach model or API before authorized confirmation");
   });
 
   await test("All payment admin API contracts and secure confirmed workflows", async () => {

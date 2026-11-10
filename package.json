@@ -25,7 +25,8 @@
     "coverage": "c8 --experimental-monocart --all --include \"lib/users/**\" --exclude \"lib/users/types.ts\" --check-coverage --lines 100 --functions 100 --branches 100 --statements 100 --reporter text tsx scripts/selftest.ts",
     "sms:test": "tsx scripts/sms-admin-test.ts",
     "settings:test": "tsx scripts/settings-admin-test.ts",
-    "payment:test": "tsx scripts/payment-admin-test.ts"
+    "payment:test": "tsx scripts/payment-admin-test.ts",
+    "email:test": "tsx scripts/email-admin-test.ts"
   },
   "dependencies": {
     "@date-fns/tz": "^1.5.0",
