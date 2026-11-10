@@ -125,7 +125,7 @@ async function replyText(
 ): Promise<void> {
   await sendMessage({
     chatId,
-    text: truncateAtSentence(text, MAX_TEXT),
+    text,
     ...(options.replyToMessageId ? { replyToMessageId: options.replyToMessageId } : {}),
   });
 }
@@ -221,16 +221,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const usersResult = await telegramUsers.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (usersResult) {
     // Account details and temporary passwords are never added to model history.
-    // Do not truncate account lists or temporary reset passwords mid-record.
-    let chunk = "";
-    for (const line of usersResult.reply.split("\n")) {
-      if (chunk && chunk.length + line.length + 1 > MAX_TEXT) {
-        await replyText(chatId, chunk);
-        chunk = "";
-      }
-      chunk += (chunk ? "\n" : "") + line;
-    }
-    if (chunk) await replyText(chatId, chunk);
+    await sendMessage({ chatId, text: usersResult.reply });
     return { handled: true, chatId, status: usersResult.status };
   }
 

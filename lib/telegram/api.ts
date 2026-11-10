@@ -13,6 +13,7 @@
 import { getConfig } from "@/lib/config";
 import { logWarn } from "@/lib/log";
 import { truncate } from "@/lib/text";
+import { formatTelegramText, telegramChunks } from "./format";
 
 export type TelegramUser = { id: number; is_bot: boolean; first_name: string; username?: string };
 export type TelegramChat = { id: number; type: string; first_name?: string; username?: string; title?: string };
@@ -139,20 +140,26 @@ export function deleteWebhook(): Promise<TelegramResult<true>> {
 
 /* ────────────────────────────── messaging ───────────────────────────── */
 
-export function sendMessage(input: {
+export async function sendMessage(input: {
   chatId: number;
   text: string;
   replyToMessageId?: number;
   replyMarkup?: Record<string, unknown>;
 }): Promise<TelegramResult<TelegramMessage>> {
-  return call<TelegramMessage>("sendMessage", {
-    chat_id: input.chatId,
-    text: truncate(input.text, 4000),
-    // No parse_mode on purpose: Persian text must never break parsing.
-    link_preview_options: { is_disabled: true },
-    ...(input.replyToMessageId ? { reply_to_message_id: input.replyToMessageId } : {}),
-    ...(input.replyMarkup ? { reply_markup: input.replyMarkup } : {}),
-  });
+  const formatted = formatTelegramText(input.text);
+  let result!: TelegramResult<TelegramMessage>;
+  for (const chunk of telegramChunks(formatted.text, formatted.entities)) {
+    result = await call<TelegramMessage>("sendMessage", {
+      chat_id: input.chatId,
+      text: chunk.text,
+      ...(chunk.entities.length ? { entities: chunk.entities } : {}),
+      link_preview_options: { is_disabled: true },
+      ...(input.replyToMessageId ? { reply_to_message_id: input.replyToMessageId } : {}),
+      ...(input.replyMarkup ? { reply_markup: input.replyMarkup } : {}),
+    });
+    if (!result.ok) break;
+  }
+  return result;
 }
 
 /* ────────────────────────────── keyboard ────────────────────────────── */

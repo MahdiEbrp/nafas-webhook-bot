@@ -3354,6 +3354,18 @@ async function main(): Promise<void> {
     }
   });
 
+  await test("Telegram formatting preserves identifiers and uses native entities", async () => {
+    const { testTelegramFormatting } = await import("./telegram-format-test");
+    testTelegramFormatting();
+    const { sendMessage } = await import("@/lib/telegram/api");
+    await sendMessage({ chatId: 777, text: "**👥 کاربران**\nصفحه: 12" });
+    const request = calls.filter(call => call.url.endsWith("/sendMessage")).at(-1)!;
+    const payload = request.body as { text: string; entities?: Array<{ type: string }>; parse_mode?: string };
+    assert(payload.text.includes("۱۲"), "Persian display digits");
+    assert(payload.entities?.some(entity => entity.type === "bold"), "native Telegram bold entity");
+    assertEqual(payload.parse_mode, undefined, "external text is not parsed as HTML/Markdown");
+  });
+
   await test("beauty-clinic users API contract and Telegram confirmations", async () => {
     const { testUsersContract } = await import("./users-contract-test");
     await testUsersContract();
