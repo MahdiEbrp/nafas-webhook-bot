@@ -485,13 +485,14 @@ export class RuleManager {
         };
       }
       const body = isRecord(result.body) ? result.body : {};
-      const users = Array.isArray(body.users) ? body.users : Array.isArray(body) ? body : [];
-      const pagination = isRecord(body.pagination) ? body.pagination : body;
+      // beauty-clinic returns { items: [...], total, page, perPage, totalPages }
+      const items = Array.isArray(body.items) ? body.items : [];
+      const pagination = isRecord(body) ? body : {};
       return {
-        users: users.filter((u: unknown) => isRecord(u) && typeof (u as Record<string, unknown>).id === "string") as User[],
+        users: items.filter((u: unknown) => isRecord(u) && typeof (u as Record<string, unknown>).id === "string") as User[],
         page: typeof pagination.page === "number" ? pagination.page : 1,
         perPage: typeof pagination.perPage === "number" ? pagination.perPage : 10,
-        total: typeof pagination.total === "number" ? pagination.total : users.length,
+        total: typeof pagination.total === "number" ? pagination.total : items.length,
         live: true,
         requestId: result.requestId,
       };
