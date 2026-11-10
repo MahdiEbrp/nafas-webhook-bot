@@ -3376,6 +3376,11 @@ async function main(): Promise<void> {
     assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
   });
 
+  await test("SMS API contracts and secure confirmed conversational operations", async () => {
+    const { testSmsAdmin } = await import("./sms-admin-test");
+    await testSmsAdmin();
+  });
+
   await test("social-links API contract and confirmed conversational operations", async () => {
     const { testSocialLinks } = await import("./social-links-test");
     await testSocialLinks();

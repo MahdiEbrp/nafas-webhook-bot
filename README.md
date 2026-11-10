@@ -737,3 +737,37 @@ rules یا رمز حساب) نباید به‌اشتباه درخواست تغی
 آزمون: `npm run social-links:test`. تست‌ها با fetch و مدل ساختگی اجرا می‌شوند؛
 هیچ دادهٔ واقعی یا تنظیمات محیط عملیاتی تغییر نمی‌کند. متغیر جدید لازم نیست؛
 `NAFAS_API_BASE_URL` و ورود امن موجود استفاده می‌شوند. وب‌چت تغییر نکرده است.
+
+### Telegram SMS administration
+
+Authenticated private Telegram conversations support the actual `/api/v1/admin/sms/*`
+API: overview, paginated messages/providers/templates/received/recipients, provider
+and template creation/read/update/delete, provider diagnostics, delivery synchronization,
+received-message refresh, sending and provider tests. There is no root GET, individual
+message GET or bulk endpoint. Natural examples: «آمار پیامک را نشان بده»،
+«سرویس‌های پیامک را نشان بده»، «پیامک بفرست»، «قالب پیامک جدید بساز».
+
+Sending, testing and all mutations require explicit single-use confirmation. Tests are
+real potentially billable sends. Delivery synchronization does not resend. Deleting a
+message removes its report, not the already-sent SMS. Received refresh can mark messages
+read at SMS.ir and is never automatic. Sending uses a server-generated idempotency key;
+there are no automatic retries. After uncertain network results, inspect reports before
+starting a new send (a new flow has a new key).
+
+Guided sends collect exact recipients/text/options locally without the model. Provider
+creation and token changes collect credentials locally, request deletion of incoming
+secret messages, and omit secrets from previews, model input and history. Creation uses
+the source defaults (active, not default), without automatically changing
+the default provider. Only whitelisted response fields are exposed; provider URLs,
+credential metadata, raw upstream error messages and tokens are excluded. Lists passed
+to the planner contain only ids, titles and resource types. Provider URL validation is
+HTTPS-only and rejects literal local/private addresses, but is not DNS-rebinding
+protection: the upstream provider adapter must enforce network policy.
+
+Drafts/confirmations are process-local, session-bound, expire after five minutes and are
+not durable across cold starts or multiple instances. Approval is not an atomic upstream
+compare-and-swap: concurrent provider/template changes can affect execution. Template
+previews render the current template during proposal and re-read it on approval, rejecting
+changes. This is still not an immutable revision or an atomic concurrency guarantee.
+Optional provider credentials can be omitted, not cleared through this wizard. No real
+SMS is sent by tests. Run `npm run sms:test` or the full `npm run check`.
