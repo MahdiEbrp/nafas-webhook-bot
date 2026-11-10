@@ -34,6 +34,7 @@ export function isUserManagementMessage(text: string): boolean {
  */
 export class TelegramUsers {
   private flows = new Map<string, Flow>();
+  clear(owner: string): void { this.flows.delete(owner); this.lists.delete(owner); this.awaiting.delete(owner); }
   private lists = new Map<string, { actor: string; session: string; expires: number; choices: UserChoice[]; query: Record<string, unknown> }>();
   private awaiting = new Map<string, { actor: string; session: string; expires: number; request: string }>();
   constructor(private api = new ClinicUsersApi(), private now = Date.now, private planner: UserPlanner = planUserRequest) {}
