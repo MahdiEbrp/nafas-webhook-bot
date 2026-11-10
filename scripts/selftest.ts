@@ -349,6 +349,34 @@ async function main(): Promise<void> {
     assertEqual(messages[3]?.role, "user", "then the new message");
   });
 
+  await test("default context includes twenty previous exchanges, in order and isolated", async () => {
+    const previous = process.env.HISTORY_MESSAGES;
+    try {
+      delete process.env.HISTORY_MESSAGES;
+      resetConfigCache();
+      resetSessionsForTesting();
+      assertEqual(getConfig().history.maxMessages, 40, "default is twenty pairs");
+      await handleChat({ message: "unrelated private session", sessionId: "other-history" });
+      for (let i = 0; i < 21; i++) {
+        await handleChat({ message: `context marker ${i}`, sessionId: "twenty-history" });
+      }
+      const result = await handleChat({ message: "continue please", sessionId: "twenty-history" });
+      assertEqual(result.contextMessages, 40, "twenty previous exchanges sent");
+      const last = calls.filter(c => c.url.includes("chat/completions")).at(-1);
+      const messages = (last?.body as { messages: Array<{ role: string; content: string }> }).messages;
+      assertEqual(messages.length, 42, "system plus forty history messages plus current request");
+      assertEqual(messages[1]?.content, "context marker 1", "oldest exchange evicted");
+      assertEqual(messages[39]?.content, "context marker 20", "most recent user message included");
+      assertEqual(messages[41]?.content, "continue please", "current request comes last");
+      assert(!messages.some(m => m.content.includes("unrelated private session")), "sessions isolated");
+    } finally {
+      if (previous === undefined) delete process.env.HISTORY_MESSAGES;
+      else process.env.HISTORY_MESSAGES = previous;
+      resetConfigCache();
+      resetSessionsForTesting();
+    }
+  });
+
   await test("the memory window is capped and never starts with the assistant", async () => {
     resetSessionsForTesting();
     for (const text of ["یک", "دو", "سه", "چهار", "پنج"]) {
