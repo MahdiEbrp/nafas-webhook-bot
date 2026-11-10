@@ -1,7 +1,7 @@
 /** Shapes shared by the rules client and its proposal/confirmation flow. */
 
 export type RuleLocale = "fa" | "en";
-export type RuleStatusFilter = "all" | "active" | "inactive" | "banned";
+export type RuleStatusFilter = "all" | "active" | "inactive";
 export type RuleStatus = "active" | "inactive";
 
 export type RuleTranslation = {
@@ -201,6 +201,7 @@ export type RuleConfirmResult =
   | {
       ok: true;
       applied: string[];
+      appliedCount?: number;
       failed: Array<{ id: string; reason: string; status?: number }>;
       sent: boolean;
       mode: "live" | "dummy";

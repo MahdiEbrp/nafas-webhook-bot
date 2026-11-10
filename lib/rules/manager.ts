@@ -55,6 +55,7 @@ type HttpResult = {
 
 type ApplyOutcome = {
   applied: string[];
+  appliedCount?: number;
   failed: Array<{ id: string; reason: string; status?: number }>;
   error?: string;
   status?: number;
@@ -163,10 +164,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function validContext(value: unknown): value is RuleRequestContext {
-  return isRecord(value)
-    && typeof value.actorId === "string" && value.actorId.trim().length > 0
-    && typeof value.sessionCookie === "string" && value.sessionCookie.trim().length > 0
-    && typeof value.csrfToken === "string" && value.csrfToken.trim().length > 0;
+  return validReadContext(value);
 }
 
 function validReadContext(value: unknown): value is RuleRequestContext {
@@ -350,12 +348,13 @@ function validateBulk(input: RuleBulkInput): Normalized<RuleBulkInput> {
     return { ok: true, value: { action: input.action as RuleBulkAction, scope: "page", ids: [...input.ids] } };
   }
   if (input.scope === "filtered") {
-    if (!isRecord(input.filters)) return { ok: false, code: "invalid-scope" };
-    const filterKeys = Object.keys(input.filters);
+    const filters = input.filters ?? {};
+    if (!isRecord(filters)) return { ok: false, code: "invalid-scope" };
+    const filterKeys = Object.keys(filters);
     if (filterKeys.some((key) => key !== "search" && key !== "status")) return { ok: false, code: "invalid-scope" };
     const normalized = normalizeListQuery({
-      ...(input.filters.search === undefined ? {} : { search: input.filters.search as string }),
-      ...(input.filters.status === undefined ? {} : { status: input.filters.status as RuleStatusFilter }),
+      ...(filters.search === undefined ? {} : { search: filters.search as string }),
+      ...(filters.status === undefined ? {} : { status: filters.status as RuleStatusFilter }),
     });
     if (!normalized.ok) return normalized;
     return {
@@ -376,6 +375,7 @@ function validateBulk(input: RuleBulkInput): Normalized<RuleBulkInput> {
 function listPayload(body: unknown): { rules: Rule[]; page?: number; perPage?: number; total?: number } | null {
   if (Array.isArray(body)) return { rules: body as Rule[] };
   if (!isRecord(body)) return null;
+  if (isRecord(body.data)) return listPayload(body.data);
   const candidate = body.rules ?? body.data ?? body.items;
   if (Array.isArray(candidate)) {
     const pagination = isRecord(body.pagination) ? body.pagination : body;
@@ -680,7 +680,7 @@ export class RuleManager {
       if (found.status && found.status !== 404) return this.refuse("request-failed", found.status, found.requestId);
       return this.refuse("not-found", found.status, found.requestId);
     }
-    return this.hold({ kind: "update", id, patch: normalized.value }, `ویرایش قانون ${found.rule.slug}`, context);
+    return this.hold({ kind: "update", id, patch: normalized.value }, `ویرایش قانون «${found.rule.translations?.fa?.name ?? found.rule.slug}»\n• شناسه: ${id}`, context);
   }
 
   async proposeDelete(id: string, context?: RuleRequestContext): Promise<RuleProposal> {
@@ -691,7 +691,7 @@ export class RuleManager {
       if (found.status && found.status !== 404) return this.refuse("request-failed", found.status, found.requestId);
       return this.refuse("not-found", found.status, found.requestId);
     }
-    return this.hold({ kind: "delete", id }, `حذف قانون ${found.rule.slug}`, context);
+    return this.hold({ kind: "delete", id }, `حذف قانون «${found.rule.translations?.fa?.name ?? found.rule.slug}»\n• شناسه: ${id}`, context);
   }
 
   async proposeBulk(input: RuleBulkInput, context?: RuleRequestContext): Promise<RuleProposal> {
@@ -775,8 +775,8 @@ export class RuleManager {
     }
     const outcome = change.action.kind === "update-user-status" || change.action.kind === "soft-delete-user" || change.action.kind === "bulk-users"
       ? await this.applyLiveUser(change.action, context)
-      : await this.applyLive(change.action, context);
-    return { ok: true, ...outcome, sent: true, mode: this.isLive ? "live" : "dummy" };
+      : this.isLive ? await this.applyLive(change.action, context) : this.applyDummy(change.action);
+    return { ok: true, ...outcome, sent: this.isLive, mode: this.isLive ? "live" : "dummy" };
   }
 
   private refuse(code: RuleProposalFailure, status?: number, requestId?: string): RuleProposal {
@@ -912,20 +912,25 @@ export class RuleManager {
       const bulkAction = action as { kind: "bulk"; input: RuleBulkInput };
       const result = await this.request("/api/v1/rules/bulk", { method: "POST", body: bulkAction.input }, context);
       if (result.ok) {
-        const body = isRecord(result.body) ? result.body : {};
-        const applied = Array.isArray(body.applied) ? body.applied.map(String) : bulkAction.input.scope === "page" ? [...bulkAction.input.ids] : [];
-        const failed = Array.isArray(body.failed)
-          ? body.failed.map((item) => {
-              const record = isRecord(item) ? item : {};
-              return { id: String(record.id ?? ""), reason: String(record.reason ?? "failed") };
-            })
-          : [];
-        return { applied, failed, requestId: result.requestId };
+        const envelope = isRecord(result.body) ? result.body : {};
+        const body = isRecord(envelope.data) ? envelope.data : envelope;
+        if ((!Number.isInteger(body.succeeded) || !Number.isInteger(body.requested) || !Array.isArray(body.failures)) && !Array.isArray(body.applied)) {
+          const ids = bulkAction.input.scope === "page" ? bulkAction.input.ids : [""];
+          return { applied: [], failed: ids.map(id => ({ id, reason: "invalid bulk response" })), requestId: result.requestId };
+        }
+        const failures = Array.isArray(body.failures) ? body.failures : body.failed;
+        const failed = Array.isArray(failures) ? failures.map(item => {
+          const record = isRecord(item) ? item : {};
+          return { id: String(record.id ?? ""), reason: String(record.code ?? record.reason ?? "OPERATION_FAILED") };
+        }) : [];
+        const applied = Array.isArray(body.applied) ? body.applied.map(String)
+          : bulkAction.input.scope === "page" ? bulkAction.input.ids.filter(id => !failed.some(entry => entry.id === id)) : [];
+        return { applied, failed, ...(typeof body.succeeded === "number" ? { appliedCount: body.succeeded } : {}), requestId: result.requestId };
       }
       const ids = bulkAction.input.scope === "page" ? bulkAction.input.ids : [];
       return {
         applied: [],
-        failed: ids.map((id) => ({ id, reason: result.reason, status: result.status })),
+        failed: (ids.length ? ids : [""]).map((id) => ({ id, reason: result.reason, status: result.status })),
         requestId: result.requestId,
       };
     }
@@ -976,6 +981,7 @@ export class RuleManager {
           Accept: "application/json",
           "Content-Type": "application/json",
           Cookie: context.sessionCookie,
+          Origin: new URL(this.baseUrl).origin,
           ...(context.csrfToken ? { "X-CSRF-Token": context.csrfToken } : {}),
         },
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
