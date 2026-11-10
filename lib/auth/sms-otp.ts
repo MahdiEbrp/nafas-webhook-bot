@@ -3,6 +3,11 @@ import { logWarn } from "@/lib/log";
 
 import { authSessionStore, type AuthSessionStore } from "./session-store";
 
+const BASIC_AUTH =
+  process.env.WEBHOOK_USERNAME && process.env.WEBHOOK_PASSWORD
+    ? `Basic ${Buffer.from(`${process.env.WEBHOOK_USERNAME}:${process.env.WEBHOOK_PASSWORD}`).toString("base64")}`
+    : null;
+
 const DEFAULT_BASE_URL = "https://nafasbeautyclinic.ir";
 const PHONE_PATTERN = /^\+?[0-9]{7,15}$/u;
 const CODE_PATTERN = /^[0-9]{6}$/u;
@@ -268,7 +273,12 @@ export class SmsOtpClient {
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Origin: this.baseUrl,
+          ...(BASIC_AUTH ? { Authorization: BASIC_AUTH } : {}),
+        },
         body: JSON.stringify(body),
         cache: "no-store",
         credentials: "omit",
