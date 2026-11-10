@@ -140,6 +140,12 @@ async function callOnce(
 
     const choice = payload.choices?.[0];
     const content = choice?.message?.content?.trim() ?? "";
+    // Some providers put analysis in content instead of their reasoning field.
+    // Reject the whole completion and try the next model; never guess where a
+    // safe final answer begins inside a leaked or truncated analysis.
+    if (containsAnalysis(content)) {
+      throw new ModelCallError(502, model, "Completion contained analysis instead of a final answer");
+    }
     const toolCalls = choice?.message?.tool_calls?.filter((call) =>
       call.type === "function" && typeof call.id === "string"
       && typeof call.function?.name === "string" && typeof call.function?.arguments === "string",
@@ -274,4 +280,9 @@ export function parseJsonLoose<T = unknown>(content: string): T {
   }
 
   throw new Error("Model did not return parseable JSON");
+}
+
+/** Conservative detection of known provider analysis envelopes. */
+export function containsAnalysis(content: string): boolean {
+  return /<\/?(?:think|analysis|reasoning)>|(?:^|\n)\s*(?:\d+[.)]\s*)?(?:\*{0,2})(?:Analyze the Request|Analysis of the Request|Formulate the Response|Determine the Next Step|Refining against constraints|Final Polish|Drafting the Response)\b/iu.test(content);
 }
