@@ -3348,10 +3348,15 @@ async function main(): Promise<void> {
     for (const text of ["کاربر جدید بساز", "نمیخوام لاگین کنم کاربر جدید بساز", "شماره تماس : 09000000000"]) {
       const before = calls.length;
       const outcome = await handleTelegramUpdate(telegramUpdate({ text }));
-      assertEqual(outcome.status, "users-unavailable", "honest unsupported response");
+      assertEqual(outcome.status, "users-auth-required", "account changes require authenticated session");
       const outgoing = calls.slice(before);
       assert(!outgoing.some(call => call.url.includes("openrouter") || call.url.includes("/auth/otp/")), "no model or OTP call");
     }
+  });
+
+  await test("beauty-clinic users API contract and Telegram confirmations", async () => {
+    const { testUsersContract } = await import("./users-contract-test");
+    await testUsersContract();
   });
 
   await test("negative login requests never start OTP", async () => {
@@ -3362,13 +3367,13 @@ async function main(): Promise<void> {
     assertEqual(isOtpLoginIntent("میخوام لاگین کنم"), true, "positive login still works");
   });
 
-  await test("unconnected Telegram user operations do not collect personal data", async () => {
-    const { isUnsupportedUserRequest } = await import("@/lib/telegram/user-requests");
-    for (const text of ["کاربر جدید بساز", "نمیخوام لاگین کنم کاربر جدید بساز", "نام : نمونه", "شماره تماس : 09000000000", "create a new user"]) {
-      assertEqual(isUnsupportedUserRequest(text), true, "account request intercepted");
+  await test("user operations are recognized without confusing login", async () => {
+    const { isUserManagementMessage } = await import("@/lib/telegram/users");
+    for (const text of ["کاربر جدید بساز", "نمیخوام لاگین کنم کاربر جدید بساز", "/users list", "create a new user"]) {
+      assertEqual(isUserManagementMessage(text), true, "user request recognized");
     }
-    assertEqual(isUnsupportedUserRequest("میخوام لاگین کنم"), false, "login not intercepted");
-    assertEqual(isUnsupportedUserRequest("09000000000"), false, "bare phone stays in OTP protection");
+    assertEqual(isUserManagementMessage("میخوام لاگین کنم"), false, "login separate");
+    assertEqual(isUserManagementMessage("09000000000"), false, "bare phone remains OTP input outside a user flow");
   });
 
   await test("provider analysis envelopes are rejected", async () => {

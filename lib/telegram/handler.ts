@@ -35,7 +35,7 @@ import { confirmPhoneText, ensurePhone } from "@/lib/telegram/phone-gate";
 import { EncryptedOtpLoginFlowStore } from "@/lib/auth/login-flow-store";
 import { SmsOtpClient } from "@/lib/auth/sms-otp";
 import { TelegramOtpLogin, isOtpCodeLikeMessage, isOtpLoginIntent, isPhoneNumberMessage } from "@/lib/auth/telegram-login";
-import { isUnsupportedUserRequest, unsupportedUserReply } from "@/lib/telegram/user-requests";
+import { TelegramUsers } from "@/lib/telegram/users";
 import { RulesAssistant } from "@/lib/rules/assistant";
 
 export type BridgeOutcome = {
@@ -53,6 +53,7 @@ const MAX_TEXT = 3900;
 const otpClient = new SmsOtpClient();
 const otpLogin = new TelegramOtpLogin({ otpClient, flowStore: new EncryptedOtpLoginFlowStore() });
 const rulesAssistant = new RulesAssistant();
+const telegramUsers = new TelegramUsers();
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -208,14 +209,6 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const text = (message.text ?? "").trim();
   const authOwnerId = `telegram-user-${userId}`;
 
-  // UserManager is not wired to this bridge. Never collect account details or
-  // let the conversational model promise a mutation it cannot execute.
-  if (isUnsupportedUserRequest(text)) {
-    const reply = unsupportedUserReply(locale);
-    await replyText(chatId, reply, { replyToMessageId: message.message_id });
-    return { handled: true, chatId, status: "users-unavailable", text: reply };
-  }
-
   if (message.chat.type !== "private" && (isOtpLoginIntent(text) || sixDigitCode(text))) {
     await replyText(chatId, PRIVATE_LOGIN_ONLY[locale], { replyToMessageId: message.message_id });
     return { handled: true, chatId, status: "otp-private-only" };
@@ -225,37 +218,23 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     ? await otpClient.getRuleRequestContext(authOwnerId)
     : null;
 
-  if (message.chat.type === "private" && text) {
-    // If there's a pending user creation waiting for input, route to it
-    // instead of SMS login interception.
-    const pendingUser = rulesAssistant.getPendingUserCreation(
-      `telegram-chat-${chatId}`,
-      authOwnerId,
-    );
-    if (pendingUser && ruleContext) {
-      // Determine which field is missing and accept this message as input
-      const required = ["fullName", "email", "phone", "password", "roleKey"];
-      const missing = required.filter((f) => !pendingUser.fields[f]);
-      const field = missing[0];
-      if (field) {
-        const result = await rulesAssistant.completeUserCreation(
-          `telegram-chat-${chatId}`,
-          authOwnerId,
-          field as "fullName" | "email" | "phone" | "password" | "roleKey",
-          text,
-          ruleContext,
-          locale,
-        );
-        if (result.done) {
-          await replyText(chatId, result.reply ?? "", { replyToMessageId: message.message_id });
-          return { handled: true, chatId, status: "user-created", text: result.reply };
-        } else {
-          await replyText(chatId, result.reply ?? "", { replyToMessageId: message.message_id });
-          return { handled: true, chatId, status: "user-creation-pending", text: result.reply };
-        }
+  const usersResult = await telegramUsers.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  if (usersResult) {
+    // Account details and temporary passwords are never added to model history.
+    // Do not truncate account lists or temporary reset passwords mid-record.
+    let chunk = "";
+    for (const line of usersResult.reply.split("\n")) {
+      if (chunk && chunk.length + line.length + 1 > MAX_TEXT) {
+        await replyText(chatId, chunk);
+        chunk = "";
       }
+      chunk += (chunk ? "\n" : "") + line;
     }
+    if (chunk) await replyText(chatId, chunk);
+    return { handled: true, chatId, status: usersResult.status };
+  }
 
+  if (message.chat.type === "private" && text) {
     const loginResult = await otpLogin.handle(authOwnerId, text, locale);
     if (loginResult.handled) {
       await replyText(chatId, loginResult.reply, { replyToMessageId: message.message_id });

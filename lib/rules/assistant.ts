@@ -6,18 +6,12 @@ import { RULE_CAPABILITIES, RuleManager } from "./manager";
 import type {
   RuleBulkInput,
   RuleCreateInput,
-  BulkUsersInput,
-  BulkUsersResult,
-  CreateUserInput,
-  CreateUserResult,
   RuleListQuery,
   RulePatch,
   RuleProposal,
   RuleRequestContext,
-  UpdateUserStatusInput,
   User,
   UserListResult,
-  UserStatusResult,
 } from "./types";
 
 export type RulesAssistantInput = {
@@ -44,64 +38,8 @@ export type RulesAssistantOptions = {
 };
 
 type PendingConfirmation = { token: string; actorId: string; actionKind: string };
-type PendingUserCreation = {
-  actorId: string;
-  fields: Record<string, string>;
-};
 type ToolArguments = Record<string, unknown>;
 type ToolOutcome = { read: true; result: unknown } | { read: false; reply: string; kind: "proposed" | "error" };
-
-function formatCreateUserResult(result: CreateUserResult, locale: "fa" | "en"): string {
-  if (result.error) {
-    return locale === "en"
-      ? `Failed to create user: ${result.error}`
-      : `خطا در ایجاد کاربر: ${result.error}`;
-  }
-  return locale === "en"
-    ? `User created successfully. ID: ${result.id}`
-    : `کاربر جدید با شناسه ${result.id} با موفقیت ایجاد شد.`;
-}
-
-function formatUpdateUserStatus(result: UserStatusResult, locale: "fa" | "en"): string {
-  if (!result.ok) {
-    return locale === "en"
-      ? `Failed to update user: ${result.error ?? "unknown error"}`
-      : `خطا در تغییر وضعیت کاربر: ${result.error ?? "خطای نامشخص"}`;
-  }
-  return locale === "en"
-    ? "User status updated successfully."
-    : "وضعیت کاربر با موفقیت تغییر کرد.";
-}
-
-function formatSoftDeleteUser(result: UserStatusResult, locale: "fa" | "en"): string {
-  if (!result.ok) {
-    return locale === "en"
-      ? `Failed to delete user: ${result.error ?? "unknown error"}`
-      : `خطا در حذف کاربر: ${result.error ?? "خطای نامشخص"}`;
-  }
-  return locale === "en"
-    ? "User deleted successfully."
-    : "کاربر با موفقیت حذف شد.";
-}
-
-function formatBulkUsers(result: BulkUsersResult, locale: "fa" | "en"): string {
-  if (result.error) {
-    return locale === "en"
-      ? `Bulk operation failed: ${result.error}`
-      : `خطا در عملیات گروهی: ${result.error}`;
-  }
-  const fa = `عملیات گروهی:\n` +
-    `درخواستی: ${toPersianDigits(result.requested)}\n` +
-    `موفق: ${toPersianDigits(result.succeeded)}\n` +
-    `ناموفق: ${result.failures.length ? result.failures.length : 0}` +
-    (result.temporaryPasswords ? `\nرمزهای مؤقت: ${result.temporaryPasswords.length}` : "");
-  const en = `Bulk operation:\n` +
-    `Requested: ${result.requested}\n` +
-    `Succeeded: ${result.succeeded}\n` +
-    `Failed: ${result.failures.length}` +
-    (result.temporaryPasswords ? `\nTemporary passwords: ${result.temporaryPasswords.length}` : "");
-  return locale === "en" ? en : fa;
-}
 
 function faStatus(user: User): string {
   if (!user.isActive) return "غیرفعال";
@@ -189,81 +127,6 @@ const RULE_TOOLS: ChatTool[] = [
           page: { type: "integer", minimum: 1, maximum: 100000 },
           perPage: { type: "integer", minimum: 1, maximum: 50 },
         },
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "create_user",
-      description: "Create a new user account. Use only when the user explicitly asks to register or create a user.",
-      parameters: {
-        type: "object",
-        properties: {
-          fullName: { type: "string", minLength: 2, maxLength: 100 },
-          email: { type: "string", format: "email" },
-          phone: { type: "string", pattern: "^\\+?[0-9]{7,15}$" },
-          password: { type: "string", minLength: 8, maxLength: 128 },
-          roleKey: { type: "string", minLength: 1, maxLength: 50 },
-        },
-        required: ["fullName", "email", "phone", "password", "roleKey"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "update_user_status",
-      description: "Activate, deactivate, ban, or unban a user by UUID. Requires explicit confirmation.",
-      parameters: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "User UUID" },
-          isActive: { type: "boolean", description: "Set active status" },
-          isBanned: { type: "boolean", description: "Set banned status" },
-          banReason: { type: "string", maxLength: 500, description: "Reason for banning" },
-        },
-        required: ["id"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "delete_user",
-      description: "Soft-delete a user by UUID. Requires explicit confirmation.",
-      parameters: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "User UUID" },
-        },
-        required: ["id"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "bulk_users",
-      description: "Bulk operations on users: activate, deactivate, ban, unban, change-role, delete, reset-password.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", enum: ["activate", "deactivate", "ban", "unban", "change-role", "delete", "reset-password"] },
-          scope: { type: "string", enum: ["page", "filtered"] },
-          ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
-          filters: {
-            type: "object",
-            properties: { search: { type: "string", maxLength: 100 }, status: { type: "string", enum: ["all", "active", "inactive", "banned"] }, role: { type: "string", maxLength: 50 } },
-            additionalProperties: false,
-          },
-          roleKey: { type: "string", maxLength: 50, description: "Required when action is change-role" },
-        },
-        required: ["action", "scope"],
         additionalProperties: false,
       },
     },
@@ -485,7 +348,6 @@ export class RulesAssistant {
   private readonly manager: RuleManager;
   private readonly completeImpl: typeof complete;
   private readonly pending = new Map<string, PendingConfirmation>();
-  private readonly pendingUserCreation = new Map<string, PendingUserCreation>();
 
   constructor(options: RulesAssistantOptions = {}) {
     this.manager = options.manager ?? new RuleManager();
@@ -493,74 +355,7 @@ export class RulesAssistant {
   }
 
   hasPending(conversationId: string, actorId: string): boolean {
-    return this.pending.has(`${conversationId}\\u0000${actorId}`) ||
-      this.pendingUserCreation.has(`${conversationId}\\u0000${actorId}`);
-  }
-
-  /**
-   * Check if there is a pending user creation waiting for field input.
-   * Used by the Telegram handler to route phone numbers during user creation
-   * instead of intercepting them as SMS login.
-   */
-  getPendingUserCreation(conversationId: string, actorId: string): PendingUserCreation | undefined {
-    return this.pendingUserCreation.get(`${conversationId}\u0000${actorId}`);
-  }
-
-  /**
-   * Complete a pending user creation by filling in a field from raw chat input.
-   * Returns the completed user if all fields are present, or null if more input
-   * is needed.
-   */
-  async completeUserCreation(
-    conversationId: string,
-    actorId: string,
-    field: "fullName" | "email" | "phone" | "password" | "roleKey",
-    value: string,
-    context: RuleRequestContext,
-    locale: "fa" | "en",
-  ): Promise<{ done: boolean; result?: CreateUserResult; reply?: string }> {
-    const key = `${conversationId}\u0000${actorId}`;
-    const pending = this.pendingUserCreation.get(key);
-    if (!pending) {
-      return { done: false, reply: locale === "en" ? "No pending user creation." : "ساخت کاربری در انتظار نیست." };
-    }
-
-    pending.fields[field] = value;
-
-    // Check if all required fields are present
-    const required = ["fullName", "email", "phone", "password", "roleKey"];
-    const missing = required.filter((f) => !pending.fields[f]);
-    if (missing.length > 0) {
-      const fieldNames: Record<string, string> = {
-        fullName: "نام کامل",
-        email: "ایمیل",
-        phone: "شماره تماس",
-        password: "رمز عبور",
-        roleKey: "نقش کاربر",
-      };
-      return {
-        done: false,
-        reply: locale === "en"
-          ? `Still need: ${missing.map((f) => fieldNames[f]).join(", ")}`
-          : `هنوز نیاز به: ${missing.map((f) => fieldNames[f]).join(", ")}`,
-      };
-    }
-
-    this.pendingUserCreation.delete(key);
-
-    const result = await this.manager.createUser({
-      fullName: pending.fields.fullName!,
-      email: pending.fields.email!,
-      phone: pending.fields.phone!,
-      password: pending.fields.password!,
-      roleKey: pending.fields.roleKey!,
-    }, context);
-
-    return result.error
-      ? { done: true, result, reply: locale === "en"
-          ? `Failed to create user: ${result.error}`
-          : `خطا در ایجاد کاربر: ${result.error}` }
-      : { done: true, result, reply: formatCreateUserResult(result, locale) };
+    return this.pending.has(`${conversationId}\u0000${actorId}`);
   }
 
   /**
@@ -683,87 +478,8 @@ export class RulesAssistant {
     locale: "fa" | "en",
     conversationId: string,
   ): Promise<ToolOutcome> {
-    if (name === "create_user") {
-      const input = args as Partial<Record<string, string>>;
-      const key = `${conversationId}\u0000${context.actorId}`;
-
-      // Store partial input; missing fields will be requested from chat
-      const existing = this.pendingUserCreation.get(key);
-      const fields: Record<string, string> = existing ? { ...existing.fields } : {};
-      for (const f of ["fullName", "email", "phone", "password", "roleKey"]) {
-        if (input[f]) fields[f] = input[f];
-      }
-      this.pendingUserCreation.set(key, { actorId: context.actorId, fields });
-
-      const required = ["fullName", "email", "phone", "password", "roleKey"];
-      const missing = required.filter((f) => !fields[f]);
-      if (missing.length > 0) {
-        const fieldNames: Record<string, string> = {
-          fullName: "نام کامل",
-          email: "ایمیل",
-          phone: "شماره تماس",
-          password: "رمز عبور",
-          roleKey: "نقش کاربر",
-        };
-        return {
-          read: true,
-          result: {
-            error: null,
-            status: 200,
-            requestId: undefined,
-            formatted: locale === "en"
-              ? `Please provide: ${missing.map((f) => fieldNames[f]).join(", ")}`
-              : `لطفاً این اطلاعات را بفرستید: ${missing.map((f) => fieldNames[f]).join(", ")}`,
-          },
-        };
-      }
-
-      this.pendingUserCreation.delete(key);
-      const result = await this.manager.createUser({
-        fullName: fields.fullName!,
-        email: fields.email!,
-        phone: fields.phone!,
-        password: fields.password!,
-        roleKey: fields.roleKey!,
-      }, context);
-
-      return result.error
-        ? { read: true, result: { error: result.error, status: result.status, requestId: result.requestId } }
-        : { read: true, result: { id: result.id, formatted: formatCreateUserResult(result, locale) } };
-    }
-    if (name === "update_user_status") {
-      const input = args as UpdateUserStatusInput;
-      const key = `${conversationId}\u0000${context.actorId}`;
-      const existing = this.pending.get(key);
-      if (existing && !this.manager.pendingChange(existing.token)) {
-        this.pending.delete(key);
-      }
-      const proposal = await this.manager.proposeUpdateUserStatus(args.id as string, input, context);
-      if (!proposal.ok) return { read: false, kind: "error", reply: proposal.message };
-      this.pending.set(key, { token: proposal.change.token, actorId: context.actorId, actionKind: proposal.change.action.kind });
-      return { read: false, kind: "proposed", reply: confirmationPrompt(locale, proposal.change.summary, this.manager.isLive) };
-    }
-    if (name === "delete_user") {
-      const key = `${conversationId}\u0000${context.actorId}`;
-      const existing = this.pending.get(key);
-      if (existing && !this.manager.pendingChange(existing.token)) {
-        this.pending.delete(key);
-      }
-      const proposal = await this.manager.proposeSoftDeleteUser(args.id as string, context);
-      if (!proposal.ok) return { read: false, kind: "error", reply: proposal.message };
-      this.pending.set(key, { token: proposal.change.token, actorId: context.actorId, actionKind: proposal.change.action.kind });
-      return { read: false, kind: "proposed", reply: confirmationPrompt(locale, proposal.change.summary, this.manager.isLive) };
-    }
-    if (name === "bulk_users") {
-      const key = `${conversationId}\u0000${context.actorId}`;
-      const existing = this.pending.get(key);
-      if (existing && !this.manager.pendingChange(existing.token)) {
-        this.pending.delete(key);
-      }
-      const proposal = await this.manager.proposeBulkUsers(args as BulkUsersInput, context);
-      if (!proposal.ok) return { read: false, kind: "error", reply: proposal.message };
-      this.pending.set(key, { token: proposal.change.token, actorId: context.actorId, actionKind: proposal.change.action.kind });
-      return { read: false, kind: "proposed", reply: confirmationPrompt(locale, proposal.change.summary, this.manager.isLive) };
+    if (["create_user", "update_user_status", "delete_user", "bulk_users"].includes(name)) {
+      return { read: false, kind: "error", reply: "برای تغییر کاربران از مسیر خصوصی /users استفاده کن؛ این ابزار تغییری اجرا نکرد." };
     }
     if (name === "list_users") {
       const result = await this.manager.listUsers(context);

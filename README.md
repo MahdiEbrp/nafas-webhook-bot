@@ -499,15 +499,45 @@ curl -X POST https://<your-app>/api/chat \
 
 مسیرهای دیگر: `GET /api/health`، `GET|POST /api/telegram/setup`.
 
-### Telegram user-management availability
+### مدیریت کاربران تلگرام مطابق API کلینیک
 
-`UserManager` is not connected to the Telegram bridge. Telegram therefore rejects
-user-management requests and labeled account-detail submissions with an explicit
-unavailable message, before invoking OTP or a language model. It does not collect
-new-user profiles or claim an account was created. Connecting the users API with
-trusted per-actor authorization and confirmation handling is still required for
-live account creation; the in-memory demo is not a substitute.
+قرارداد مرجع: `MahdiEbrp/beauty-clinic`، commit
+`af5d4f872a7ac8f75fa1e6780e788e83557c5100` (main).
+اعتبارسنجی از `lib/validation/user.ts` و مسیرهای `app/api/v1/users` تطبیق داده شده است.
 
-Negated login requests do not start OTP. Known analysis envelopes returned in a
-provider's `content` are rejected and use the existing model fallback chain;
-this heuristic is not a guarantee against every possible malformed response.
+در خصوصی وارد حساب مجاز شو، سپس «کاربر جدید بساز» را بفرست. ربات نام کامل،
+ایمیل، تلفن، رمز و کلید نقش را مرحله‌به‌مرحله می‌گیرد؛ رمز و مشخصات به مدل یا
+تاریخچه فرستاده نمی‌شوند. برای راهنمای همهٔ فرمان‌ها `/users help` را بفرست.
+
+| فرمان | API |
+|---|---|
+| `/users list {"page":1,"perPage":10,"status":"all"}` | GET /api/v1/users؛ جست‌وجو و فیلتر نقش/وضعیت |
+| `/users create {…}` | POST /api/v1/users |
+| `/users status UUID {"isActive":false}` | PATCH /api/v1/users/:id |
+| `/users status UUID {"isBanned":true,"banReason":"…"}` | مسدودسازی؛ false برای رفع مسدودی |
+| `/users role UUID {"roleKey":"…"}` | PATCH /api/v1/users/:id/role |
+| `/users password UUID {"password":"…","confirmPassword":"…"}` | POST /api/v1/users/:id/password |
+| `/users delete UUID` | DELETE /api/v1/users/:id (حذف نرم) |
+| `/users bulk {"action":"activate","scope":"page","ids":["UUID"]}` | POST /api/v1/users/bulk |
+
+عملیات گروهی: activate، deactivate، ban، unban، change-role (با roleKey)، delete،
+reset-password. برای scope=filtered از filters شامل search/status/role استفاده کن.
+تعداد شناسه‌های صفحه حداکثر ۱۰۰ است. عملیات تغییردهنده فقط پس از «تأیید» اجرا
+می‌شوند؛ «لغو» پیشنهاد را حذف می‌کند. تأیید یک‌بارمصرف، وابسته به مالک و نشست
+و با مهلت پنج دقیقه است. پیشنهادها در حافظهٔ process هستند و بین instanceها یا
+cold start پایدار نیستند؛ در این حالت باید درخواست را از ابتدا شروع کرد.
+
+کلاینت تنها به HTTPS، با کوکی نشست همان درخواست‌کننده و Origin مقصد درخواست
+می‌فرستد؛ redirect و retry خودکار ندارد. API مرجع CSRF را با تطبیق Origin و
+Host کنترل می‌کند و پاسخ موفق آن `{data: ...}` است، نه `ok: true`.
+کنترل permissions، نقش‌های مجاز و جلوگیری از self-lockout همچنان در سرویس
+مرجع اعمال می‌شود؛ ورود موفق به معنی داشتن مجوز مدیریت کاربران نیست.
+رمزهای موقت reset فقط مستقیماً در گفت‌وگوی خصوصی برگردانده می‌شوند؛ آن‌ها را
+منتشر نکن. نگهداری رمز در پیام‌های خود تلگرام با حافظهٔ مدل متفاوت است؛ برای
+حساب‌های حساس از پنل امن کلینیک استفاده کن.
+
+**محدودیت قرارداد مرجع:** تغییر نام/ایمیل/تلفن و GET تکی کاربر endpoint ندارند؛
+ربات آن‌ها را اختراع نمی‌کند. مسیر قدیمی AI برای تغییر کاربران غیرفعال شده و
+درخواست‌های تغییردهنده باید از جریان خصوصی `/users` انجام شوند.
+
+تست‌ها از fetch ساختگی استفاده می‌کنند؛ تست روی دادهٔ واقعی یا deploy انجام نشده است.

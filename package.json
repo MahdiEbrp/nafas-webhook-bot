@@ -12,6 +12,7 @@
     "start": "next start -p 3000",
     "typecheck": "tsc --noEmit",
     "selftest": "tsx scripts/selftest.ts",
+    "users:test": "tsx scripts/users-contract-test.ts",
     "check": "tsc --noEmit && tsx scripts/selftest.ts",
     "models": "tsx scripts/list-free-models.ts",
     "telegram:setup": "tsx scripts/telegram-setup.ts",
