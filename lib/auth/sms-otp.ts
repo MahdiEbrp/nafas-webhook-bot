@@ -292,12 +292,17 @@ export class SmsOtpClient {
       } catch {
         parsed = null;
       }
-      if (!response.ok || !isRecord(parsed) || parsed.ok !== true) {
-        const error = apiError(parsed, response.status);
+      // Normalize response: some upstream APIs wrap in { data: { ok: true, ... } }
+      const normalized = isRecord(parsed) && !("ok" in parsed) && isRecord((parsed as Record<string, unknown>).data)
+        ? (parsed as Record<string, unknown>).data
+        : parsed;
+
+      if (!response.ok || !isRecord(normalized) || normalized.ok !== true) {
+        const error = apiError(normalized, response.status);
         logWarn("auth.otp_failed", { step, status: response.status, code: error.code, ...(requestId ? { requestId } : {}) });
         return { ok: false, status: response.status, ...error, ...(requestId ? { requestId } : {}) };
       }
-      return { ok: true, body: parsed, headers: response.headers, requestId };
+      return { ok: true, body: normalized as ApiBody, headers: response.headers, requestId };
     } catch (error) {
       const timeout = error instanceof Error && error.name === "AbortError";
       const code = timeout ? "TIMEOUT" : "NETWORK_ERROR";
