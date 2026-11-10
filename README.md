@@ -813,3 +813,87 @@ later billable sends by upstream jobs, though this module never itself sends SMS
 
 Tests use mocked HTTP only: `npm run settings:test` or `npm run check`. No production
 settings are read or changed by these tests.
+
+### Telegram payment administration — full admin route coverage
+
+Private, authenticated Telegram conversations cover **all 11 operations** present in
+`beauty-clinic/app/api/v1/admin/payment` at
+`af5d4f872a7ac8f75fa1e6780e788e83557c5100`:
+
+| Route under `/api/v1/admin/payment` | Methods / capability |
+| --- | --- |
+| `/overview` | GET payment statistics |
+| `/providers` | GET list/filter/search/page; POST create |
+| `/providers/:id` | GET detail; PATCH configuration; DELETE soft-delete |
+| `/providers/:id/test` | POST provider health test |
+| `/providers/bulk` | POST activate/deactivate/delete selected or filtered providers |
+| `/transactions` | GET list/filter/search/page; POST payment request |
+| `/transactions/:id` | PATCH description and/or recorded status |
+
+Examples: «آمار پرداخت»، «درگاه‌های پرداخت را نشان بده»، «درگاه جدید بساز»،
+«درگاه دوم را ویرایش کن»، «درگاه اول را تست کن»، «تراکنش‌های ناموفق را نشان بده»،
+«درخواست پرداخت بساز»، «تراکنش دوم را ویرایش کن»، «راهنمای پرداخت».
+
+There is **no root handler, individual transaction GET, transaction deletion/bulk,
+bank verification or bank refund endpoint** in this admin tree. These are not invented
+or routed to unrelated public payment endpoints. Transaction search is by booking group
+reference/authority upstream, not arbitrary id. To edit a transaction, list it first.
+The confirmation re-reads its booking group (up to 50 matches); if it cannot safely find
+an unchanged row, the edit is cancelled rather than calling a nonexistent GET.
+
+#### Financial semantics and confirmation
+
+- Every mutation/test requires a single-use explicit approval; no payment API write
+  occurs while collecting input or preparing the preview.
+- Creating a transaction makes a **real gateway request**, not a completed payment.
+  The admin API accepts **Toman**, from 1,000 to 1,000,000,000 inclusive, and the server
+  multiplies by 10 for gateway **Rial**. Both amounts appear for approval. The route
+  does not guarantee matching the requested amount to the referenced booking.
+- Provider testing itself makes a **1,000 Rial (100 Toman) gateway request**, with
+  description `Health check`, and records provider health. It is not harmless local
+  validation and is not guaranteed to use sandbox. `isSuccessful:false` is displayed
+  as a failed test even though HTTP succeeded; raw upstream error text is omitted.
+- Transaction PATCH changes **only the recorded status/description**. Marking `verified`
+  does not verify with the bank or confirm the booking; `refunded` does not return money.
+  The bot displays this warning before approval and after the update.
+- This admin transaction-create endpoint has **no idempotency parameter**. The bot adds
+  no invented key and performs no automatic retries. After network uncertainty inspect
+  transaction reports before creating another request. Upstream adapters may implement
+  their own retry behavior; the bot cannot guarantee exactly-once gateway execution.
+- Provider deletion may be blocked when transactions exist. Bulk results show actual
+  requested/succeeded/failure counts, not an unconditional success message. Filtered bulk
+  scope is disclosed and evaluated upstream at execution time, not frozen to the preview.
+
+#### Credentials, provider options and limitations
+
+Provider creation collects name, kind, merchant id, API URL, callback URL and optional
+`isActive`/`isDefault`/`sandbox` through local guided steps. Update forms collect exact
+JSON patches locally. Transaction creation collects the exact booking reference, amount,
+description and provider UUID (or explicit server-default choice); transaction editing
+accepts only description/status. Values are not invented, rewritten or passed to the
+planner/history. Draft input messages are deleted when possible, with a warning on
+failure. Merchant identifiers are redacted in approval previews. Provider URLs' paths
+and query parameters are hidden in previews; raw URL/configuration, merchant suffixes,
+health errors, card PAN, and transaction error text are excluded from response whitelists.
+The planner sees only id/title/resource, never amounts, descriptions, payment URLs or
+credentials. Payment links are returned only after success, resolved against the configured
+HTTPS API origin when relative (e.g. the fake adapter), checked for unsafe protocols,
+credentials and literal local addresses, and never fetched by the bot.
+
+Kinds mirror upstream: zarinpal, tabapay, zibal, idpay, nextpay, mellat, parsian, fake.
+Some use the generic adapter; listing a kind is not a guarantee of dedicated gateway
+integration. Sandbox is collected explicitly; the admin response does not expose its
+current value, so the bot does not claim to know it. Setting a new default can unset the
+previous default upstream. An omitted callback uses server configuration on creation;
+changing/emptying it later may break gateway callbacks. Empty API URL allows the adapter
+fallback. Nonempty URLs use a stricter HTTPS/public-literal guard than upstream's local
+exceptions, but this is **not DNS-rebinding protection**; upstream adapters must enforce
+network policy. The bot never connects directly to provider URLs.
+
+Drafts are process-local, session-bound and expire after five minutes; they are not durable
+across instances/cold starts. Individual provider writes/tests and transaction edits
+re-read snapshots before execution, but this is not atomic compare-and-swap. Response
+whitelisting means provider snapshots rely on `updatedAt` for secret/config changes.
+Permissions remain enforced upstream: payment.read/write/manage/send. Tests are HTTP
+mocks only: `npm run payment:test` or `npm run check`. No real gateway requests or
+production configuration changes are performed during development/tests.
