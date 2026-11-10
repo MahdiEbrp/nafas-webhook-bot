@@ -6,14 +6,18 @@ import { RULE_CAPABILITIES, RuleManager } from "./manager";
 import type {
   RuleBulkInput,
   RuleCreateInput,
+  BulkUsersInput,
+  BulkUsersResult,
   CreateUserInput,
   CreateUserResult,
   RuleListQuery,
   RulePatch,
   RuleProposal,
   RuleRequestContext,
+  UpdateUserStatusInput,
   User,
   UserListResult,
+  UserStatusResult,
 } from "./types";
 
 export type RulesAssistantInput = {
@@ -39,7 +43,7 @@ export type RulesAssistantOptions = {
   completeImpl?: typeof complete;
 };
 
-type PendingConfirmation = { token: string; actorId: string };
+type PendingConfirmation = { token: string; actorId: string; actionKind: string };
 type PendingUserCreation = {
   actorId: string;
   fields: Record<string, string>;
@@ -56,6 +60,47 @@ function formatCreateUserResult(result: CreateUserResult, locale: "fa" | "en"): 
   return locale === "en"
     ? `User created successfully. ID: ${result.id}`
     : `کاربر جدید با شناسه ${result.id} با موفقیت ایجاد شد.`;
+}
+
+function formatUpdateUserStatus(result: UserStatusResult, locale: "fa" | "en"): string {
+  if (!result.ok) {
+    return locale === "en"
+      ? `Failed to update user: ${result.error ?? "unknown error"}`
+      : `خطا در تغییر وضعیت کاربر: ${result.error ?? "خطای نامشخص"}`;
+  }
+  return locale === "en"
+    ? "User status updated successfully."
+    : "وضعیت کاربر با موفقیت تغییر کرد.";
+}
+
+function formatSoftDeleteUser(result: UserStatusResult, locale: "fa" | "en"): string {
+  if (!result.ok) {
+    return locale === "en"
+      ? `Failed to delete user: ${result.error ?? "unknown error"}`
+      : `خطا در حذف کاربر: ${result.error ?? "خطای نامشخص"}`;
+  }
+  return locale === "en"
+    ? "User deleted successfully."
+    : "کاربر با موفقیت حذف شد.";
+}
+
+function formatBulkUsers(result: BulkUsersResult, locale: "fa" | "en"): string {
+  if (result.error) {
+    return locale === "en"
+      ? `Bulk operation failed: ${result.error}`
+      : `خطا در عملیات گروهی: ${result.error}`;
+  }
+  const fa = `عملیات گروهی:\n` +
+    `درخواستی: ${toPersianDigits(result.requested)}\n` +
+    `موفق: ${toPersianDigits(result.succeeded)}\n` +
+    `ناموفق: ${result.failures.length ? result.failures.length : 0}` +
+    (result.temporaryPasswords ? `\nرمزهای مؤقت: ${result.temporaryPasswords.length}` : "");
+  const en = `Bulk operation:\n` +
+    `Requested: ${result.requested}\n` +
+    `Succeeded: ${result.succeeded}\n` +
+    `Failed: ${result.failures.length}` +
+    (result.temporaryPasswords ? `\nTemporary passwords: ${result.temporaryPasswords.length}` : "");
+  return locale === "en" ? en : fa;
 }
 
 function faStatus(user: User): string {
@@ -163,6 +208,62 @@ const RULE_TOOLS: ChatTool[] = [
           roleKey: { type: "string", minLength: 1, maxLength: 50 },
         },
         required: ["fullName", "email", "phone", "password", "roleKey"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_user_status",
+      description: "Activate, deactivate, ban, or unban a user by UUID. Requires explicit confirmation.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "User UUID" },
+          isActive: { type: "boolean", description: "Set active status" },
+          isBanned: { type: "boolean", description: "Set banned status" },
+          banReason: { type: "string", maxLength: 500, description: "Reason for banning" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete_user",
+      description: "Soft-delete a user by UUID. Requires explicit confirmation.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "User UUID" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "bulk_users",
+      description: "Bulk operations on users: activate, deactivate, ban, unban, change-role, delete, reset-password.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["activate", "deactivate", "ban", "unban", "change-role", "delete", "reset-password"] },
+          scope: { type: "string", enum: ["page", "filtered"] },
+          ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
+          filters: {
+            type: "object",
+            properties: { search: { type: "string", maxLength: 100 }, status: { type: "string", enum: ["all", "active", "inactive", "banned"] }, role: { type: "string", maxLength: 50 } },
+            additionalProperties: false,
+          },
+          roleKey: { type: "string", maxLength: 50, description: "Required when action is change-role" },
+        },
+        required: ["action", "scope"],
         additionalProperties: false,
       },
     },
@@ -496,6 +597,16 @@ export class RulesAssistant {
       }
       const result = await this.manager.confirm(pending.token, input.context);
       if (!result.ok) return { kind: "error", reply: result.message };
+      // User operations use different wording than rule operations
+      const isUserOp = pending.actionKind === "update-user-status" || pending.actionKind === "soft-delete-user" || pending.actionKind === "bulk-users";
+      if (isUserOp) {
+        const applied = result.applied.length;
+        const failed = result.failed.length;
+        const msg = locale === "en"
+          ? failed ? `User operation finished: ${applied} applied, ${failed} failed.` : `Done. ${applied} user change(s) applied.`
+          : failed ? `عملیات کاربر تمام شد: ${applied} مورد انجام شد و ${failed} مورد ناموفق بود.` : `انجام شد؛ ${applied} تغییر کاربر اعمال شد.`;
+        return { kind: result.failed.length ? "error" : "confirmed", reply: msg, ...(result.requestId ? { requestId: result.requestId } : {}) };
+      }
       return {
         kind: result.failed.length ? "error" : "confirmed",
         reply: outcomeMessage(locale, result.applied.length, result.failed.length, result.mode),
@@ -617,6 +728,40 @@ export class RulesAssistant {
         ? { read: true, result: { error: result.error, status: result.status, requestId: result.requestId } }
         : { read: true, result: { id: result.id, formatted: formatCreateUserResult(result, locale) } };
     }
+    if (name === "update_user_status") {
+      const input = args as UpdateUserStatusInput;
+      const key = `${conversationId}\u0000${context.actorId}`;
+      const existing = this.pending.get(key);
+      if (existing && !this.manager.pendingChange(existing.token)) {
+        this.pending.delete(key);
+      }
+      const proposal = await this.manager.proposeUpdateUserStatus(args.id as string, input, context);
+      if (!proposal.ok) return { read: false, kind: "error", reply: proposal.message };
+      this.pending.set(key, { token: proposal.change.token, actorId: context.actorId, actionKind: proposal.change.action.kind });
+      return { read: false, kind: "proposed", reply: confirmationPrompt(locale, proposal.change.summary, this.manager.isLive) };
+    }
+    if (name === "delete_user") {
+      const key = `${conversationId}\u0000${context.actorId}`;
+      const existing = this.pending.get(key);
+      if (existing && !this.manager.pendingChange(existing.token)) {
+        this.pending.delete(key);
+      }
+      const proposal = await this.manager.proposeSoftDeleteUser(args.id as string, context);
+      if (!proposal.ok) return { read: false, kind: "error", reply: proposal.message };
+      this.pending.set(key, { token: proposal.change.token, actorId: context.actorId, actionKind: proposal.change.action.kind });
+      return { read: false, kind: "proposed", reply: confirmationPrompt(locale, proposal.change.summary, this.manager.isLive) };
+    }
+    if (name === "bulk_users") {
+      const key = `${conversationId}\u0000${context.actorId}`;
+      const existing = this.pending.get(key);
+      if (existing && !this.manager.pendingChange(existing.token)) {
+        this.pending.delete(key);
+      }
+      const proposal = await this.manager.proposeBulkUsers(args as BulkUsersInput, context);
+      if (!proposal.ok) return { read: false, kind: "error", reply: proposal.message };
+      this.pending.set(key, { token: proposal.change.token, actorId: context.actorId, actionKind: proposal.change.action.kind });
+      return { read: false, kind: "proposed", reply: confirmationPrompt(locale, proposal.change.summary, this.manager.isLive) };
+    }
     if (name === "list_users") {
       const result = await this.manager.listUsers(context);
       if (result.error) {
@@ -652,7 +797,7 @@ export class RulesAssistant {
 
     if (!proposal.ok) return { read: false, kind: "error", reply: proposal.message };
     const key = `${conversationId}\u0000${context.actorId}`;
-    this.pending.set(key, { token: proposal.change.token, actorId: context.actorId });
+    this.pending.set(key, { token: proposal.change.token, actorId: context.actorId, actionKind: proposal.change.action.kind });
     return { read: false, kind: "proposed", reply: confirmationPrompt(locale, proposal.change.summary, this.manager.isLive) };
   }
 }

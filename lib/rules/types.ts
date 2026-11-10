@@ -1,7 +1,7 @@
 /** Shapes shared by the rules client and its proposal/confirmation flow. */
 
 export type RuleLocale = "fa" | "en";
-export type RuleStatusFilter = "all" | "active" | "inactive";
+export type RuleStatusFilter = "all" | "active" | "inactive" | "banned";
 export type RuleStatus = "active" | "inactive";
 
 export type RuleTranslation = {
@@ -77,6 +77,47 @@ export type CreateUserResult = {
   requestId?: string;
 };
 
+export type UserStatusFilter = "all" | "active" | "inactive" | "banned";
+
+export type UpdateUserStatusInput = {
+  isActive?: boolean;
+  isBanned?: boolean;
+  banReason?: string | null;
+};
+
+export type UserStatusResult = {
+  ok: boolean;
+  error?: string;
+  status?: number;
+  requestId?: string;
+};
+
+export type BulkUserAction = "activate" | "deactivate" | "ban" | "unban" | "change-role" | "delete" | "reset-password";
+
+export type BulkUserScope = "page" | "filtered";
+
+export type BulkUserFilters = {
+  search?: string;
+  status?: UserStatusFilter;
+  role?: string;
+};
+
+export type BulkUsersInput =
+  | { action: BulkUserAction; scope: "page"; ids: string[] }
+  | { action: BulkUserAction; scope: "filtered"; filters: BulkUserFilters }
+  | { action: "change-role"; scope: "page"; ids: string[]; roleKey: string }
+  | { action: "change-role"; scope: "filtered"; filters: BulkUserFilters; roleKey: string };
+
+export type BulkUsersResult = {
+  requested: number;
+  succeeded: number;
+  failures: Array<{ id: string; code: string }>;
+  temporaryPasswords?: Array<{ id: string; password: string }>;
+  error?: string;
+  status?: number;
+  requestId?: string;
+};
+
 export type RuleBulkAction = "activate" | "deactivate" | "delete";
 export type RuleBulkScope = "page" | "filtered";
 export type RuleBulkFilters = {
@@ -99,13 +140,24 @@ export type RulePendingAction =
   | { kind: "create"; id: string; input: RuleCreateInput }
   | { kind: "update"; id: string; patch: RulePatch }
   | { kind: "delete"; id: string }
-  | { kind: "bulk"; input: RuleBulkInput };
+  | { kind: "bulk"; input: RuleBulkInput }
+  | { kind: "update-user-status"; id: string; patch: UpdateUserStatusInput }
+  | { kind: "soft-delete-user"; id: string }
+  | { kind: "bulk-users"; input: BulkUsersInput };
 
 export type RulePendingChange = {
   token: string;
   action: RulePendingAction;
   summary: string;
   expiresAt: number;
+};
+
+export type ApplyOutcome = {
+  applied: string[];
+  failed: Array<{ id: string; reason: string; status?: number }>;
+  error?: string;
+  status?: number;
+  requestId?: string;
 };
 
 export type RuleProposalFailure =
@@ -131,7 +183,15 @@ export type RuleProposalFailure =
   | "no-change"
   | "not-found"
   | "request-failed"
-  | "missing-auth-context";
+  | "missing-auth-context"
+  | "invalid-user-id"
+  | "user-not-found"
+  | "self-lockout"
+  | "invalid-role"
+  | "role-change-self"
+  | "user-update-failed"
+  | "user-delete-failed"
+  | "bulk-user-failed";
 
 export type RuleProposal =
   | { ok: true; change: RulePendingChange }

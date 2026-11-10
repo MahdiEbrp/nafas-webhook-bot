@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 import { logWarn } from "@/lib/log";
 
 import type {
+  BulkUserAction,
+  BulkUsersInput,
+  BulkUsersResult,
   CreateUserInput,
   CreateUserResult,
   Rule,
@@ -23,8 +26,10 @@ import type {
   RuleRequestContext,
   RuleReadResult,
   RuleStatusFilter,
+  UpdateUserStatusInput,
   User,
   UserListResult,
+  UserStatusResult,
   RuleTranslation,
   RuleTranslationPatch,
   RuleTranslations,
@@ -51,6 +56,8 @@ type HttpResult = {
 type ApplyOutcome = {
   applied: string[];
   failed: Array<{ id: string; reason: string; status?: number }>;
+  error?: string;
+  status?: number;
   requestId?: string;
 };
 
@@ -89,6 +96,14 @@ const MESSAGES: Record<RuleProposalFailure, string> = {
   "not-found": "قانون پیدا نشد.",
   "request-failed": "درخواست به API قوانین انجام نشد.",
   "missing-auth-context": "زمینهٔ احراز هویت معتبر برای این درخواست در دسترس نیست.",
+  "invalid-user-id": "شناسهٔ کاربر معتبر نیست.",
+  "user-not-found": "کاربر پیدا نشد.",
+  "self-lockout": "نمی‌توانید حساب کاربری خود را غیرفعال، مسدود یا حذف کنید.",
+  "invalid-role": "نقش انتخاب‌شده معتبر نیست.",
+  "role-change-self": "نمی‌توانید نقش خود را تغییر دهید.",
+  "user-update-failed": "تغییر وضعیت کاربر انجام نشد.",
+  "user-delete-failed": "حذف کاربر انجام نشد.",
+  "bulk-user-failed": "عملیات گروهی کاربر انجام نشد.",
 };
 
 export function seedRules(): Rule[] {
@@ -132,6 +147,9 @@ export function seedRules(): Rule[] {
 export const RULE_CAPABILITIES: readonly RuleCapability[] = [
   { id: "users.create", title: { fa: "ایجاد کاربر", en: "Create user" }, example: { fa: "کاربر جدید بساز", en: "Create new user" }, needsConfirm: false },
   { id: "users.list", title: { fa: "فهرست کاربران", en: "List users" }, example: { fa: "لیست کاربران را نشان بده", en: "List users" }, needsConfirm: false },
+  { id: "users.update-status", title: { fa: "تغییر وضعیت کاربر", en: "Update user status" }, example: { fa: "کاربر شناسه‌ی X را غیرفعال کن", en: "Deactivate user X" }, needsConfirm: true },
+  { id: "users.delete", title: { fa: "حذف کاربر", en: "Delete user" }, example: { fa: "کاربر شناسه‌ی X را حذف کن", en: "Delete user X" }, needsConfirm: true },
+  { id: "users.bulk", title: { fa: "عملیات گروهی کاربران", en: "Bulk user operations" }, example: { fa: "تمام کاربران غیرفعال را مسدود کن", en: "Ban all inactive users" }, needsConfirm: true },
   { id: "rules.list", title: { fa: "فهرست‌کردن قوانین", en: "List rules" }, example: { fa: "قوانین فعال را نشان بده", en: "List active rules" }, needsConfirm: false },
   { id: "rules.view", title: { fa: "دیدن یک قانون", en: "View one rule" }, example: { fa: "قانون را با شناسه‌اش پیدا کن", en: "Get a rule by its id" }, needsConfirm: false },
   { id: "rules.create", title: { fa: "ساخت قانون", en: "Create a rule" }, example: { fa: "قانونی با نام سیاست نوبت‌دهی بساز", en: "Create an appointment-policy rule" }, needsConfirm: true },
@@ -560,6 +578,86 @@ export class RuleManager {
     return { id: "", error: "not available in dummy mode", status: 501 };
   }
 
+  async updateUserStatus(userId: string, patch: UpdateUserStatusInput, context?: RuleRequestContext): Promise<UserStatusResult> {
+    if (!isUuid(userId)) return { ok: false, error: MESSAGES["invalid-user-id"], status: 400 };
+    if (this.isLive && !validContext(context)) {
+      return { ok: false, error: MESSAGES["missing-auth-context"], status: 401 };
+    }
+    if (this.isLive) {
+      const result = await this.request(`/api/v1/users/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        body: patch,
+      }, context);
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: result.reason,
+          status: result.status,
+          requestId: result.requestId,
+        };
+      }
+      return { ok: true, requestId: result.requestId };
+    }
+    return { ok: false, error: "not available in dummy mode", status: 501 };
+  }
+
+  async softDeleteUser(userId: string, context?: RuleRequestContext): Promise<UserStatusResult> {
+    if (!isUuid(userId)) return { ok: false, error: MESSAGES["invalid-user-id"], status: 400 };
+    if (this.isLive && !validContext(context)) {
+      return { ok: false, error: MESSAGES["missing-auth-context"], status: 401 };
+    }
+    if (this.isLive) {
+      const result = await this.request(`/api/v1/users/${encodeURIComponent(userId)}`, {
+        method: "DELETE",
+      }, context);
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: result.reason,
+          status: result.status,
+          requestId: result.requestId,
+        };
+      }
+      return { ok: true, requestId: result.requestId };
+    }
+    return { ok: false, error: "not available in dummy mode", status: 501 };
+  }
+
+  async bulkUsers(input: BulkUsersInput, context?: RuleRequestContext): Promise<BulkUsersResult> {
+    if (this.isLive && !validContext(context)) {
+      return { requested: 0, succeeded: 0, failures: [], error: MESSAGES["missing-auth-context"], status: 401 };
+    }
+    if (this.isLive) {
+      const result = await this.request("/api/v1/users/bulk", {
+        method: "POST",
+        body: input,
+      }, context);
+      if (!result.ok) {
+        return {
+          requested: 0,
+          succeeded: 0,
+          failures: [],
+          error: result.reason,
+          status: result.status,
+          requestId: result.requestId,
+        };
+      }
+      const wrapped = isRecord(result.body) ? result.body : {};
+      const body = isRecord(wrapped.data) ? wrapped.data : wrapped;
+      if (isRecord(body) && typeof body.requested === "number" && typeof body.succeeded === "number") {
+        return {
+          requested: body.requested,
+          succeeded: body.succeeded,
+          failures: Array.isArray(body.failures) ? body.failures : [],
+          temporaryPasswords: Array.isArray(body.temporaryPasswords) ? body.temporaryPasswords : undefined,
+          requestId: result.requestId,
+        };
+      }
+      return { requested: 0, succeeded: 0, failures: [], error: "unparsable response", status: result.status, requestId: result.requestId };
+    }
+    return { requested: 0, succeeded: 0, failures: [], error: "not available in dummy mode", status: 501 };
+  }
+
   async proposeCreate(input: RuleCreateInput, context?: RuleRequestContext): Promise<RuleProposal> {
     if (this.isLive && !validContext(context)) return this.refuse("missing-auth-context", 401);
     const normalized = normalizeCreate(input);
@@ -611,6 +709,40 @@ export class RuleManager {
     return this.hold({ kind: "bulk", input: normalized.value }, summary, context);
   }
 
+  async proposeUpdateUserStatus(userId: string, patch: UpdateUserStatusInput, context?: RuleRequestContext): Promise<RuleProposal> {
+    if (!isUuid(userId)) return this.refuse("invalid-user-id", 400);
+    if (this.isLive && !validContext(context)) return this.refuse("missing-auth-context", 401);
+    const summary = patch.isActive !== undefined
+      ? (patch.isActive ? "فعال‌سازی کاربر" : "غیرفعال‌سازی کاربر")
+      : patch.isBanned !== undefined
+        ? (patch.isBanned ? "مسدود کردن کاربر" : "رفع مسدودیت کاربر")
+        : "تغییر وضعیت کاربر";
+    return this.hold({ kind: "update-user-status", id: userId, patch }, summary, context);
+  }
+
+  async proposeSoftDeleteUser(userId: string, context?: RuleRequestContext): Promise<RuleProposal> {
+    if (!isUuid(userId)) return this.refuse("invalid-user-id", 400);
+    if (this.isLive && !validContext(context)) return this.refuse("missing-auth-context", 401);
+    return this.hold({ kind: "soft-delete-user", id: userId }, `حذف کاربر ${userId}`, context);
+  }
+
+  async proposeBulkUsers(input: BulkUsersInput, context?: RuleRequestContext): Promise<RuleProposal> {
+    if (this.isLive && !validContext(context)) return this.refuse("missing-auth-context", 401);
+    const actionLabel: Record<BulkUserAction, string> = {
+      activate: "فعال‌سازی",
+      deactivate: "غیرفعال‌سازی",
+      ban: "مسدود کردن",
+      unban: "رفع مسدودیت",
+      "change-role": "تغییر نقش",
+      delete: "حذف",
+      "reset-password": "بازنشانی رمز عبور",
+    };
+    const summary = input.scope === "page"
+      ? `${actionLabel[input.action]} ${input.ids.length} کاربر`
+      : `${actionLabel[input.action]} کاربران مطابق فیلترها`;
+    return this.hold({ kind: "bulk-users", input }, summary, context);
+  }
+
   pendingChange(token: string): RulePendingChange | null {
     const change = this.pending.get(token);
     if (!change) return null;
@@ -641,7 +773,9 @@ export class RuleManager {
     if (change.expiresAt <= this.now()) {
       return { ok: false, code: "expired", message: "زمان تأیید این تغییر تمام شده است؛ دوباره پیشنهادش بده." };
     }
-    const outcome = this.isLive ? await this.applyLive(change.action, context) : this.applyDummy(change.action);
+    const outcome = change.action.kind === "update-user-status" || change.action.kind === "soft-delete-user" || change.action.kind === "bulk-users"
+      ? await this.applyLiveUser(change.action, context)
+      : await this.applyLive(change.action, context);
     return { ok: true, ...outcome, sent: true, mode: this.isLive ? "live" : "dummy" };
   }
 
@@ -663,20 +797,21 @@ export class RuleManager {
 
   private applyDummy(action: RulePendingAction): ApplyOutcome {
     if (action.kind === "create") {
+      const createAction = action as { kind: "create"; id: string; input: RuleCreateInput };
       const stamp = new Date(this.now()).toISOString();
       const rule: Rule = {
-        id: action.id,
-        slug: action.input.slug,
+        id: createAction.id,
+        slug: createAction.input.slug,
         translations: {
-          fa: { name: action.input.translations.fa.name, description: action.input.translations.fa.description ?? null },
-          en: { name: action.input.translations.en.name, description: action.input.translations.en.description ?? null },
+          fa: { name: createAction.input.translations.fa.name, description: createAction.input.translations.fa.description ?? null },
+          en: { name: createAction.input.translations.en.name, description: createAction.input.translations.en.description ?? null },
         },
-        icon: action.input.icon ?? null,
-        image: action.input.image ?? null,
-        color: action.input.color ?? null,
-        highlighted: action.input.highlighted ?? false,
-        displayOrder: action.input.displayOrder ?? 0,
-        isActive: action.input.isActive ?? true,
+        icon: createAction.input.icon ?? null,
+        image: createAction.input.image ?? null,
+        color: createAction.input.color ?? null,
+        highlighted: createAction.input.highlighted ?? false,
+        displayOrder: createAction.input.displayOrder ?? 0,
+        isActive: createAction.input.isActive ?? true,
         createdAt: stamp,
         updatedAt: stamp,
       };
@@ -684,9 +819,10 @@ export class RuleManager {
       return { applied: [rule.id], failed: [] };
     }
     if (action.kind === "update") {
-      const existing = this.store.get(action.id);
-      if (!existing) return { applied: [], failed: [{ id: action.id, reason: MESSAGES["not-found"], status: 404 }] };
-      const patch = action.patch;
+      const updateAction = action as { kind: "update"; id: string; patch: RulePatch };
+      const existing = this.store.get(updateAction.id);
+      if (!existing) return { applied: [], failed: [{ id: updateAction.id, reason: MESSAGES["not-found"], status: 404 }] };
+      const patch = updateAction.patch;
       const translations = { ...existing.translations };
       for (const locale of LOCALES) {
         const translationPatch = patch.translations?.[locale];
@@ -701,8 +837,18 @@ export class RuleManager {
       return { applied: [action.id], failed: [] };
     }
     if (action.kind === "delete") {
-      if (!this.store.delete(action.id)) return { applied: [], failed: [{ id: action.id, reason: MESSAGES["not-found"], status: 404 }] };
+      const deleteAction = action as { kind: "delete"; id: string };
+      if (!this.store.delete(deleteAction.id)) return { applied: [], failed: [{ id: deleteAction.id, reason: MESSAGES["not-found"], status: 404 }] };
+      return { applied: [deleteAction.id], failed: [] };
+    }
+    if (action.kind === "update-user-status") {
       return { applied: [action.id], failed: [] };
+    }
+    if (action.kind === "soft-delete-user") {
+      return { applied: [action.id], failed: [] };
+    }
+    if (action.kind === "bulk-users") {
+      return { applied: ["bulk-users"], failed: [] };
     }
     return this.applyDummyBulk(action.input);
   }
@@ -762,24 +908,56 @@ export class RuleManager {
         ? { applied: [action.id], failed: [], requestId: result.requestId }
         : { applied: [], failed: [{ id: action.id, reason: result.reason, status: result.status }], requestId: result.requestId };
     }
-    const result = await this.request("/api/v1/rules/bulk", { method: "POST", body: action.input }, context);
-    if (result.ok) {
-      const body = isRecord(result.body) ? result.body : {};
-      const applied = Array.isArray(body.applied) ? body.applied.map(String) : action.input.scope === "page" ? [...action.input.ids] : [];
-      const failed = Array.isArray(body.failed)
-        ? body.failed.map((item) => {
-            const record = isRecord(item) ? item : {};
-            return { id: String(record.id ?? ""), reason: String(record.reason ?? "failed") };
-          })
-        : [];
+    if (action.kind === "bulk") {
+      const bulkAction = action as { kind: "bulk"; input: RuleBulkInput };
+      const result = await this.request("/api/v1/rules/bulk", { method: "POST", body: bulkAction.input }, context);
+      if (result.ok) {
+        const body = isRecord(result.body) ? result.body : {};
+        const applied = Array.isArray(body.applied) ? body.applied.map(String) : bulkAction.input.scope === "page" ? [...bulkAction.input.ids] : [];
+        const failed = Array.isArray(body.failed)
+          ? body.failed.map((item) => {
+              const record = isRecord(item) ? item : {};
+              return { id: String(record.id ?? ""), reason: String(record.reason ?? "failed") };
+            })
+          : [];
+        return { applied, failed, requestId: result.requestId };
+      }
+      const ids = bulkAction.input.scope === "page" ? bulkAction.input.ids : [];
+      return {
+        applied: [],
+        failed: ids.map((id) => ({ id, reason: result.reason, status: result.status })),
+        requestId: result.requestId,
+      };
+    }
+    return { applied: [], failed: [{ id: "", reason: "unknown action kind" }] };
+  }
+
+  private async applyLiveUser(action: RulePendingAction, context?: RuleRequestContext): Promise<ApplyOutcome> {
+    if (action.kind === "update-user-status") {
+      const result = await this.updateUserStatus(action.id, action.patch, context);
+      if (!result.ok) {
+        return { applied: [], failed: [{ id: action.id, reason: result.error ?? MESSAGES["user-update-failed"], status: result.status }], requestId: result.requestId };
+      }
+      return { applied: [action.id], failed: [], requestId: result.requestId };
+    }
+    if (action.kind === "soft-delete-user") {
+      const result = await this.softDeleteUser(action.id, context);
+      if (!result.ok) {
+        return { applied: [], failed: [{ id: action.id, reason: result.error ?? MESSAGES["user-delete-failed"], status: result.status }], requestId: result.requestId };
+      }
+      return { applied: [action.id], failed: [], requestId: result.requestId };
+    }
+    if (action.kind === "bulk-users") {
+      const bulkInput = action as { kind: "bulk-users"; input: BulkUsersInput };
+      const result = await this.bulkUsers(bulkInput.input, context);
+      if (result.error) {
+        return { applied: [], failed: [], error: result.error ?? MESSAGES["bulk-user-failed"], status: result.status, requestId: result.requestId };
+      }
+      const applied = result.failures.length === 0 ? (result.succeeded > 0 ? ["bulk-users"] : []) : [];
+      const failed = result.failures.map((f) => ({ id: f.id, reason: f.code, status: result.status }));
       return { applied, failed, requestId: result.requestId };
     }
-    const ids = action.input.scope === "page" ? action.input.ids : [];
-    return {
-      applied: [],
-      failed: ids.map((id) => ({ id, reason: result.reason, status: result.status })),
-      requestId: result.requestId,
-    };
+    return { applied: [], failed: [{ id: "", reason: "unknown action kind" }] };
   }
 
   private async request(
