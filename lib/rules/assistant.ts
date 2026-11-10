@@ -479,7 +479,7 @@ export class RulesAssistant {
     conversationId: string,
   ): Promise<ToolOutcome> {
     if (["create_user", "update_user_status", "delete_user", "bulk_users"].includes(name)) {
-      return { read: false, kind: "error", reply: "برای تغییر کاربران از مسیر خصوصی /users استفاده کن؛ این ابزار تغییری اجرا نکرد." };
+      return { read: false, kind: "error", reply: "در گفت‌وگوی خصوصی، نام کاربر و تغییر موردنظرت را بنویس؛ مثلاً «کاربر دوم را حذف کن». این ابزار تغییری اجرا نکرد." };
     }
     if (name === "list_users") {
       const result = await this.manager.listUsers(context);

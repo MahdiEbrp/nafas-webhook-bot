@@ -134,7 +134,7 @@ export function capabilitiesText(locale: Locale): string {
 
   if (locale === "en") {
     return [
-      "The legacy user accounts module has these capabilities. For the supported live Telegram operations and their limits, use /users help in a private chat:",
+      "The legacy user accounts module has these capabilities. For the supported live Telegram operations and their limits, describe what you want naturally in a private chat (for example, delete the second user):",
       "",
       ...lines,
       "",
@@ -143,7 +143,7 @@ export function capabilitiesText(locale: Locale): string {
   }
 
   return [
-    "ماژول قدیمی حساب‌های کاربری قابلیت‌های زیر را دارد؛ برای عملیات واقعیِ پشتیبانی‌شده و محدودیت‌های API در تلگرام، در خصوصی /users help را بفرست:",
+    "ماژول قدیمی حساب‌های کاربری قابلیت‌های زیر را دارد؛ برای عملیات واقعیِ پشتیبانی‌شده و محدودیت‌های API در تلگرام، در خصوصی خواسته‌ات را طبیعی بنویس؛ مثلاً «کاربر دوم را حذف کن»:",
     "",
     ...lines,
     "",
@@ -162,7 +162,7 @@ export function capabilitiesPromptBlock(locale: Locale): string {
 
   if (locale === "en") {
     return [
-      "The module for user accounts supports the following abilities, but it is NOT connected directly to the language model. Live Telegram user operations use the private /users flow. Direct users to /users help; do not collect account details through conversation:",
+      "The module for user accounts supports the following abilities, but it is NOT connected directly to the language model. Live Telegram user operations use a separate private conversational flow. Ask users to describe the desired change naturally; never recommend slash commands; do not collect account details through conversation:",
       list,
       "",
       `${locked} of these change data. Never claim one has happened: describe it and wait for an explicit yes.`,
@@ -170,7 +170,7 @@ export function capabilitiesPromptBlock(locale: Locale): string {
   }
 
   return [
-    "ماژول حساب‌های کاربری قابلیت‌های زیر را دارد، اما مستقیماً به مدل متصل نیست. عملیات واقعی تلگرام در مسیر خصوصی /users انجام می‌شود. کاربر را به /users help راهنمایی کن؛ در گفت‌وگوی مدل مشخصات کاربر جمع نکن:",
+    "ماژول حساب‌های کاربری قابلیت‌های زیر را دارد، اما مستقیماً به مدل متصل نیست. عملیات واقعی تلگرام در مسیر خصوصی و محاوره‌ای انجام می‌شود. بگو خواسته‌اش را طبیعی بنویسد؛ هرگز فرمان اسلش‌دار پیشنهاد نکن؛ در گفت‌وگوی مدل مشخصات کاربر جمع نکن:",
     list,
     "",
     `${locked} مورد از این‌ها داده را تغییر می‌دهد. هرگز نگو انجام شد: اول توضیح بده و منتظر «بله»ی صریح بمان.`,
