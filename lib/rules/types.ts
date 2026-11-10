@@ -160,6 +160,7 @@ export type User = {
   roleKey: string | null;
   isActive: boolean;
   isBanned: boolean;
+  lastLoginAt?: string;
   createdAt?: string;
   updatedAt?: string;
 };

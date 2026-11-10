@@ -1,7 +1,18 @@
 import { complete, type ChatMessage, type ChatTool, type CompletionResult } from "@/lib/openrouter/client";
 
+import { jalaliShort, toPersianDigits } from "@/lib/dates/format";
+
 import { RULE_CAPABILITIES, RuleManager } from "./manager";
-import type { RuleBulkInput, RuleCreateInput, RuleListQuery, RulePatch, RuleProposal, RuleRequestContext } from "./types";
+import type {
+  RuleBulkInput,
+  RuleCreateInput,
+  RuleListQuery,
+  RulePatch,
+  RuleProposal,
+  RuleRequestContext,
+  User,
+  UserListResult,
+} from "./types";
 
 export type RulesAssistantInput = {
   /** Stable, caller-controlled conversation key; never use it as an actor identity. */
@@ -29,6 +40,79 @@ export type RulesAssistantOptions = {
 type PendingConfirmation = { token: string; actorId: string };
 type ToolArguments = Record<string, unknown>;
 type ToolOutcome = { read: true; result: unknown } | { read: false; reply: string; kind: "proposed" | "error" };
+
+function faStatus(user: User): string {
+  if (!user.isActive) return "غیرفعال";
+  if (user.isBanned) return "مسدود";
+  return "فعال";
+}
+
+function faRole(roleKey: string | null): string {
+  if (!roleKey) return "بدون نقش";
+  const map: Record<string, string> = {
+    admin: "مدیر",
+    customer: "مشتری",
+    moderator: "مشرِف",
+    support: "پشتیبانی",
+  };
+  return map[roleKey] ?? roleKey;
+}
+
+function formatUserList(result: UserListResult, locale: "fa" | "en"): string {
+  if (result.error) {
+    return locale === "en"
+      ? `Failed to list users: ${result.error}`
+      : `خطا در دریافت لیست کاربران: ${result.error}`;
+  }
+
+  const users = result.users;
+  if (!users.length) {
+    return locale === "en"
+      ? "No users found."
+      : "لیست کاربران خالی است؛ در حال حاضر هیچ کاربری ثبت نشده است.";
+  }
+
+  const activeCount = users.filter((u) => u.isActive && !u.isBanned).length;
+  const inactiveCount = users.filter((u) => !u.isActive).length;
+  const bannedCount = users.filter((u) => u.isBanned).length;
+
+  const lines: string[] = [];
+  lines.push(locale === "en" ? "Registered Users" : "لیست کاربران");
+  lines.push("");
+  lines.push("| # | نام کامل | ایمیل | نقش | وضعیت | آخرین ورود |");
+  lines.push("|---|----------|--------|------|--------|------------|");
+
+  users.forEach((user, i) => {
+    const no = toPersianDigits((i + 1).toString());
+    const name = user.fullName ?? "بدون نام";
+    const email = user.email ?? "—";
+    const role = faRole(user.roleKey);
+    const status = faStatus(user);
+    const lastLogin = user.lastLoginAt
+      ? jalaliShort(new Date(user.lastLoginAt))
+      : "—";
+    lines.push(`| ${no} | ${name} | ${email} | ${role} | ${status} | ${lastLogin} |`);
+  });
+
+  lines.push("");
+  const summaryFa =
+    `کل ${toPersianDigits(users.length)} نفر` +
+    (activeCount ? `، ${toPersianDigits(activeCount)} فعال` : "") +
+    (inactiveCount ? `، ${toPersianDigits(inactiveCount)} غیرفعال` : "") +
+    (bannedCount ? `، ${toPersianDigits(bannedCount)} مسدود` : "") +
+    `. صفحه ${toPersianDigits(result.page)} از ۱ (${toPersianDigits(result.perPage)} مورد در هر صفحه).`;
+
+  const summaryEn =
+    `Total ${users.length} user(s)` +
+    (activeCount ? `, ${activeCount} active` : "") +
+    (inactiveCount ? `, ${inactiveCount} inactive` : "") +
+    (bannedCount ? `, ${bannedCount} banned` : "") +
+    `. Page ${result.page} (${result.perPage} per page).`;
+
+  lines.push(locale === "en" ? summaryEn : summaryFa);
+
+  return lines.join("\n");
+}
 
 const RULE_TOOLS: ChatTool[] = [
   {
@@ -355,6 +439,11 @@ export class RulesAssistant {
       };
     }
 
+    // If the tool already produced a human-readable formatted string, return it directly.
+    if (typeof readRecord?.formatted === "string") {
+      return { kind: "read", reply: readRecord.formatted, model: completion.model };
+    }
+
     const finalMessages: ChatMessage[] = [
       ...messages,
       { role: "assistant", content: completion.content, tool_calls: [call] },
@@ -377,9 +466,13 @@ export class RulesAssistant {
   ): Promise<ToolOutcome> {
     if (name === "list_users") {
       const result = await this.manager.listUsers(context);
-      return result.error
-        ? { read: true, result: { error: result.error, status: result.status, requestId: result.requestId } }
-        : { read: true, result };
+      if (result.error) {
+        return {
+          read: true,
+          result: { error: result.error, status: result.status, requestId: result.requestId },
+        };
+      }
+      return { read: true, result: { formatted: formatUserList(result, locale), raw: result } };
     }
     if (name === "list_rules") {
       const result = await this.manager.list(args as RuleListQuery, context);

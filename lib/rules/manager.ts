@@ -490,7 +490,30 @@ export class RuleManager {
       const items = Array.isArray(body.items) ? body.items : [];
       const pagination = isRecord(body) ? body : {};
       return {
-        users: items.filter((u: unknown) => isRecord(u) && typeof (u as Record<string, unknown>).id === "string") as User[],
+        users: items
+          .filter((u: unknown) => isRecord(u) && typeof (u as Record<string, unknown>).id === "string")
+          .map((u) => {
+            const record = u as Record<string, unknown>;
+            const roles = Array.isArray(record.roles) ? record.roles : [];
+            return {
+              id: String(record.id ?? ""),
+              email: typeof record.email === "string" ? record.email : "",
+              phone: typeof record.phone === "string" ? record.phone : null,
+              fullName:
+                typeof record.fullName === "string" && record.fullName
+                  ? record.fullName
+                  : typeof record.email === "string"
+                    ? record.email.split("@")[0]
+                    : "بدون نام",
+              roleKey: roles.length ? String(roles[0]) : null,
+              isActive: Boolean(record.isActive),
+              isBanned: Boolean(record.isBanned),
+              lastLoginAt:
+                typeof record.lastLoginAt === "string" ? record.lastLoginAt : undefined,
+              createdAt:
+                typeof record.createdAt === "string" ? record.createdAt : undefined,
+            } as User;
+          }),
         page: typeof pagination.page === "number" ? pagination.page : 1,
         perPage: typeof pagination.perPage === "number" ? pagination.perPage : 10,
         total: typeof pagination.total === "number" ? pagination.total : items.length,
