@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { logWarn } from "@/lib/log";
 
 import type {
+  CreateUserInput,
+  CreateUserResult,
   Rule,
   RuleBulkAction,
   RuleBulkFilters,
@@ -128,6 +130,7 @@ export function seedRules(): Rule[] {
 }
 
 export const RULE_CAPABILITIES: readonly RuleCapability[] = [
+  { id: "users.create", title: { fa: "ایجاد کاربر", en: "Create user" }, example: { fa: "کاربر جدید بساز", en: "Create new user" }, needsConfirm: false },
   { id: "users.list", title: { fa: "فهرست کاربران", en: "List users" }, example: { fa: "لیست کاربران را نشان بده", en: "List users" }, needsConfirm: false },
   { id: "rules.list", title: { fa: "فهرست‌کردن قوانین", en: "List rules" }, example: { fa: "قوانین فعال را نشان بده", en: "List active rules" }, needsConfirm: false },
   { id: "rules.view", title: { fa: "دیدن یک قانون", en: "View one rule" }, example: { fa: "قانون را با شناسه‌اش پیدا کن", en: "Get a rule by its id" }, needsConfirm: false },
@@ -522,6 +525,39 @@ export class RuleManager {
       };
     }
     return { users: [], page: 1, perPage: 10, total: 0, live: false };
+  }
+
+  async createUser(input: CreateUserInput, context?: RuleRequestContext): Promise<CreateUserResult> {
+    if (this.isLive && !validContext(context)) {
+      return { id: "", error: MESSAGES["missing-auth-context"], status: 401 };
+    }
+    if (this.isLive) {
+      const result = await this.request("/api/v1/users", {
+        method: "POST",
+        body: {
+          fullName: input.fullName,
+          email: input.email,
+          phone: input.phone,
+          password: input.password,
+          roleKey: input.roleKey,
+        },
+      }, context);
+      if (!result.ok) {
+        return {
+          id: "",
+          error: result.reason,
+          status: result.status,
+          requestId: result.requestId,
+        };
+      }
+      const wrapped = isRecord(result.body) ? result.body : {};
+      const body = isRecord(wrapped.data) ? wrapped.data : wrapped;
+      if (typeof body.id === "string") {
+        return { id: body.id, requestId: result.requestId };
+      }
+      return { id: "", error: "unparsable response", status: result.status, requestId: result.requestId };
+    }
+    return { id: "", error: "not available in dummy mode", status: 501 };
   }
 
   async proposeCreate(input: RuleCreateInput, context?: RuleRequestContext): Promise<RuleProposal> {

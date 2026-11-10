@@ -62,6 +62,21 @@ export type RuleListQuery = {
   status?: RuleStatusFilter;
 };
 
+export type CreateUserInput = {
+  fullName: string;
+  email: string;
+  phone: string | null;
+  password: string;
+  roleKey: string;
+};
+
+export type CreateUserResult = {
+  id: string;
+  error?: string;
+  status?: number;
+  requestId?: string;
+};
+
 export type RuleBulkAction = "activate" | "deactivate" | "delete";
 export type RuleBulkScope = "page" | "filtered";
 export type RuleBulkFilters = {

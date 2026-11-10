@@ -6,6 +6,8 @@ import { RULE_CAPABILITIES, RuleManager } from "./manager";
 import type {
   RuleBulkInput,
   RuleCreateInput,
+  CreateUserInput,
+  CreateUserResult,
   RuleListQuery,
   RulePatch,
   RuleProposal,
@@ -40,6 +42,17 @@ export type RulesAssistantOptions = {
 type PendingConfirmation = { token: string; actorId: string };
 type ToolArguments = Record<string, unknown>;
 type ToolOutcome = { read: true; result: unknown } | { read: false; reply: string; kind: "proposed" | "error" };
+
+function formatCreateUserResult(result: CreateUserResult, locale: "fa" | "en"): string {
+  if (result.error) {
+    return locale === "en"
+      ? `Failed to create user: ${result.error}`
+      : `خطا در ایجاد کاربر: ${result.error}`;
+  }
+  return locale === "en"
+    ? `User created successfully. ID: ${result.id}`
+    : `کاربر جدید با شناسه ${result.id} با موفقیت ایجاد شد.`;
+}
 
 function faStatus(user: User): string {
   if (!user.isActive) return "غیرفعال";
@@ -127,6 +140,25 @@ const RULE_TOOLS: ChatTool[] = [
           page: { type: "integer", minimum: 1, maximum: 100000 },
           perPage: { type: "integer", minimum: 1, maximum: 50 },
         },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_user",
+      description: "Create a new user account. Use only when the user explicitly asks to register or create a user.",
+      parameters: {
+        type: "object",
+        properties: {
+          fullName: { type: "string", minLength: 2, maxLength: 100 },
+          email: { type: "string", format: "email" },
+          phone: { type: "string", pattern: "^\\+?[0-9]{7,15}$" },
+          password: { type: "string", minLength: 8, maxLength: 128 },
+          roleKey: { type: "string", minLength: 1, maxLength: 50 },
+        },
+        required: ["fullName", "email", "phone", "password", "roleKey"],
         additionalProperties: false,
       },
     },
@@ -465,6 +497,12 @@ export class RulesAssistant {
     locale: "fa" | "en",
     conversationId: string,
   ): Promise<ToolOutcome> {
+    if (name === "create_user") {
+      const result = await this.manager.createUser(args as CreateUserInput, context);
+      return result.error
+        ? { read: true, result: { error: result.error, status: result.status, requestId: result.requestId } }
+        : { read: true, result: { id: result.id, formatted: formatCreateUserResult(result, locale) } };
+    }
     if (name === "list_users") {
       const result = await this.manager.listUsers(context);
       if (result.error) {
