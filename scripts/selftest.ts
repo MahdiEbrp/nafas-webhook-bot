@@ -2126,6 +2126,7 @@ async function main(): Promise<void> {
     assert(defaultCapabilities.reply.includes("قوانین را هم می‌توانم فهرست و مدیریت کنم"), "rules are listed even for the default route");
     assert(defaultCapabilities.reply.includes("این درخواست نشست احراز هویت معتبر ندارد"), "default integration limits are disclosed");
     assert(defaultCapabilities.reply.includes("فهرست و مدیریت"), "the short answer summarizes rules capabilities");
+    assert(!defaultCapabilities.reply.includes("رزرو نوبت") && !defaultCapabilities.reply.includes("کاتالوگ خدمات"), "Telegram-only clinic workflows are not advertised without otpLoginAvailable");
 
     const activeCapabilities = await handleChat({
       message: "چه کارهایی بلدی؟",

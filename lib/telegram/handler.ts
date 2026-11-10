@@ -1,4 +1,5 @@
 import { TelegramEmailAdmin, isEmailAdminRequest } from "@/lib/telegram/email-admin";
+import { isClinicOperationsRequest, TelegramClinicOperations } from "@/lib/telegram/clinic-operations";
 import { TelegramPaymentAdmin, isPaymentAdminRequest } from "@/lib/telegram/payment-admin";
 import { TelegramSettingsAdmin, isSettingsAdminRequest } from "@/lib/telegram/settings-admin";
 import { TelegramSmsAdmin, isSmsAdminRequest } from "@/lib/telegram/sms-admin";
@@ -68,6 +69,9 @@ const smsAdmin = new TelegramSmsAdmin();
 const settingsAdmin = new TelegramSettingsAdmin();
 const paymentAdmin = new TelegramPaymentAdmin();
 const emailAdmin = new TelegramEmailAdmin();
+const clinicOperations = new TelegramClinicOperations(undefined, undefined, Date.now, async (owner) => {
+  return otpClient.clearStoredSession(owner);
+});
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -240,8 +244,26 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const collectingEmail = emailAdmin.isCollecting(authOwnerId);
   const emailSwitch = isEmailAdminRequest(text);
   const paymentSwitch = isPaymentAdminRequest(text);
-  const otherPaymentDomain = isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text) || emailSwitch;
-  const otherEmailDomain = paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text);
+  const clinicSensitiveInput = clinicOperations.expectsSensitiveInput(authOwnerId);
+  const clinicSlashReset = /^\/(?:clear|reset|new)\b/iu.test(text);
+  const clinicReset = clinicSlashReset || (!clinicSensitiveInput && isOtpLoginIntent(text));
+  const clinicSwitch = !clinicSlashReset && (clinicSensitiveInput || isClinicOperationsRequest(text));
+  if (clinicSwitch) {
+    // An explicit domain switch discards any other workflow's pending proposal;
+    // clinic confirmations must never approve stale email/provider/user changes.
+    emailAdmin.clear(authOwnerId);
+    paymentAdmin.clear(authOwnerId);
+    settingsAdmin.clear(authOwnerId);
+    smsAdmin.clear(authOwnerId);
+    socialLinks.clear(authOwnerId);
+    telegramUsers.clear(authOwnerId);
+    workingHours.clear(authOwnerId);
+    rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
+  } else if (clinicReset || emailSwitch || paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text)) {
+    clinicOperations.clear(authOwnerId);
+  }
+  const otherPaymentDomain = isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text) || emailSwitch || clinicSwitch;
+  const otherEmailDomain = paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text) || clinicSwitch;
   if (!collectingEmail && otherEmailDomain && !emailSwitch) emailAdmin.clear(authOwnerId);
   if (!collectingPayment && otherPaymentDomain && !paymentSwitch) paymentAdmin.clear(authOwnerId);
   if (!collectingUser && !collectingSocial && !collectingSms && !collectingSettings && !collectingPayment && (collectingEmail || emailSwitch)) {
@@ -253,7 +275,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     paymentAdmin.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
   }
-  const emailResult = collectingUser || collectingSocial || collectingSms || collectingSettings || collectingPayment ? null : await emailAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const emailResult = clinicSwitch || collectingUser || collectingSocial || collectingSms || collectingSettings || collectingPayment ? null : await emailAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (emailResult) {
     if (emailResult.deleteSensitiveMessage) {
       const removed = await deleteMessage(chatId, message.message_id);
@@ -270,7 +292,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     workingHours.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
   }
-  const paymentResult = collectingUser || collectingSocial || collectingSms || collectingSettings ? null : await paymentAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const paymentResult = clinicSwitch || collectingUser || collectingSocial || collectingSms || collectingSettings ? null : await paymentAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (paymentResult) {
     if (paymentResult.deleteSensitiveMessage) {
       const removed = await deleteMessage(chatId, message.message_id);
@@ -287,7 +309,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     workingHours.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
   }
-  const settingsResult = collectingUser || collectingSocial || collectingSms ? null : await settingsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const settingsResult = clinicSwitch || collectingUser || collectingSocial || collectingSms ? null : await settingsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (settingsResult) {
     if (settingsResult.deleteSensitiveMessage) {
       const removed = await deleteMessage(chatId, message.message_id);
@@ -305,7 +327,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     workingHours.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
   }
-  const smsResult = collectingUser || collectingSocial ? null : await smsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const smsResult = clinicSwitch || collectingUser || collectingSocial ? null : await smsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (smsResult) {
     if (smsResult.deleteSensitiveMessage) {
       const removed = await deleteMessage(chatId, message.message_id);
@@ -319,7 +341,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     workingHours.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
   } else if (!collectingUser && !collectingSocial && (isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) socialLinks.clear(authOwnerId);
-  const socialResult = collectingUser ? null : await socialLinks.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const socialResult = clinicSwitch || collectingUser ? null : await socialLinks.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (socialResult) {
     await sendMessage({ chatId, text: socialResult.reply });
     return { handled: true, chatId, status: socialResult.status };
@@ -331,13 +353,13 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     telegramUsers.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
   } else if (isUserManagementMessage(text) || isRulesRequestCandidate(text)) workingHours.clear(authOwnerId);
-  const hoursResult = collectingUser ? null : await workingHours.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const hoursResult = clinicSwitch || collectingUser ? null : await workingHours.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (hoursResult) {
     await sendMessage({ chatId, text: hoursResult.reply });
     return { handled: true, chatId, status: hoursResult.status };
   }
 
-  const usersResult = await telegramUsers.handle(authOwnerId, message.text ?? "", ruleContext, message.chat.type === "private");
+  const usersResult = clinicSwitch ? null : await telegramUsers.handle(authOwnerId, message.text ?? "", ruleContext, message.chat.type === "private");
   if (usersResult) {
     if (usersResult.deleteSensitiveMessage) {
       const removed = await deleteMessage(chatId, message.message_id);
@@ -351,7 +373,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const rulesConversation = `telegram-rules-${authOwnerId}`;
   if (/^\/(?:clear|reset|new)\b/iu.test(text) || isOtpLoginIntent(text)) {
     rulesAssistant.clear(rulesConversation, ruleContext?.actorId ?? authOwnerId);
-  } else if (message.chat.type === "private" && ruleContext && text
+  } else if (!clinicSwitch && !clinicOperations.hasConversation(authOwnerId) && message.chat.type === "private" && ruleContext && text
     && !sensitiveOtpInput(text) && !/^(?:رمز|password)\s*[:：]/iu.test(text)
     && (isRulesRequestCandidate(text) || rulesAssistant.hasPending(rulesConversation, ruleContext.actorId)
       || rulesAssistant.hasFollowup(rulesConversation, ruleContext.actorId, text))) {
@@ -360,12 +382,32 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     return { handled: true, chatId, status: `rules-${result.kind}` };
   }
 
-  if (message.chat.type === "private" && text) {
+  if (message.chat.type === "private" && text && !clinicSensitiveInput) {
     const loginResult = await otpLogin.handle(authOwnerId, text, locale);
     if (loginResult.handled) {
       await replyText(chatId, loginResult.reply, { replyToMessageId: message.message_id });
       return { handled: true, chatId, status: loginResult.status, text: loginResult.reply };
     }
+  }
+
+  // Route clinic workflows before the unrelated phone gate. In particular,
+  // private contact/password steps must be handled (or deleted) locally even
+  // when the authenticated clinic session has expired.
+  const trustedContactPhone = message.contact?.user_id === userId ? message.contact.phone_number : "";
+  const clinicInput = text || (clinicOperations.expectsPhone(authOwnerId) ? trustedContactPhone : "");
+  const clinicResult = await clinicOperations.handle(authOwnerId, clinicInput, ruleContext, message.chat.type === "private", locale);
+  if (clinicResult) {
+    if (clinicResult.deleteSensitiveMessage) {
+      const removed = await deleteMessage(chatId, message.message_id);
+      if (!removed.ok) {
+        const warning = locale === "fa"
+          ? "⚠️ حذف پیام حاوی اطلاعات شخصی ممکن نشد؛ لطفاً خودت آن را حذف کن. این مقدار به مدل یا تاریخچهٔ مکالمه فرستاده نشده است."
+          : "⚠️ I could not delete the message containing personal information. Please remove it yourself. It was not sent to the model or conversation history.";
+        await sendMessage({ chatId, text: warning });
+      }
+    }
+    await sendMessage({ chatId, text: clinicResult.reply });
+    return { handled: true, chatId, status: clinicResult.status };
   }
 
   /* ── 3. The phone gate ─────────────────────────────────────────────────
