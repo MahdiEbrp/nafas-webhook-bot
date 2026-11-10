@@ -35,6 +35,7 @@ import { confirmPhoneText, ensurePhone } from "@/lib/telegram/phone-gate";
 import { EncryptedOtpLoginFlowStore } from "@/lib/auth/login-flow-store";
 import { SmsOtpClient } from "@/lib/auth/sms-otp";
 import { TelegramOtpLogin, isOtpCodeLikeMessage, isOtpLoginIntent, isPhoneNumberMessage } from "@/lib/auth/telegram-login";
+import { isUnsupportedUserRequest, unsupportedUserReply } from "@/lib/telegram/user-requests";
 import { RulesAssistant } from "@/lib/rules/assistant";
 
 export type BridgeOutcome = {
@@ -206,6 +207,14 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
 
   const text = (message.text ?? "").trim();
   const authOwnerId = `telegram-user-${userId}`;
+
+  // UserManager is not wired to this bridge. Never collect account details or
+  // let the conversational model promise a mutation it cannot execute.
+  if (isUnsupportedUserRequest(text)) {
+    const reply = unsupportedUserReply(locale);
+    await replyText(chatId, reply, { replyToMessageId: message.message_id });
+    return { handled: true, chatId, status: "users-unavailable", text: reply };
+  }
 
   if (message.chat.type !== "private" && (isOtpLoginIntent(text) || sixDigitCode(text))) {
     await replyText(chatId, PRIVATE_LOGIN_ONLY[locale], { replyToMessageId: message.message_id });

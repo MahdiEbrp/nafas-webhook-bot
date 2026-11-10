@@ -134,7 +134,7 @@ export function capabilitiesText(locale: Locale): string {
 
   if (locale === "en") {
     return [
-      "Here is everything I can do with user accounts:",
+      "The user accounts module supports these operations, but it is not connected to this conversation. I cannot execute them here:",
       "",
       ...lines,
       "",
@@ -143,7 +143,7 @@ export function capabilitiesText(locale: Locale): string {
   }
 
   return [
-    "این کارها را روی حساب‌های کاربری بلدم:",
+    "ماژول حساب‌های کاربری این قابلیت‌ها را دارد، اما به این گفت‌وگو متصل نیست و نمی‌توانم اینجا اجرا کنم:",
     "",
     ...lines,
     "",
@@ -162,7 +162,7 @@ export function capabilitiesPromptBlock(locale: Locale): string {
 
   if (locale === "en") {
     return [
-      "You can manage user accounts. You are able to:",
+      "The module for user accounts supports the following abilities, but it is NOT connected to this conversation. Do not offer to execute them or collect account details:",
       list,
       "",
       `${locked} of these change data. Never claim one has happened: describe it and wait for an explicit yes.`,
@@ -170,7 +170,7 @@ export function capabilitiesPromptBlock(locale: Locale): string {
   }
 
   return [
-    "تو می‌توانی حساب‌های کاربری را مدیریت کنی. این کارها را بلدی:",
+    "ماژول حساب‌های کاربری قابلیت‌های زیر را دارد، اما به این گفت‌وگو متصل نیست. قول اجرای آن‌ها را نده و مشخصات کاربر جمع نکن:",
     list,
     "",
     `${locked} مورد از این‌ها داده را تغییر می‌دهد. هرگز نگو انجام شد: اول توضیح بده و منتظر «بله»ی صریح بمان.`,

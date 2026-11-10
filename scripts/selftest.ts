@@ -3302,7 +3302,7 @@ async function main(): Promise<void> {
       const prompt = systemPrompt(locale, "الان ۱۴۰۵ است");
       assert(prompt.includes("حساب‌های کاربری") || prompt.includes("user accounts"), `${locale}: mentions user management`);
       assert(
-        prompt.includes("بلدی") || prompt.includes("You are able to"),
+        prompt.includes("متصل نیست") || prompt.includes("NOT connected"),
         `${locale}: lists the abilities`,
       );
     }
@@ -3314,6 +3314,40 @@ async function main(): Promise<void> {
     assert(cut.length <= 301, `length ${cut.length} within limit`);
     assert(/[.!?؟…]$/.test(cut), "ends on a sentence terminator, not mid-word");
     assert(cut.includes("این یک جملهٔ کامل است."), "kept whole sentences");
+  });
+
+  await test("Telegram account creation is intercepted before login and model calls", async () => {
+    for (const text of ["کاربر جدید بساز", "نمیخوام لاگین کنم کاربر جدید بساز", "شماره تماس : 09000000000"]) {
+      const before = calls.length;
+      const outcome = await handleTelegramUpdate(telegramUpdate({ text }));
+      assertEqual(outcome.status, "users-unavailable", "honest unsupported response");
+      const outgoing = calls.slice(before);
+      assert(!outgoing.some(call => call.url.includes("openrouter") || call.url.includes("/auth/otp/")), "no model or OTP call");
+    }
+  });
+
+  await test("negative login requests never start OTP", async () => {
+    const { isOtpLoginIntent } = await import("@/lib/auth/telegram-login");
+    for (const text of ["نمیخوام لاگین کنم کاربر جدید بساز", "نمی‌خواهم وارد حساب شوم", "I don't want to log in"]) {
+      assertEqual(isOtpLoginIntent(text), false, "negated login rejected");
+    }
+    assertEqual(isOtpLoginIntent("میخوام لاگین کنم"), true, "positive login still works");
+  });
+
+  await test("unconnected Telegram user operations do not collect personal data", async () => {
+    const { isUnsupportedUserRequest } = await import("@/lib/telegram/user-requests");
+    for (const text of ["کاربر جدید بساز", "نمیخوام لاگین کنم کاربر جدید بساز", "نام : نمونه", "شماره تماس : 09000000000", "create a new user"]) {
+      assertEqual(isUnsupportedUserRequest(text), true, "account request intercepted");
+    }
+    assertEqual(isUnsupportedUserRequest("میخوام لاگین کنم"), false, "login not intercepted");
+    assertEqual(isUnsupportedUserRequest("09000000000"), false, "bare phone stays in OTP protection");
+  });
+
+  await test("provider analysis envelopes are rejected", async () => {
+    const { containsAnalysis } = await import("@/lib/openrouter/client");
+    assert(containsAnalysis("1.  **Analyze the Request:**\nprivate analysis"), "numbered analysis caught");
+    assert(containsAnalysis("<think>private analysis</think>hello"), "think tags caught");
+    assertEqual(containsAnalysis("سلام! لطفاً درخواستت را روشن‌تر بگو."), false, "ordinary response accepted");
   });
 
   console.log(`\n${failures.length === 0 ? "🎉" : "⚠️"}  ${passed} passed, ${failures.length} failed\n`);

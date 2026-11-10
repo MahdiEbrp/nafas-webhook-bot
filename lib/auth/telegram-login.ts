@@ -50,6 +50,7 @@ export function isOtpCodeLikeMessage(message: string): boolean {
 
 export function isOtpLoginIntent(message: string): boolean {
   const text = normalize(message).toLowerCase();
+  if (/(?:نمی ?خواهم|نمی ?خوام|نمیخواهم|نمیخوام|نمی ?خواستم|don[’']t want|do not want|no need to).{0,40}(?:لاگین|وارد|ورود|sign ?in|log ?in)/u.test(text)) return false;
   return /(?:می ?خواهم|می ?خوام|قصد دارم|i want to|please).{0,32}(?:لاگین|وارد|ورود|sign ?in|log ?in)/u.test(text)
     || /(?:لاگین|ورود|sign ?in|log ?in).{0,24}(?:کن|بشم|شوم|حساب|account|please|now)/u.test(text);
 }

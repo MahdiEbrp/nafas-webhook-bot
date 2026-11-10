@@ -496,3 +496,16 @@ curl -X POST https://<your-app>/api/chat \
 **حدس نمی‌زند**؛ `error` برمی‌گرداند و از کاربر می‌خواهد دوباره تلاش کند.
 
 مسیرهای دیگر: `GET /api/health`، `GET|POST /api/telegram/setup`.
+
+### Telegram user-management availability
+
+`UserManager` is not connected to the Telegram bridge. Telegram therefore rejects
+user-management requests and labeled account-detail submissions with an explicit
+unavailable message, before invoking OTP or a language model. It does not collect
+new-user profiles or claim an account was created. Connecting the users API with
+trusted per-actor authorization and confirmation handling is still required for
+live account creation; the in-memory demo is not a substitute.
+
+Negated login requests do not start OTP. Known analysis envelopes returned in a
+provider's `content` are rejected and use the existing model fallback chain;
+this heuristic is not a guarantee against every possible malformed response.
