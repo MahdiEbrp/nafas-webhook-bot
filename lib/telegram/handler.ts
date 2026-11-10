@@ -212,17 +212,47 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     return { handled: true, chatId, status: "otp-private-only" };
   }
 
+  const ruleContext = message.chat.type === "private"
+    ? await otpClient.getRuleRequestContext(authOwnerId)
+    : null;
+
   if (message.chat.type === "private" && text) {
+    // If there's a pending user creation waiting for input, route to it
+    // instead of SMS login interception.
+    const pendingUser = rulesAssistant.getPendingUserCreation(
+      `telegram-chat-${chatId}`,
+      authOwnerId,
+    );
+    if (pendingUser && ruleContext) {
+      // Determine which field is missing and accept this message as input
+      const required = ["fullName", "email", "phone", "password", "roleKey"];
+      const missing = required.filter((f) => !pendingUser.fields[f]);
+      const field = missing[0];
+      if (field) {
+        const result = await rulesAssistant.completeUserCreation(
+          `telegram-chat-${chatId}`,
+          authOwnerId,
+          field as "fullName" | "email" | "phone" | "password" | "roleKey",
+          text,
+          ruleContext,
+          locale,
+        );
+        if (result.done) {
+          await replyText(chatId, result.reply ?? "", { replyToMessageId: message.message_id });
+          return { handled: true, chatId, status: "user-created", text: result.reply };
+        } else {
+          await replyText(chatId, result.reply ?? "", { replyToMessageId: message.message_id });
+          return { handled: true, chatId, status: "user-creation-pending", text: result.reply };
+        }
+      }
+    }
+
     const loginResult = await otpLogin.handle(authOwnerId, text, locale);
     if (loginResult.handled) {
       await replyText(chatId, loginResult.reply, { replyToMessageId: message.message_id });
       return { handled: true, chatId, status: loginResult.status, text: loginResult.reply };
     }
   }
-
-  const ruleContext = message.chat.type === "private"
-    ? await otpClient.getRuleRequestContext(authOwnerId)
-    : null;
 
   /* ── 3. The phone gate ─────────────────────────────────────────────────
    *

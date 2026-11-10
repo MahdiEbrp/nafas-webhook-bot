@@ -40,6 +40,10 @@ export type RulesAssistantOptions = {
 };
 
 type PendingConfirmation = { token: string; actorId: string };
+type PendingUserCreation = {
+  actorId: string;
+  fields: Record<string, string>;
+};
 type ToolArguments = Record<string, unknown>;
 type ToolOutcome = { read: true; result: unknown } | { read: false; reply: string; kind: "proposed" | "error" };
 
@@ -380,6 +384,7 @@ export class RulesAssistant {
   private readonly manager: RuleManager;
   private readonly completeImpl: typeof complete;
   private readonly pending = new Map<string, PendingConfirmation>();
+  private readonly pendingUserCreation = new Map<string, PendingUserCreation>();
 
   constructor(options: RulesAssistantOptions = {}) {
     this.manager = options.manager ?? new RuleManager();
@@ -387,7 +392,74 @@ export class RulesAssistant {
   }
 
   hasPending(conversationId: string, actorId: string): boolean {
-    return this.pending.has(`${conversationId}\\u0000${actorId}`);
+    return this.pending.has(`${conversationId}\\u0000${actorId}`) ||
+      this.pendingUserCreation.has(`${conversationId}\\u0000${actorId}`);
+  }
+
+  /**
+   * Check if there is a pending user creation waiting for field input.
+   * Used by the Telegram handler to route phone numbers during user creation
+   * instead of intercepting them as SMS login.
+   */
+  getPendingUserCreation(conversationId: string, actorId: string): PendingUserCreation | undefined {
+    return this.pendingUserCreation.get(`${conversationId}\u0000${actorId}`);
+  }
+
+  /**
+   * Complete a pending user creation by filling in a field from raw chat input.
+   * Returns the completed user if all fields are present, or null if more input
+   * is needed.
+   */
+  async completeUserCreation(
+    conversationId: string,
+    actorId: string,
+    field: "fullName" | "email" | "phone" | "password" | "roleKey",
+    value: string,
+    context: RuleRequestContext,
+    locale: "fa" | "en",
+  ): Promise<{ done: boolean; result?: CreateUserResult; reply?: string }> {
+    const key = `${conversationId}\u0000${actorId}`;
+    const pending = this.pendingUserCreation.get(key);
+    if (!pending) {
+      return { done: false, reply: locale === "en" ? "No pending user creation." : "ساخت کاربری در انتظار نیست." };
+    }
+
+    pending.fields[field] = value;
+
+    // Check if all required fields are present
+    const required = ["fullName", "email", "phone", "password", "roleKey"];
+    const missing = required.filter((f) => !pending.fields[f]);
+    if (missing.length > 0) {
+      const fieldNames: Record<string, string> = {
+        fullName: "نام کامل",
+        email: "ایمیل",
+        phone: "شماره تماس",
+        password: "رمز عبور",
+        roleKey: "نقش کاربر",
+      };
+      return {
+        done: false,
+        reply: locale === "en"
+          ? `Still need: ${missing.map((f) => fieldNames[f]).join(", ")}`
+          : `هنوز نیاز به: ${missing.map((f) => fieldNames[f]).join(", ")}`,
+      };
+    }
+
+    this.pendingUserCreation.delete(key);
+
+    const result = await this.manager.createUser({
+      fullName: pending.fields.fullName!,
+      email: pending.fields.email!,
+      phone: pending.fields.phone!,
+      password: pending.fields.password!,
+      roleKey: pending.fields.roleKey!,
+    }, context);
+
+    return result.error
+      ? { done: true, result, reply: locale === "en"
+          ? `Failed to create user: ${result.error}`
+          : `خطا در ایجاد کاربر: ${result.error}` }
+      : { done: true, result, reply: formatCreateUserResult(result, locale) };
   }
 
   /**
@@ -498,7 +570,49 @@ export class RulesAssistant {
     conversationId: string,
   ): Promise<ToolOutcome> {
     if (name === "create_user") {
-      const result = await this.manager.createUser(args as CreateUserInput, context);
+      const input = args as Partial<Record<string, string>>;
+      const key = `${conversationId}\u0000${context.actorId}`;
+
+      // Store partial input; missing fields will be requested from chat
+      const existing = this.pendingUserCreation.get(key);
+      const fields: Record<string, string> = existing ? { ...existing.fields } : {};
+      for (const f of ["fullName", "email", "phone", "password", "roleKey"]) {
+        if (input[f]) fields[f] = input[f];
+      }
+      this.pendingUserCreation.set(key, { actorId: context.actorId, fields });
+
+      const required = ["fullName", "email", "phone", "password", "roleKey"];
+      const missing = required.filter((f) => !fields[f]);
+      if (missing.length > 0) {
+        const fieldNames: Record<string, string> = {
+          fullName: "نام کامل",
+          email: "ایمیل",
+          phone: "شماره تماس",
+          password: "رمز عبور",
+          roleKey: "نقش کاربر",
+        };
+        return {
+          read: true,
+          result: {
+            error: null,
+            status: 200,
+            requestId: undefined,
+            formatted: locale === "en"
+              ? `Please provide: ${missing.map((f) => fieldNames[f]).join(", ")}`
+              : `لطفاً این اطلاعات را بفرستید: ${missing.map((f) => fieldNames[f]).join(", ")}`,
+          },
+        };
+      }
+
+      this.pendingUserCreation.delete(key);
+      const result = await this.manager.createUser({
+        fullName: fields.fullName!,
+        email: fields.email!,
+        phone: fields.phone!,
+        password: fields.password!,
+        roleKey: fields.roleKey!,
+      }, context);
+
       return result.error
         ? { read: true, result: { error: result.error, status: result.status, requestId: result.requestId } }
         : { read: true, result: { id: result.id, formatted: formatCreateUserResult(result, locale) } };
