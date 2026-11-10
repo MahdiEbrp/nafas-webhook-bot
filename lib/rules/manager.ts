@@ -484,8 +484,9 @@ export class RuleManager {
           error: result.reason, status: result.status, requestId: result.requestId,
         };
       }
-      const body = isRecord(result.body) ? result.body : {};
-      // beauty-clinic returns { items: [...], total, page, perPage, totalPages }
+      const wrapped = isRecord(result.body) ? result.body : {};
+      // beauty-clinic wraps all success responses in { data: ... }
+      const body = isRecord(wrapped.data) ? wrapped.data : wrapped;
       const items = Array.isArray(body.items) ? body.items : [];
       const pagination = isRecord(body) ? body : {};
       return {
