@@ -36,6 +36,8 @@ import { confirmPhoneText, ensurePhone } from "@/lib/telegram/phone-gate";
 import { EncryptedOtpLoginFlowStore } from "@/lib/auth/login-flow-store";
 import { SmsOtpClient } from "@/lib/auth/sms-otp";
 import { TelegramOtpLogin, isOtpCodeLikeMessage, isOtpLoginIntent, isPhoneNumberMessage } from "@/lib/auth/telegram-login";
+import { TelegramWorkingHours, isWorkingHoursRequest } from "@/lib/telegram/working-hours";
+import { isUserManagementMessage } from "@/lib/telegram/users";
 import { TelegramUsers } from "@/lib/telegram/users";
 import { RulesAssistant, isRulesRequestCandidate } from "@/lib/rules/assistant";
 
@@ -55,6 +57,7 @@ const otpClient = new SmsOtpClient();
 const otpLogin = new TelegramOtpLogin({ otpClient, flowStore: new EncryptedOtpLoginFlowStore() });
 const rulesAssistant = new RulesAssistant({ telegramMode: true });
 const telegramUsers = new TelegramUsers();
+const workingHours = new TelegramWorkingHours();
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -218,6 +221,18 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const ruleContext = message.chat.type === "private"
     ? await otpClient.getRuleRequestContext(authOwnerId)
     : null;
+
+  // Explicit domain switches cancel old proposals so “confirm” can never
+  // accidentally approve a change from a different administrative workflow.
+  if (isWorkingHoursRequest(text)) {
+    telegramUsers.clear(authOwnerId);
+    rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
+  } else if (isUserManagementMessage(text) || isRulesRequestCandidate(text)) workingHours.clear(authOwnerId);
+  const hoursResult = await workingHours.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  if (hoursResult) {
+    await sendMessage({ chatId, text: hoursResult.reply });
+    return { handled: true, chatId, status: hoursResult.status };
+  }
 
   const usersResult = await telegramUsers.handle(authOwnerId, message.text ?? "", ruleContext, message.chat.type === "private");
   if (usersResult) {

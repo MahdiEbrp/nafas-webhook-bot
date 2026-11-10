@@ -148,7 +148,11 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
         : "\n\n• ورود به حساب نفس با کد یک‌بارمصرف پیامکی — مثلاً: «می‌خواهم لاگین کنم». ذخیره‌سازی امن باید پیکربندی شده باشد."
       : "";
     const rulesEnabled = Boolean(input.rulesAssistant && input.ruleContext);
-    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}`;
+    const hoursCapability = input.otpLoginAvailable
+      ? locale === "en" ? "\n\n🕒 Working hours: list/search, create, view, edit times/capacity/slot patterns, activate/deactivate and delete (including bulk). Say what you want naturally in a private chat. Mutations require a permitted session and explicit confirmation."
+        : "\n\n🕒 ساعات کاری: فهرست و جست‌وجو، ساخت، مشاهده، تغییر ساعت و ظرفیت و الگوهای نوبت، فعال/غیرفعال‌سازی و حذف تکی یا گروهی. در خصوصی خواسته‌ات را طبیعی بنویس؛ تغییرها به نشست مجاز و تأیید صریح نیاز دارند."
+      : "";
+    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}${hoursCapability}`;
 
     pushMessage(input.sessionId, "user", message, config.history.maxMessages);
     pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);

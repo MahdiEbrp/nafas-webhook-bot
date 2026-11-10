@@ -3376,6 +3376,20 @@ async function main(): Promise<void> {
     assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
   });
 
+  await test("working-hours contract and confirmed conversational operations", async () => {
+    const { testWorkingHours } = await import("./working-hours-test");
+    await testWorkingHours();
+  });
+
+  await test("Telegram working-hours requests require a private authenticated session", async () => {
+    const before = calls.length;
+    const result = await handleTelegramUpdate(telegramUpdate({ text: "ساعات کاری را نشان بده" }));
+    assertEqual(result.status, "hours-auth-required", "working-hours route precedes model and OTP handling");
+    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/working-hours")), "no model/API request without authentication");
+    const grouped = await handleTelegramUpdate(telegramUpdate({ text: "ساعات کاری را نشان بده", chat: { id: -100200300, type: "group" } }));
+    assertEqual(grouped.status, "hours-private-only", "no working-hours account data in groups");
+  });
+
   await test("beauty-clinic rules API contract and conversational flows", async () => {
     const { testRulesContract } = await import("./rules-contract-test");
     await testRulesContract();
