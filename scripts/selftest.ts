@@ -3376,6 +3376,20 @@ async function main(): Promise<void> {
     assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
   });
 
+  await test("All payment admin API contracts and secure confirmed workflows", async () => {
+    const { testPaymentAdmin } = await import("./payment-admin-test");
+    await testPaymentAdmin();
+  });
+
+  await test("Telegram payment management is private and authenticated", async () => {
+    const before = calls.length;
+    const result = await handleTelegramUpdate(telegramUpdate({ text: "آمار پرداخت را نشان بده" }));
+    assertEqual(result.status, "payment-auth-required", "payment requires login");
+    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/admin/payment")), "no model or payment request without authentication");
+    const grouped = await handleTelegramUpdate(telegramUpdate({ text: "آمار پرداخت را نشان بده", chat: { id: -100200300, type: "group" } }));
+    assertEqual(grouped.status, "payment-private-only", "no payment management in groups");
+  });
+
   await test("Settings API contracts, explanations and secure conversational operations", async () => {
     const { testSettingsAdmin } = await import("./settings-admin-test");
     await testSettingsAdmin();

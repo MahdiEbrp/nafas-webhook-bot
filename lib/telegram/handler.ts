@@ -1,3 +1,4 @@
+import { TelegramPaymentAdmin, isPaymentAdminRequest } from "@/lib/telegram/payment-admin";
 import { TelegramSettingsAdmin, isSettingsAdminRequest } from "@/lib/telegram/settings-admin";
 import { TelegramSmsAdmin, isSmsAdminRequest } from "@/lib/telegram/sms-admin";
 /**
@@ -64,6 +65,7 @@ const workingHours = new TelegramWorkingHours();
 const socialLinks = new TelegramSocialLinks();
 const smsAdmin = new TelegramSmsAdmin();
 const settingsAdmin = new TelegramSettingsAdmin();
+const paymentAdmin = new TelegramPaymentAdmin();
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -232,6 +234,27 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const collectingSocial = socialLinks.isCollecting(authOwnerId);
   const collectingSms = smsAdmin.isCollecting(authOwnerId);
   const collectingSettings = settingsAdmin.isCollecting(authOwnerId);
+  const collectingPayment = paymentAdmin.isCollecting(authOwnerId);
+  const paymentSwitch = isPaymentAdminRequest(text);
+  const otherPaymentDomain = isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text);
+  if (!collectingPayment && otherPaymentDomain && !paymentSwitch) paymentAdmin.clear(authOwnerId);
+  if (!collectingUser && !collectingSocial && !collectingSms && !collectingSettings && (collectingPayment || paymentSwitch)) {
+    settingsAdmin.clear(authOwnerId);
+    smsAdmin.clear(authOwnerId);
+    socialLinks.clear(authOwnerId);
+    telegramUsers.clear(authOwnerId);
+    workingHours.clear(authOwnerId);
+    rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
+  }
+  const paymentResult = collectingUser || collectingSocial || collectingSms || collectingSettings ? null : await paymentAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  if (paymentResult) {
+    if (paymentResult.deleteSensitiveMessage) {
+      const removed = await deleteMessage(chatId, message.message_id);
+      if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام اطلاعات پرداخت ممکن نشد؛ خودت آن را حذف کن. مقدار وارد مدل یا تاریخچه نشده است." });
+    }
+    await sendMessage({ chatId, text: paymentResult.reply });
+    return { handled: true, chatId, status: paymentResult.status };
+  }
   if (!collectingSettings && !isSettingsAdminRequest(text) && (isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) settingsAdmin.clear(authOwnerId);
   if (!collectingUser && !collectingSocial && !collectingSms && (collectingSettings || isSettingsAdminRequest(text))) {
     smsAdmin.clear(authOwnerId);
