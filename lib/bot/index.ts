@@ -27,7 +27,7 @@ import { dateInstruction, systemPrompt } from "./prompt";
 import { answerDateQuestion } from "@/lib/dates/intent";
 import { nowFacts } from "@/lib/dates/engine";
 import { clearSession, countMessages, getMessages, pushMessage } from "./session";
-import { isRulesRequestCandidate, rulesCapabilitiesText, type RulesAssistant } from "@/lib/rules/assistant";
+import { isRulesRequestCandidate, type RulesAssistant } from "@/lib/rules/assistant";
 import type { RuleRequestContext } from "@/lib/rules/types";
 
 export type ChatInput = {
@@ -142,21 +142,14 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
    */
   if (isCapabilityQuestion(message)) {
     const userCapabilities = capabilityAnswer(locale);
-    const loginCapability = input.otpLoginAvailable
-      ? locale === "en"
-        ? "\n\n• Sign in to a Nafas account with an SMS one-time code — for example: “I want to log in.” Secure database storage must be configured."
-        : "\n\n• ورود به حساب نفس با کد یک‌بارمصرف پیامکی — مثلاً: «می‌خواهم لاگین کنم». ذخیره‌سازی امن باید پیکربندی شده باشد."
-      : "";
     const rulesEnabled = Boolean(input.rulesAssistant && input.ruleContext);
-    const hoursCapability = input.otpLoginAvailable
-      ? locale === "en" ? "\n\n🕒 Working hours: list/search, create, view, edit times/capacity/slot patterns, activate/deactivate and delete (including bulk). Say what you want naturally in a private chat. Mutations require a permitted session and explicit confirmation."
-        : "\n\n🕒 ساعات کاری: فهرست و جست‌وجو، ساخت، مشاهده، تغییر ساعت و ظرفیت و الگوهای نوبت، فعال/غیرفعال‌سازی و حذف تکی یا گروهی. در خصوصی خواسته‌ات را طبیعی بنویس؛ تغییرها به نشست مجاز و تأیید صریح نیاز دارند."
-      : "";
-    const socialCapability = input.otpLoginAvailable
-      ? locale === "en" ? "\n\n🔗 Social links: list/search, view, create bilingual labels, edit URLs/images/order/status and delete individually or in bulk. Ask naturally in private; permitted session and explicit confirmation required for changes."
-        : "\n\n🔗 لینک‌های اجتماعی: فهرست و جست‌وجو، مشاهده، ساخت با عنوان فارسی و انگلیسی، تغییر آدرس/تصویر/ترتیب/وضعیت و حذف تکی یا گروهی. در خصوصی طبیعی درخواست کن؛ تغییر به نشست مجاز و تأیید صریح نیاز دارد."
-      : "";
-    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}${hoursCapability}${socialCapability}${input.otpLoginAvailable ? "\n\n💳 مدیریت پرداخت: آمار، درگاه‌ها، تراکنش‌ها، ساخت درخواست پرداخت و تست با تأیید صریح. بگو «راهنمای پرداخت».\n\n⚙️ تنظیمات سیستم: فهرست، توضیح کاربرد هر کلید، ساخت، ویرایش و حذف با تأیید. بگو «راهنمای تنظیمات».\n\n📨 مدیریت پیامک: آمار و گزارش، سرویس‌ها و قالب‌ها، گیرنده‌ها و دریافتی‌ها. در خصوصی درخواست کن؛ ارسال و تست هزینه‌دار فقط با تأیید صریح انجام می‌شود." : ""}`;
+    const reply = input.otpLoginAvailable
+      ? locale === "en"
+        ? "General chat and calendar questions; SMS sign-in (say “I want to log in”); and private Telegram management for users, rules, working hours, social links, settings, SMS, email and payments. Admin actions require an authorized session; changes wait for your explicit confirmation."
+        : "پرسش‌های عمومی و تاریخ؛ ورود به حساب نفس با کد یک‌بارمصرف پیامکی («می‌خواهم لاگین کنم»)؛ و در تلگرام خصوصی مدیریت کاربران، قوانین، ساعات کاری، لینک‌ها، تنظیمات، پیامک، ایمیل و پرداخت. کارهای مدیریتی به نشست مجاز و تغییرها به تأیید صریح نیاز دارند."
+      : `${userCapabilities}\n\n${locale === "en"
+        ? `I can also list and manage rules. ${rulesEnabled ? "This connection has the authenticated rules assistant enabled." : "This request has no trusted authenticated session; sign in privately on Telegram."} Changes wait for your confirmation.`
+        : `قوانین را هم می‌توانم فهرست و مدیریت کنم. ${rulesEnabled ? "در این اتصال، دستیار قوانین با نشست احراز هویت‌شده فعال است." : "این درخواست نشست احراز هویت معتبر ندارد؛ در تلگرام خصوصی با پیامک وارد شو."} تغییرها پس از تأیید اجرا می‌شوند.`}`;
 
     pushMessage(input.sessionId, "user", message, config.history.maxMessages);
     pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);

@@ -897,3 +897,19 @@ whitelisting means provider snapshots rely on `updatedAt` for secret/config chan
 Permissions remain enforced upstream: payment.read/write/manage/send. Tests are HTTP
 mocks only: `npm run payment:test` or `npm run check`. No real gateway requests or
 production configuration changes are performed during development/tests.
+
+### Telegram email administration
+
+The private, authenticated email workflow covers all 16 operations in the
+upstream `/api/v1/admin/email` subtree: overview; provider list/create/read/update/soft-delete/test;
+message report/send/delete-log; active-recipient list; and template list/create/read/update/soft-delete.
+All writes, real email sends and provider tests require a one-time confirmation. Addresses,
+email bodies, and SMTP credentials are collected locally and not sent to the intent model.
+A send or test may deliver real mail; ambiguous network results are not retried automatically.
+Deleting a message only removes its local report, never recalls it. See
+[`docs/email-admin.fa.md`](docs/email-admin.fa.md) for route coverage, security details,
+financial/operational caveats and test instructions.
+
+The answer to “چه کارهایی بلدی؟” is intentionally a short summary now: it groups supported
+admin domains instead of printing every individual operation; request a specific help topic
+(e.g. «راهنمای ایمیل») for details.

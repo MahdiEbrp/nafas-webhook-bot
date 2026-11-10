@@ -1,3 +1,4 @@
+import { TelegramEmailAdmin, isEmailAdminRequest } from "@/lib/telegram/email-admin";
 import { TelegramPaymentAdmin, isPaymentAdminRequest } from "@/lib/telegram/payment-admin";
 import { TelegramSettingsAdmin, isSettingsAdminRequest } from "@/lib/telegram/settings-admin";
 import { TelegramSmsAdmin, isSmsAdminRequest } from "@/lib/telegram/sms-admin";
@@ -66,6 +67,7 @@ const socialLinks = new TelegramSocialLinks();
 const smsAdmin = new TelegramSmsAdmin();
 const settingsAdmin = new TelegramSettingsAdmin();
 const paymentAdmin = new TelegramPaymentAdmin();
+const emailAdmin = new TelegramEmailAdmin();
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -235,9 +237,31 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const collectingSms = smsAdmin.isCollecting(authOwnerId);
   const collectingSettings = settingsAdmin.isCollecting(authOwnerId);
   const collectingPayment = paymentAdmin.isCollecting(authOwnerId);
+  const collectingEmail = emailAdmin.isCollecting(authOwnerId);
+  const emailSwitch = isEmailAdminRequest(text);
   const paymentSwitch = isPaymentAdminRequest(text);
-  const otherPaymentDomain = isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text);
+  const otherPaymentDomain = isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text) || emailSwitch;
+  const otherEmailDomain = paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text);
+  if (!collectingEmail && otherEmailDomain && !emailSwitch) emailAdmin.clear(authOwnerId);
   if (!collectingPayment && otherPaymentDomain && !paymentSwitch) paymentAdmin.clear(authOwnerId);
+  if (!collectingUser && !collectingSocial && !collectingSms && !collectingSettings && !collectingPayment && (collectingEmail || emailSwitch)) {
+    settingsAdmin.clear(authOwnerId);
+    smsAdmin.clear(authOwnerId);
+    socialLinks.clear(authOwnerId);
+    telegramUsers.clear(authOwnerId);
+    workingHours.clear(authOwnerId);
+    paymentAdmin.clear(authOwnerId);
+    rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
+  }
+  const emailResult = collectingUser || collectingSocial || collectingSms || collectingSettings || collectingPayment ? null : await emailAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  if (emailResult) {
+    if (emailResult.deleteSensitiveMessage) {
+      const removed = await deleteMessage(chatId, message.message_id);
+      if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام حاوی نشانی، متن یا اطلاعات سرویس ایمیل ممکن نشد؛ لطفاً خودت آن را حذف کن. این مقدار وارد مدل یا تاریخچه نشده است." });
+    }
+    await sendMessage({ chatId, text: emailResult.reply });
+    return { handled: true, chatId, status: emailResult.status };
+  }
   if (!collectingUser && !collectingSocial && !collectingSms && !collectingSettings && (collectingPayment || paymentSwitch)) {
     settingsAdmin.clear(authOwnerId);
     smsAdmin.clear(authOwnerId);
