@@ -211,7 +211,7 @@ export class SmsOtpClient {
       ok: true,
       ...(result.requestId ? { requestId: result.requestId } : {}),
       sessionStored: true,
-      ruleContextAvailable: Boolean(csrfToken),
+      ruleContextAvailable: Boolean(sessionCookie),
     };
   }
 
