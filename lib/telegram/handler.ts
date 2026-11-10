@@ -37,7 +37,7 @@ import { EncryptedOtpLoginFlowStore } from "@/lib/auth/login-flow-store";
 import { SmsOtpClient } from "@/lib/auth/sms-otp";
 import { TelegramOtpLogin, isOtpCodeLikeMessage, isOtpLoginIntent, isPhoneNumberMessage } from "@/lib/auth/telegram-login";
 import { TelegramUsers } from "@/lib/telegram/users";
-import { RulesAssistant } from "@/lib/rules/assistant";
+import { RulesAssistant, isRulesRequestCandidate } from "@/lib/rules/assistant";
 
 export type BridgeOutcome = {
   handled: boolean;
@@ -53,7 +53,7 @@ export type BridgeOutcome = {
 const MAX_TEXT = 3900;
 const otpClient = new SmsOtpClient();
 const otpLogin = new TelegramOtpLogin({ otpClient, flowStore: new EncryptedOtpLoginFlowStore() });
-const rulesAssistant = new RulesAssistant();
+const rulesAssistant = new RulesAssistant({ telegramMode: true });
 const telegramUsers = new TelegramUsers();
 
 function sixDigitCode(text: string): boolean {
@@ -228,6 +228,18 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     // Account details and temporary passwords are never added to model history.
     await sendMessage({ chatId, text: usersResult.reply });
     return { handled: true, chatId, status: usersResult.status };
+  }
+
+  const rulesConversation = `telegram-rules-${authOwnerId}`;
+  if (/^\/(?:clear|reset|new)\b/iu.test(text) || isOtpLoginIntent(text)) {
+    rulesAssistant.clear(rulesConversation, ruleContext?.actorId ?? authOwnerId);
+  } else if (message.chat.type === "private" && ruleContext && text
+    && !sensitiveOtpInput(text) && !/^(?:رمز|password)\s*[:：]/iu.test(text)
+    && (isRulesRequestCandidate(text) || rulesAssistant.hasPending(rulesConversation, ruleContext.actorId)
+      || rulesAssistant.hasFollowup(rulesConversation, ruleContext.actorId, text))) {
+    const result = await rulesAssistant.handle({ conversationId: rulesConversation, message: text, locale, context: ruleContext });
+    await sendMessage({ chatId, text: result.reply });
+    return { handled: true, chatId, status: `rules-${result.kind}` };
   }
 
   if (message.chat.type === "private" && text) {

@@ -1989,7 +1989,7 @@ async function main(): Promise<void> {
     assertEqual(calls.length, beforeInvalid, "invalid input never reaches API");
   });
 
-  await test("SMS OTP failures preserve API error codes and fail closed without CSRF", async () => {
+  await test("SMS OTP failures preserve API errors and cookie sessions support Origin-protected rules", async () => {
     const fetchWith = (status: number, payload: unknown, headers = new Headers({ "content-type": "application/json" })): typeof fetch =>
       async () => new Response(JSON.stringify(payload), { status, headers });
     const invalid = await new SmsOtpClient({ fetchImpl: fetchWith(401, { code: "INVALID_CODE" }) }).verify("09121234567", "123456");
@@ -2013,8 +2013,11 @@ async function main(): Promise<void> {
     };
     const missingCsrfClient = new SmsOtpClient({ fetchImpl: fetchWith(200, { ok: true }, cookieOnly), sessionStore: cookieOnlyStore });
     const missingCsrf = await missingCsrfClient.verify("09121234567", "123456");
-    assertEqual(missingCsrf.ok ? missingCsrf.ruleContextAvailable : null, false, "session without CSRF cannot make a Rules API context");
-    assertEqual(await missingCsrfClient.getRuleRequestContext("09121234567"), null, "context retrieval fails closed without CSRF");
+    // beauty-clinic withSecurity checks Origin/Host on mutations, not a token.
+    assertEqual(missingCsrf.ok ? missingCsrf.ruleContextAvailable : null, true, "cookie session is usable with the verified Origin-based rules contract");
+    const cookieContext = await missingCsrfClient.getRuleRequestContext("09121234567");
+    assertEqual(cookieContext?.sessionCookie, "session=server-session", "trusted cookie session is loaded server-side");
+    assertEqual(cookieContext?.csrfToken, "", "no CSRF token is fabricated");
 
     const storageFailure = new SmsOtpClient({
       fetchImpl: fetchWith(200, { ok: true }, cookieOnly),
@@ -3371,6 +3374,11 @@ async function main(): Promise<void> {
     await deleteMessage(777, 42);
     const request = calls.filter(call => call.url.endsWith("/deleteMessage")).at(-1)!;
     assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
+  });
+
+  await test("beauty-clinic rules API contract and conversational flows", async () => {
+    const { testRulesContract } = await import("./rules-contract-test");
+    await testRulesContract();
   });
 
   await test("beauty-clinic users API contract and Telegram confirmations", async () => {
