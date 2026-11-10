@@ -22,7 +22,8 @@
     "db:check": "tsx scripts/db-check.ts",
     "auth:check": "tsx scripts/auth-check.ts",
     "db:real": "tsx scripts/db-real.ts",
-    "coverage": "c8 --experimental-monocart --all --include \"lib/users/**\" --exclude \"lib/users/types.ts\" --check-coverage --lines 100 --functions 100 --branches 100 --statements 100 --reporter text tsx scripts/selftest.ts"
+    "coverage": "c8 --experimental-monocart --all --include \"lib/users/**\" --exclude \"lib/users/types.ts\" --check-coverage --lines 100 --functions 100 --branches 100 --statements 100 --reporter text tsx scripts/selftest.ts",
+    "sms:test": "tsx scripts/sms-admin-test.ts"
   },
   "dependencies": {
     "@date-fns/tz": "^1.5.0",

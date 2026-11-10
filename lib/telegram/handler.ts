@@ -1,3 +1,4 @@
+import { TelegramSmsAdmin, isSmsAdminRequest } from "@/lib/telegram/sms-admin";
 /**
  * TELEGRAM BRIDGE
  *
@@ -60,6 +61,7 @@ const rulesAssistant = new RulesAssistant({ telegramMode: true });
 const telegramUsers = new TelegramUsers();
 const workingHours = new TelegramWorkingHours();
 const socialLinks = new TelegramSocialLinks();
+const smsAdmin = new TelegramSmsAdmin();
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -226,6 +228,24 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
 
   const collectingUser = telegramUsers.isCollecting(authOwnerId);
   const collectingSocial = socialLinks.isCollecting(authOwnerId);
+  const collectingSms = smsAdmin.isCollecting(authOwnerId);
+  const otherDomain = isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text);
+  if (!collectingSms && otherDomain && !isSmsAdminRequest(text)) smsAdmin.clear(authOwnerId);
+  if (!collectingUser && !collectingSocial && (collectingSms || isSmsAdminRequest(text))) {
+    telegramUsers.clear(authOwnerId);
+    socialLinks.clear(authOwnerId);
+    workingHours.clear(authOwnerId);
+    rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
+  }
+  const smsResult = collectingUser || collectingSocial ? null : await smsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  if (smsResult) {
+    if (smsResult.deleteSensitiveMessage) {
+      const removed = await deleteMessage(chatId, message.message_id);
+      if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام حاوی اطلاعات اتصال ممکن نشد؛ لطفاً خودت آن را حذف کن. مقدار وارد مدل یا تاریخچه نشده است." });
+    }
+    await sendMessage({ chatId, text: smsResult.reply });
+    return { handled: true, chatId, status: smsResult.status };
+  }
   if (!collectingUser && !collectingSocial && isSocialLinksRequest(text)) {
     telegramUsers.clear(authOwnerId);
     workingHours.clear(authOwnerId);
