@@ -76,7 +76,7 @@ const MESSAGES: Record<RuleProposalFailure, string> = {
   "invalid-is-active": "مقدار isActive باید true یا false باشد.",
   "invalid-translations": "نام فارسی و انگلیسی هر دو لازم هستند.",
   "invalid-page": "page باید عدد صحیحی بین ۱ تا ۱۰۰۰۰۰ باشد.",
-  "invalid-per-page": "perPage باید عدد صحیحی بین ۱ تا ۱۰۰ باشد.",
+  "invalid-per-page": "perPage باید عدد صحیحی بین ۱ تا ۵۰ باشد.",
   "invalid-search": "عبارت جست‌وجو نباید بیشتر از ۱۰۰ نویسه باشد.",
   "invalid-status": "status باید all، active یا inactive باشد.",
   "invalid-action": "این عملیات دسته‌ای معتبر نیست.",
@@ -305,7 +305,7 @@ function normalizeListQuery(query: RuleListQuery = {}): Normalized<Required<Pick
     return { ok: false, code: "invalid-page" };
   }
   const perPage = query.perPage === undefined ? 10 : query.perPage;
-  if (typeof perPage !== "number" || !Number.isInteger(perPage) || perPage < 1 || perPage > 100) {
+  if (typeof perPage !== "number" || !Number.isInteger(perPage) || perPage < 1 || perPage > 50) {
     return { ok: false, code: "invalid-per-page" };
   }
   let search: string | undefined;

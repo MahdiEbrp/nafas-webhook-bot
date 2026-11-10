@@ -125,7 +125,7 @@ const RULE_TOOLS: ChatTool[] = [
         type: "object",
         properties: {
           page: { type: "integer", minimum: 1, maximum: 100000 },
-          perPage: { type: "integer", minimum: 1, maximum: 100 },
+          perPage: { type: "integer", minimum: 1, maximum: 50 },
         },
         additionalProperties: false,
       },
@@ -140,7 +140,7 @@ const RULE_TOOLS: ChatTool[] = [
         type: "object",
         properties: {
           page: { type: "integer", minimum: 1, maximum: 100000 },
-          perPage: { type: "integer", minimum: 1, maximum: 100 },
+          perPage: { type: "integer", minimum: 1, maximum: 50 },
           search: { type: "string", maxLength: 100 },
           status: { type: "string", enum: ["all", "active", "inactive"] },
         },
