@@ -1,0 +1,147 @@
+import assert from "node:assert/strict";
+import { SocialLinksApi, validateSocialCommand, type SocialLink } from "../lib/social-links/api";
+import { TelegramSocialLinks, isSocialLinksRequest, socialCard } from "../lib/telegram/social-links";
+import type { SocialPlan } from "../lib/social-links/planner";
+
+export async function testSocialLinks() {
+  const id = "11111111-1111-4111-8111-111111111111", second = "22222222-2222-4222-8222-222222222222";
+  const row: SocialLink = { id, url: "https://example.com/rules/۱۲?ref=a123", labelFa: "اینستاگرام", labelEn: "Instagram", imageUrl: null, displayOrder: 0, isActive: true, createdAt: "2026-03-21T12:00:00Z", updatedAt: "2026-03-21T12:00:00Z" };
+  const other = { ...row, id: second, labelFa: "تلگرام", labelEn: "Telegram" };
+  let items = [row, other];
+  const context = { actorId: "admin", sessionCookie: "session=private", csrfToken: "" };
+  const calls: { url: URL; init: RequestInit }[] = [];
+  let status = 200, malformed = false;
+  const api = new SocialLinksApi(async (url, init) => {
+    const parsed = new URL(String(url));
+    calls.push({ url: parsed, init: init! });
+    assert.equal(parsed.origin, "https://clinic.example", "stored social URLs are never fetched");
+    assert.equal((init!.headers as Record<string, string>).Cookie, context.sessionCookie);
+    assert.equal((init!.headers as Record<string, string>).Origin, "https://clinic.example");
+    assert.equal(init!.redirect, "error");
+    if (status !== 200) return new Response(JSON.stringify({ error: { code: "FORBIDDEN", message: "sensitive" } }), { status });
+    let data: unknown;
+    if (parsed.pathname.endsWith("/bulk")) data = { requested: 2, succeeded: 1, failures: [{ id, code: "OPERATION_FAILED" }] };
+    else if (init!.method === "GET" && parsed.pathname === "/api/v1/admin/social-links") data = { items, total: items.length, page: 1, perPage: 10 };
+    else if (init!.method === "GET") data = { link: parsed.pathname.endsWith(second) ? other : row };
+    else if (init!.method === "PATCH") data = { updated: true };
+    else if (init!.method === "DELETE") data = { deleted: true };
+    else data = { id };
+    return new Response(JSON.stringify({ data: malformed ? {} : data }));
+  }, "https://clinic.example");
+  const create = { labelFa: row.labelFa, labelEn: row.labelEn, url: row.url };
+  for (const operation of ["list", "get", "create", "update", "delete", "bulk"] as const) {
+    const input = operation === "create" ? create : operation === "update" ? { isActive: false } : operation === "bulk" ? { action: "delete", scope: "page", ids: [id, second] } : {};
+    const result = await api.execute({ operation, id, input }, context);
+    assert.equal(result.ok, true, operation);
+    const expected = operation === "bulk" ? "/api/v1/admin/social-links/bulk" : ["list", "create"].includes(operation) ? "/api/v1/admin/social-links" : `/api/v1/admin/social-links/${id}`;
+    assert.equal(calls.at(-1)!.url.pathname, expected);
+    assert.equal(calls.at(-1)!.init.method, { list: "GET", get: "GET", create: "POST", update: "PATCH", delete: "DELETE", bulk: "POST" }[operation]);
+  }
+  for (const bad of ["javascript:alert(1)", "ftp://example.com", "https://", "https://user:password@example.com"]) assert.throws(() => validateSocialCommand({ operation: "create", input: { ...create, url: bad } }));
+  assert.throws(() => validateSocialCommand({ operation: "create", input: { ...create, labelFa: "x".repeat(81) } }));
+  assert.throws(() => validateSocialCommand({ operation: "update", id, input: { imageUrl: null } }));
+  assert.throws(() => validateSocialCommand({ operation: "update", id, input: { imageUrl: "" } }), "empty image alone is not a real update");
+  assert.throws(() => validateSocialCommand({ operation: "update", id, input: {} }));
+  assert.throws(() => validateSocialCommand({ operation: "list", input: { perPage: 51 } }));
+  assert.throws(() => validateSocialCommand({ operation: "delete", id: "../bad", input: {} }));
+  assert(socialCard(row).includes("۱ فروردین ۱۴۰۵"));
+  assert(isSocialLinksRequest("لینک‌های اجتماعی را نشان بده"));
+  assert(!isSocialLinksRequest("ساعات کاری را نشان بده"));
+  assert.equal((await api.execute({ operation: "list", input: {} }, { ...context, sessionCookie: "" })).ok, false);
+
+  let plan: SocialPlan = { operation: "list", input: {} }, now = 100, modelCalls = 0;
+  const flow = new TelegramSocialLinks(api, async (request, rows) => {
+    modelCalls++;
+    assert(!request.includes(context.sessionCookie));
+    if (request.includes("دوم")) assert.equal(rows[1]?.id, second);
+    return plan;
+  }, () => now);
+  const turn = (text: string, ctx = context) => flow.handle("owner", text, ctx, true);
+  assert.equal((await flow.handle("owner", "لینک‌های اجتماعی را نشان بده", null, true))?.status, "social-auth-required");
+  assert.equal((await flow.handle("owner", "لینک‌های اجتماعی را نشان بده", context, false))?.status, "social-private-only");
+  assert.equal((await turn("لینک‌های اجتماعی را نشان بده"))?.status, "social-listed");
+  plan = { operation: "delete", id: second, input: {} };
+  const deletes = () => calls.filter(call => call.init.method === "DELETE").length;
+  const beforeDelete = deletes();
+  assert.equal((await turn("لینک دوم را حذف کن"))?.status, "social-proposed");
+  assert.equal(deletes(), beforeDelete);
+  const plansBefore = modelCalls;
+  assert.equal((await turn("تأیید"))?.status, "social-completed");
+  assert.equal(modelCalls, plansBefore);
+  assert.equal(deletes(), beforeDelete + 1);
+  await turn("تأیید");
+  assert.equal(deletes(), beforeDelete + 1);
+
+  plan = { operation: "list", input: {} };
+  await turn("لینک‌های اجتماعی را نشان بده");
+  plan = { operation: "update", id, input: { url: "https://example.com/new?a=0123" } };
+  assert.equal((await turn("آدرس لینک اجتماعی را عوض کن"))?.status, "social-invalid", "invented URL rejected");
+  assert.equal((await turn("آدرس لینک اجتماعی را به https://example.com/new?a=0123 تغییر بده"))?.status, "social-proposed");
+  assert.equal((await turn("بله"))?.status, "social-completed");
+  assert.deepEqual(JSON.parse(String(calls.at(-1)!.init.body)), { url: "https://example.com/new?a=0123" });
+  plan = { operation: "delete", id: "99999999-9999-4999-8999-999999999999", input: {} };
+  assert.equal((await turn("لینک اجتماعی را حذف کن"))?.status, "social-invalid");
+  plan = { operation: "delete", target: "اینستاگرام", input: {} };
+  items = [{ ...row }, { ...other, labelFa: row.labelFa }];
+  assert.equal((await turn("لینک اینستاگرام را حذف کن"))?.status, "social-clarify", "duplicate labels cannot be guessed");
+  flow.clear("owner"); items = [row];
+  assert.equal((await turn("لینک اینستاگرام را حذف کن"))?.status, "social-proposed");
+  assert.equal((await turn("لغو"))?.status, "social-cancelled");
+
+  const draft = new TelegramSocialLinks(api, async () => { throw new Error("guided input must not reach AI"); }, () => now);
+  const guide = (text: string) => draft.handle("draft", text, context, true);
+  await guide("لینک اجتماعی جدید بساز");
+  assert(draft.isCollecting("draft"));
+  await guide("اینستاگرام"); await guide("Instagram");
+  assert((await guide("javascript:alert(1)"))?.reply.includes("دوباره"));
+  await guide(row.url);
+  assert.equal((await guide("بدون تصویر"))?.status, "social-proposed");
+  const posts = calls.filter(call => call.init.method === "POST").length;
+  assert.equal((await guide("بله"))?.status, "social-completed");
+  assert.equal(calls.filter(call => call.init.method === "POST").length, posts + 1);
+  const body = JSON.parse(String(calls.at(-1)!.init.body));
+  assert.equal(body.url, row.url, "URL digits/query kept exact");
+  assert.equal(body.isActive, true); assert.equal(body.displayOrder, 0);
+  assert.equal(body.imageUrl, undefined);
+  plan = { operation: "delete", id, input: {} };
+  await turn(`لینک اجتماعی ${id} را حذف کن`);
+  assert.equal((await turn("تأیید", { ...context, sessionCookie: "changed" }))?.status, "social-session-changed");
+  await turn(`لینک اجتماعی ${id} را حذف کن`);
+  now += 300_001;
+  assert.equal((await turn("بله"))?.status, "social-expired");
+  // Bulk pronouns never silently expand the selection to the whole database.
+  flow.clear("owner"); items = [row, other];
+  plan = { operation: "list", input: { status: "inactive", search: "Instagram" } };
+  await turn("لینک‌های اجتماعی غیرفعال را نشان بده");
+  plan = { operation: "list", input: { page: 2 } };
+  await turn("صفحه دوم را نشان بده");
+  assert.equal(calls.at(-1)!.url.searchParams.get("status"), "inactive");
+  assert.equal(calls.at(-1)!.url.searchParams.get("search"), "Instagram");
+  plan = { operation: "bulk", input: { action: "delete", scope: "filtered", filters: {} } };
+  const beforeBulk = calls.filter(call => call.url.pathname.endsWith("/bulk")).length;
+  assert.equal((await turn("همه‌شان را پاک کن"))?.status, "social-proposed");
+  assert.equal(calls.filter(call => call.url.pathname.endsWith("/bulk")).length, beforeBulk);
+  await turn("تأیید");
+  const scopedBulk = JSON.parse(String(calls.at(-1)!.init.body));
+  assert.equal(scopedBulk.scope, "page");
+  assert.deepEqual(scopedBulk.ids, [id, second]);
+  plan = { operation: "bulk", input: { action: "deactivate", scope: "filtered", filters: { status: "active" } } };
+  await turn("همه لینک‌های اجتماعی فعال را غیرفعال کن");
+  await turn("بله");
+  assert.equal(JSON.parse(String(calls.at(-1)!.init.body)).scope, "filtered");
+  plan = { operation: "delete", id, input: {} };
+  await turn(`لینک اجتماعی ${id} را حذف کن`);
+  const oldDate = row.updatedAt;
+  row.updatedAt = "2026-03-22T12:00:00Z";
+  assert.equal((await turn("تأیید"))?.status, "social-conflict");
+  row.updatedAt = oldDate;
+  status = 403;
+  assert.deepEqual(await api.execute({ operation: "list", input: {} }, context), { ok: false, status: 403, code: "FORBIDDEN" });
+  status = 200; malformed = true;
+  assert.deepEqual(await api.execute({ operation: "delete", id, input: {} }, context), { ok: false, code: "INVALID_RESPONSE" });
+  const failing = new SocialLinksApi(async () => { throw new Error("secret"); }, "https://clinic.example");
+  assert.deepEqual(await failing.execute({ operation: "list", input: {} }, context), { ok: false, code: "REQUEST_FAILED" });
+}
+if (process.argv[1]?.endsWith("social-links-test.ts")) {
+  testSocialLinks().then(() => console.log("Social-links API and conversational tests passed.")).catch(error => { console.error(error); process.exitCode = 1; });
+}
