@@ -36,6 +36,7 @@ import { confirmPhoneText, ensurePhone } from "@/lib/telegram/phone-gate";
 import { EncryptedOtpLoginFlowStore } from "@/lib/auth/login-flow-store";
 import { SmsOtpClient } from "@/lib/auth/sms-otp";
 import { TelegramOtpLogin, isOtpCodeLikeMessage, isOtpLoginIntent, isPhoneNumberMessage } from "@/lib/auth/telegram-login";
+import { TelegramSocialLinks, isSocialLinksRequest } from "@/lib/telegram/social-links";
 import { TelegramWorkingHours, isWorkingHoursRequest } from "@/lib/telegram/working-hours";
 import { isUserManagementMessage } from "@/lib/telegram/users";
 import { TelegramUsers } from "@/lib/telegram/users";
@@ -58,6 +59,7 @@ const otpLogin = new TelegramOtpLogin({ otpClient, flowStore: new EncryptedOtpLo
 const rulesAssistant = new RulesAssistant({ telegramMode: true });
 const telegramUsers = new TelegramUsers();
 const workingHours = new TelegramWorkingHours();
+const socialLinks = new TelegramSocialLinks();
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -222,13 +224,26 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     ? await otpClient.getRuleRequestContext(authOwnerId)
     : null;
 
+  const collectingUser = telegramUsers.isCollecting(authOwnerId);
+  const collectingSocial = socialLinks.isCollecting(authOwnerId);
+  if (!collectingUser && !collectingSocial && isSocialLinksRequest(text)) {
+    telegramUsers.clear(authOwnerId);
+    workingHours.clear(authOwnerId);
+    rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
+  } else if (!collectingUser && !collectingSocial && (isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) socialLinks.clear(authOwnerId);
+  const socialResult = collectingUser ? null : await socialLinks.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  if (socialResult) {
+    await sendMessage({ chatId, text: socialResult.reply });
+    return { handled: true, chatId, status: socialResult.status };
+  }
+
   // Explicit domain switches cancel old proposals so “confirm” can never
   // accidentally approve a change from a different administrative workflow.
-  if (isWorkingHoursRequest(text)) {
+  if (!collectingUser && isWorkingHoursRequest(text)) {
     telegramUsers.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
   } else if (isUserManagementMessage(text) || isRulesRequestCandidate(text)) workingHours.clear(authOwnerId);
-  const hoursResult = await workingHours.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const hoursResult = collectingUser ? null : await workingHours.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (hoursResult) {
     await sendMessage({ chatId, text: hoursResult.reply });
     return { handled: true, chatId, status: hoursResult.status };

@@ -3376,6 +3376,20 @@ async function main(): Promise<void> {
     assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
   });
 
+  await test("social-links API contract and confirmed conversational operations", async () => {
+    const { testSocialLinks } = await import("./social-links-test");
+    await testSocialLinks();
+  });
+
+  await test("Telegram social-link management is private and authenticated", async () => {
+    const before = calls.length;
+    const result = await handleTelegramUpdate(telegramUpdate({ text: "لینک‌های اجتماعی را نشان بده" }));
+    assertEqual(result.status, "social-auth-required", "no access without login");
+    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/social-links")), "no model or external API without authentication");
+    const grouped = await handleTelegramUpdate(telegramUpdate({ text: "لینک‌های اجتماعی را نشان بده", chat: { id: -100200300, type: "group" } }));
+    assertEqual(grouped.status, "social-private-only", "no administrative data in groups");
+  });
+
   await test("working-hours contract and confirmed conversational operations", async () => {
     const { testWorkingHours } = await import("./working-hours-test");
     await testWorkingHours();

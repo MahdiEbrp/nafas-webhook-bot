@@ -152,7 +152,11 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
       ? locale === "en" ? "\n\n🕒 Working hours: list/search, create, view, edit times/capacity/slot patterns, activate/deactivate and delete (including bulk). Say what you want naturally in a private chat. Mutations require a permitted session and explicit confirmation."
         : "\n\n🕒 ساعات کاری: فهرست و جست‌وجو، ساخت، مشاهده، تغییر ساعت و ظرفیت و الگوهای نوبت، فعال/غیرفعال‌سازی و حذف تکی یا گروهی. در خصوصی خواسته‌ات را طبیعی بنویس؛ تغییرها به نشست مجاز و تأیید صریح نیاز دارند."
       : "";
-    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}${hoursCapability}`;
+    const socialCapability = input.otpLoginAvailable
+      ? locale === "en" ? "\n\n🔗 Social links: list/search, view, create bilingual labels, edit URLs/images/order/status and delete individually or in bulk. Ask naturally in private; permitted session and explicit confirmation required for changes."
+        : "\n\n🔗 لینک‌های اجتماعی: فهرست و جست‌وجو، مشاهده، ساخت با عنوان فارسی و انگلیسی، تغییر آدرس/تصویر/ترتیب/وضعیت و حذف تکی یا گروهی. در خصوصی طبیعی درخواست کن؛ تغییر به نشست مجاز و تأیید صریح نیاز دارد."
+      : "";
+    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}${hoursCapability}${socialCapability}`;
 
     pushMessage(input.sessionId, "user", message, config.history.maxMessages);
     pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);

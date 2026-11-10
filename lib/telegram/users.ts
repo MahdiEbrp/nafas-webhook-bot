@@ -34,6 +34,7 @@ export function isUserManagementMessage(text: string): boolean {
  */
 export class TelegramUsers {
   private flows = new Map<string, Flow>();
+  isCollecting(owner: string): boolean { const flow = this.flows.get(owner); return Boolean(flow?.fields && flow.expires > this.now()); }
   clear(owner: string): void { this.flows.delete(owner); this.lists.delete(owner); this.awaiting.delete(owner); }
   private lists = new Map<string, { actor: string; session: string; expires: number; choices: UserChoice[]; query: Record<string, unknown> }>();
   private awaiting = new Map<string, { actor: string; session: string; expires: number; request: string }>();
