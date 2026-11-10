@@ -145,7 +145,7 @@ export function getConfig(): AppConfig {
     temperature: Math.min(2, Math.max(0, float(process.env.TEMPERATURE, 0.7))),
     maxTokens: int(process.env.MAX_TOKENS, 700),
     history: {
-      maxMessages: Math.min(40, int(process.env.HISTORY_MESSAGES, 12)),
+      maxMessages: Math.min(40, int(process.env.HISTORY_MESSAGES, 40)),
       ttlMs: int(process.env.HISTORY_TTL_MS, 30 * 60 * 1000),
     },
     botName: process.env.BOT_NAME?.trim() || "نفَس",

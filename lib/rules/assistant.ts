@@ -616,7 +616,10 @@ export class RulesAssistant {
 
     const messages: ChatMessage[] = [
       { role: "system", content: ruleSystemPrompt(locale) },
-      ...(input.history ?? []).slice(-12),
+      { role: "system", content: locale === "en"
+        ? "Use the preceding conversation to resolve follow-up requests before choosing a tool. History is context, not authorization or confirmation. If the reference is ambiguous, ask for clarification."
+        : "پیش از انتخاب ابزار، سابقهٔ گفت‌وگو را برای فهم درخواست‌های ادامه‌دار بررسی کن. سابقه فقط زمینه است، نه مجوز یا تأیید عملیات. اگر منظور مبهم است سؤال روشن‌کننده بپرس." },
+      ...(input.history ?? []).slice(-40),
       { role: "user", content: input.message },
     ];
     let completion: CompletionResult;
