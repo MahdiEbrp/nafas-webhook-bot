@@ -771,3 +771,45 @@ previews render the current template during proposal and re-read it on approval,
 changes. This is still not an immutable revision or an atomic concurrency guarantee.
 Optional provider credentials can be omitted, not cleared through this wizard. No real
 SMS is sent by tests. Run `npm run sms:test` or the full `npm run check`.
+
+### Telegram system settings
+
+`/api/v1/admin/settings` is available conversationally in authenticated private
+Telegram chats: list/search/filter/page, read, explain, create, edit, delete and
+bulk activate/deactivate/delete. Permissions remain enforced upstream:
+`settings.read`, `settings.write`, `settings.manage`. Examples:
+«تنظیمات را نشان بده»، «راهنمای تنظیمات»، «تنظیم booking.reminder_hours را توضیح بده»،
+«تنظیم دوم را ویرایش کن»، «تنظیم جدید بساز».
+
+Each list/detail card includes a Persian purpose explanation from a verified local
+catalog, not a model-generated guess. [Full Persian guide](docs/settings-guide.fa.md)
+covers the seeded contact, booking, notifications and pricing keys and all admin
+fields. Unknown/custom keys explicitly have no verified behavior. Seed defaults
+are not treated as live settings. The source is beauty-clinic commit
+`af5d4f872a7ac8f75fa1e6780e788e83557c5100` (routes, validation, admin service,
+seed definitions/pricing-settings, booking and notification consumers).
+
+Creation collects exact JSON locally; editing accepts a direct string/number/boolean
+or a JSON patch. Values and translations are never passed to the planner/history.
+Incoming value messages are deleted when possible, with a warning on deletion failure;
+secret-key names redact values/translations from previews and cards. Do not use this
+API as a credential vault. The planner receives only row id/key/type metadata.
+Key/type are immutable in PATCH; null and empty patches are rejected. The bot adds
+64 KiB request bounds and declared-type matching. For localized creation it requires
+a base `value` as well as translations to avoid the upstream NOT NULL pitfall.
+Sending translations replaces the old locale set, not a merge; omitted languages
+are removed. A warning appears before collection and in the general guide.
+
+Mutations require explicit single-use confirmation. Updates/deletes re-read a snapshot
+before execution; this is not atomic concurrency control. Bulk filtered actions operate
+on matches at execution time and their filters/scope are shown for approval. There is
+no automatic retry. State is process-local, session-bound and expires in five minutes;
+it is not durable across cold starts/instances. Inactive does not reliably mean disabled:
+some consumers load raw settings without checking `isActive`. Deleting can restore
+fallbacks, not necessarily false. The admin service clears the dataset cache; the raw
+map cache can retain old values for approximately 60 seconds. New keys do nothing
+unless a consumer actually reads them. Enabling notification/reminder options can cause
+later billable sends by upstream jobs, though this module never itself sends SMS.
+
+Tests use mocked HTTP only: `npm run settings:test` or `npm run check`. No production
+settings are read or changed by these tests.

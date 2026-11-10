@@ -156,7 +156,7 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
       ? locale === "en" ? "\n\n🔗 Social links: list/search, view, create bilingual labels, edit URLs/images/order/status and delete individually or in bulk. Ask naturally in private; permitted session and explicit confirmation required for changes."
         : "\n\n🔗 لینک‌های اجتماعی: فهرست و جست‌وجو، مشاهده، ساخت با عنوان فارسی و انگلیسی، تغییر آدرس/تصویر/ترتیب/وضعیت و حذف تکی یا گروهی. در خصوصی طبیعی درخواست کن؛ تغییر به نشست مجاز و تأیید صریح نیاز دارد."
       : "";
-    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}${hoursCapability}${socialCapability}${input.otpLoginAvailable ? "\n\n📨 مدیریت پیامک: آمار و گزارش، سرویس‌ها و قالب‌ها، گیرنده‌ها و دریافتی‌ها. در خصوصی درخواست کن؛ ارسال و تست هزینه‌دار فقط با تأیید صریح انجام می‌شود." : ""}`;
+    const reply = `${userCapabilities}${loginCapability}\n\n${rulesCapabilitiesText(locale, rulesEnabled)}${hoursCapability}${socialCapability}${input.otpLoginAvailable ? "\n\n⚙️ تنظیمات سیستم: فهرست، توضیح کاربرد هر کلید، ساخت، ویرایش و حذف با تأیید. بگو «راهنمای تنظیمات».\n\n📨 مدیریت پیامک: آمار و گزارش، سرویس‌ها و قالب‌ها، گیرنده‌ها و دریافتی‌ها. در خصوصی درخواست کن؛ ارسال و تست هزینه‌دار فقط با تأیید صریح انجام می‌شود." : ""}`;
 
     pushMessage(input.sessionId, "user", message, config.history.maxMessages);
     pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);

@@ -3376,6 +3376,11 @@ async function main(): Promise<void> {
     assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
   });
 
+  await test("Settings API contracts, explanations and secure conversational operations", async () => {
+    const { testSettingsAdmin } = await import("./settings-admin-test");
+    await testSettingsAdmin();
+  });
+
   await test("SMS API contracts and secure confirmed conversational operations", async () => {
     const { testSmsAdmin } = await import("./sms-admin-test");
     await testSmsAdmin();
@@ -3384,6 +3389,15 @@ async function main(): Promise<void> {
   await test("social-links API contract and confirmed conversational operations", async () => {
     const { testSocialLinks } = await import("./social-links-test");
     await testSocialLinks();
+  });
+
+  await test("Telegram settings management is private and authenticated", async () => {
+    const before = calls.length;
+    const result = await handleTelegramUpdate(telegramUpdate({ text: "تنظیمات را نشان بده" }));
+    assertEqual(result.status, "settings-auth-required", "settings require login");
+    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/admin/settings")), "no model or settings request without authentication");
+    const grouped = await handleTelegramUpdate(telegramUpdate({ text: "تنظیمات را نشان بده", chat: { id: -100200300, type: "group" } }));
+    assertEqual(grouped.status, "settings-private-only", "settings never exposed in groups");
   });
 
   await test("Telegram social-link management is private and authenticated", async () => {
