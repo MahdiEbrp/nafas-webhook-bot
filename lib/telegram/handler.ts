@@ -1,3 +1,4 @@
+import { TelegramSettingsAdmin, isSettingsAdminRequest } from "@/lib/telegram/settings-admin";
 import { TelegramSmsAdmin, isSmsAdminRequest } from "@/lib/telegram/sms-admin";
 /**
  * TELEGRAM BRIDGE
@@ -62,6 +63,7 @@ const telegramUsers = new TelegramUsers();
 const workingHours = new TelegramWorkingHours();
 const socialLinks = new TelegramSocialLinks();
 const smsAdmin = new TelegramSmsAdmin();
+const settingsAdmin = new TelegramSettingsAdmin();
 
 function sixDigitCode(text: string): boolean {
   return isOtpCodeLikeMessage(text);
@@ -229,6 +231,25 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const collectingUser = telegramUsers.isCollecting(authOwnerId);
   const collectingSocial = socialLinks.isCollecting(authOwnerId);
   const collectingSms = smsAdmin.isCollecting(authOwnerId);
+  const collectingSettings = settingsAdmin.isCollecting(authOwnerId);
+  if (!collectingSettings && !isSettingsAdminRequest(text) && (isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) settingsAdmin.clear(authOwnerId);
+  if (!collectingUser && !collectingSocial && !collectingSms && (collectingSettings || isSettingsAdminRequest(text))) {
+    smsAdmin.clear(authOwnerId);
+    socialLinks.clear(authOwnerId);
+    telegramUsers.clear(authOwnerId);
+    workingHours.clear(authOwnerId);
+    rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
+  }
+  const settingsResult = collectingUser || collectingSocial || collectingSms ? null : await settingsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  if (settingsResult) {
+    if (settingsResult.deleteSensitiveMessage) {
+      const removed = await deleteMessage(chatId, message.message_id);
+      if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام مقدار تنظیم ممکن نشد؛ خودت آن را حذف کن. مقدار وارد مدل یا تاریخچه نشده است." });
+    }
+    await sendMessage({ chatId, text: settingsResult.reply });
+    return { handled: true, chatId, status: settingsResult.status };
+  }
+
   const otherDomain = isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text);
   if (!collectingSms && otherDomain && !isSmsAdminRequest(text)) smsAdmin.clear(authOwnerId);
   if (!collectingUser && !collectingSocial && (collectingSms || isSmsAdminRequest(text))) {
