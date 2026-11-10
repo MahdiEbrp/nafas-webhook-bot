@@ -148,6 +148,12 @@ function validContext(value: unknown): value is RuleRequestContext {
     && typeof value.csrfToken === "string" && value.csrfToken.trim().length > 0;
 }
 
+function validReadContext(value: unknown): value is RuleRequestContext {
+  return isRecord(value)
+    && typeof value.actorId === "string" && value.actorId.trim().length > 0
+    && typeof value.sessionCookie === "string" && value.sessionCookie.trim().length > 0;
+}
+
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
 }
@@ -467,7 +473,7 @@ export class RuleManager {
   }
 
   async listUsers(context?: RuleRequestContext): Promise<UserListResult> {
-    if (this.isLive && !validContext(context)) {
+    if (this.isLive && !validReadContext(context)) {
       return { users: [], page: 1, perPage: 10, total: 0, live: true, error: MESSAGES["missing-auth-context"], status: 401 };
     }
     if (this.isLive) {
@@ -720,7 +726,7 @@ export class RuleManager {
     init: { method: string; body?: unknown },
     context?: RuleRequestContext,
   ): Promise<HttpResult> {
-    if (!validContext(context)) return { ok: false, status: 401, reason: "missing authenticated request context", body: null };
+    if (!validReadContext(context)) return { ok: false, status: 401, reason: "missing authenticated request context", body: null };
     if (!/^https:\/\//iu.test(this.baseUrl)) return { ok: false, status: 0, reason: "HTTPS is required for session cookies", body: null };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -731,7 +737,7 @@ export class RuleManager {
           Accept: "application/json",
           "Content-Type": "application/json",
           Cookie: context.sessionCookie,
-          "X-CSRF-Token": context.csrfToken,
+          ...(context.csrfToken ? { "X-CSRF-Token": context.csrfToken } : {}),
         },
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         credentials: "omit",

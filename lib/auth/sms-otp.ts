@@ -225,8 +225,12 @@ export class SmsOtpClient {
     } catch {
       return null;
     }
-    if (!stored || (stored.lookupId ?? stored.actorId) !== lookupId || !stored.actorId.trim() || !stored.sessionCookie.trim() || !stored.csrfToken?.trim()) return null;
-    return { actorId: stored.actorId, sessionCookie: stored.sessionCookie, csrfToken: stored.csrfToken };
+    if (!stored || (stored.lookupId ?? stored.actorId) !== lookupId || !stored.actorId.trim() || !stored.sessionCookie.trim()) return null;
+    return {
+      actorId: stored.actorId,
+      sessionCookie: stored.sessionCookie,
+      csrfToken: stored.csrfToken?.trim() ?? "",
+    };
   }
 
   /** Removes the locally stored encrypted session; it does not revoke it upstream. */

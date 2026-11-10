@@ -206,6 +206,13 @@ function hasAuthContext(value: unknown): value is RuleRequestContext {
     && typeof record?.csrfToken === "string" && record.csrfToken.trim().length > 0;
 }
 
+function hasReadContext(value: unknown): value is RuleRequestContext {
+  const record = asRecord(value);
+  return Boolean(record)
+    && typeof record?.actorId === "string" && record.actorId.trim().length > 0
+    && typeof record?.sessionCookie === "string" && record.sessionCookie.trim().length > 0;
+}
+
 function explicitAnswer(message: string): "yes" | "no" | null {
   const value = message.toLowerCase().replace(/[.!؟?،,]+/gu, " ").replace(/‌/gu, " ").replace(/\s+/gu, " ").trim();
   if (/^(بله|آره|اره|تأیید|تایید|تأیید می‌کنم|تایید می‌کنم|تایید میکنم|موافقم|انجام بده|بله انجام بده|بله تایید می‌کنم|بله تایید میکنم|بله تأیید می‌کنم|yes|yes please|y|confirm|i confirm|do it|go ahead)$/iu.test(value)) return "yes";
@@ -273,7 +280,7 @@ export class RulesAssistant {
    */
   async handle(input: RulesAssistantInput): Promise<RulesAssistantResult> {
     const locale = input.locale ?? "fa";
-    if (!input.conversationId.trim() || !hasAuthContext(input.context)) {
+    if (!input.conversationId.trim() || !hasReadContext(input.context)) {
       return { kind: "error", reply: locale === "en" ? "A trusted authenticated context is required." : "زمینهٔ احراز هویت معتبر لازم است." };
     }
     const key = `${input.conversationId}\u0000${input.context.actorId}`;
