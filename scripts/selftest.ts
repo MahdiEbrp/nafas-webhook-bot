@@ -3366,6 +3366,13 @@ async function main(): Promise<void> {
     assertEqual(payload.parse_mode, undefined, "external text is not parsed as HTML/Markdown");
   });
 
+  await test("Telegram password-message deletion uses message ids without copying secrets", async () => {
+    const { deleteMessage } = await import("@/lib/telegram/api");
+    await deleteMessage(777, 42);
+    const request = calls.filter(call => call.url.endsWith("/deleteMessage")).at(-1)!;
+    assertEqual(JSON.stringify(request.body), JSON.stringify({ chat_id: 777, message_id: 42 }), "only routing ids sent for deletion");
+  });
+
   await test("beauty-clinic users API contract and Telegram confirmations", async () => {
     const { testUsersContract } = await import("./users-contract-test");
     await testUsersContract();

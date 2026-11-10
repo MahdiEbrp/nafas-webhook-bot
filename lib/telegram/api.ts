@@ -204,3 +204,8 @@ export function answerCallbackQuery(input: { callbackQueryId: string; text?: str
 export function sendTyping(chatId: number): void {
   void call("sendChatAction", { chat_id: chatId, action: "typing" }, { timeoutMs: 5_000 });
 }
+
+/** Delete a sensitive inbound message; Telegram may deny old messages or access. */
+export function deleteMessage(chatId: number, messageId: number): Promise<TelegramResult<true>> {
+  return call<true>("deleteMessage", { chat_id: chatId, message_id: messageId });
+}

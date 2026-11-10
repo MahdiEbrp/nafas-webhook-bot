@@ -78,13 +78,49 @@ export async function testUsersContract() {
   const result = await flow.handle("a", "/users list", context, true);
   assert.equal(result?.status, "users-error");
   assert(!result?.reply.includes("sensitive"));
+  // Conversational deletion resolves only server-provided choices and still
+  // requires a separate, single-use confirmation.
+  status = 200;
+  const secondId = "22222222-2222-4222-8222-222222222222";
+  data = { items: [{ id, fullName: "First" }, { id: secondId, fullName: "Second" }], page: 1, total: 2 };
+  let plannerCalls = 0;
+  const conversational = new TelegramUsers(api, () => now, async (request, choices) => {
+    plannerCalls++;
+    assert.equal(request, "دومی رو حذف کن");
+    assert.equal(choices[1]?.id, secondId);
+    return { operation: "delete", id: secondId };
+  });
+  await conversational.handle("owner", "لیست کاربران", context, true);
+  const countBeforeDelete = calls.length;
+  const proposal = await conversational.handle("owner", "دومی رو حذف کن", context, true);
+  assert(!proposal?.reply.includes("/users"));
+  assert(proposal?.reply.includes(secondId));
+  assert.equal(calls.length, countBeforeDelete, "AI cannot directly execute deletion");
+  await conversational.handle("owner", "تأیید", context, true);
+  assert.equal(calls.at(-1)?.init.method, "DELETE");
+  assert(calls.at(-1)?.url.endsWith(secondId));
+  assert.equal(plannerCalls, 1);
+  const secretFlow = new TelegramUsers(api, () => now, async () => { throw new Error("Password must never reach planner"); });
+  await secretFlow.handle("secret", "کاربر جدید بساز", context, true);
+  await secretFlow.handle("secret", profile.fullName, context, true);
+  await secretFlow.handle("secret", profile.email, context, true);
+  const prompt = await secretFlow.handle("secret", profile.phone, context, true);
+  assert(prompt?.reply.includes("حذف"));
+  const invalid = await secretFlow.handle("secret", "weak", context, true);
+  assert.equal(invalid?.deleteSensitiveMessage, true, "even invalid password messages are deleted");
+  const secretReceived = await secretFlow.handle("secret", profile.password, context, true);
+  assert.equal(secretReceived?.deleteSensitiveMessage, true);
+  assert(!secretReceived?.reply.includes(profile.password));
+  await secretFlow.handle("secret", "تأیید", context, true);
+  assert.equal(JSON.parse(String(calls.at(-1)?.init.body)).password, profile.password, "password retained until confirmed creation");
+  assert.equal(JSON.parse(String(calls.at(-1)?.init.body)).roleKey, "customer");
   const assistant = new RulesAssistant({ completeImpl: async (options) => {
     assert(!options.tools?.some(tool => ["create_user", "delete_user", "bulk_users", "update_user_status"].includes(tool.function.name)));
     return { content: "", model: "test", toolCalls: [{ id: "call", type: "function", function: { name: "create_user", arguments: JSON.stringify(profile) } }], finishReason: "tool_calls", attempts: [], selection: "fixed" };
   } });
   const guarded = await assistant.handle({ conversationId: "private", message: "create", context });
   assert.equal(guarded.kind, "error", "unsolicited mutation tool call rejected");
-  assert(guarded.reply.includes("/users"));
+  assert(guarded.reply.includes("کاربر دوم"));
   const unavailable = new ClinicUsersApi(async () => { throw new Error("secret"); }, "https://clinic.example");
   assert.deepEqual(await unavailable.execute({ operation: "list", input: {} }, context), { ok: false, code: "REQUEST_FAILED" });
 }

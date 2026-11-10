@@ -22,6 +22,7 @@ import { logInfo, logWarn } from "@/lib/log";
 import { truncateAtSentence } from "@/lib/text";
 import {
   answerCallbackQuery,
+  deleteMessage,
   contactKeyboard,
   removeKeyboard,
   sendMessage,
@@ -218,8 +219,12 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     ? await otpClient.getRuleRequestContext(authOwnerId)
     : null;
 
-  const usersResult = await telegramUsers.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
+  const usersResult = await telegramUsers.handle(authOwnerId, message.text ?? "", ruleContext, message.chat.type === "private");
   if (usersResult) {
+    if (usersResult.deleteSensitiveMessage) {
+      const removed = await deleteMessage(chatId, message.message_id);
+      if (!removed.ok) await sendMessage({ chatId, text: "⚠️ نتوانستم پیام حاوی رمز را از تلگرام حذف کنم؛ لطفاً خودت آن پیام را حذف کن. رمز در پاسخ یا تاریخچهٔ مدل درج نشده است." });
+    }
     // Account details and temporary passwords are never added to model history.
     await sendMessage({ chatId, text: usersResult.reply });
     return { handled: true, chatId, status: usersResult.status };
