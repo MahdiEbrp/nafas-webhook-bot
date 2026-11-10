@@ -134,7 +134,7 @@ export function capabilitiesText(locale: Locale): string {
 
   if (locale === "en") {
     return [
-      "The user accounts module supports these operations, but it is not connected to this conversation. I cannot execute them here:",
+      "The legacy user accounts module has these capabilities. For the supported live Telegram operations and their limits, use /users help in a private chat:",
       "",
       ...lines,
       "",
@@ -143,7 +143,7 @@ export function capabilitiesText(locale: Locale): string {
   }
 
   return [
-    "ماژول حساب‌های کاربری این قابلیت‌ها را دارد، اما به این گفت‌وگو متصل نیست و نمی‌توانم اینجا اجرا کنم:",
+    "ماژول قدیمی حساب‌های کاربری قابلیت‌های زیر را دارد؛ برای عملیات واقعیِ پشتیبانی‌شده و محدودیت‌های API در تلگرام، در خصوصی /users help را بفرست:",
     "",
     ...lines,
     "",
@@ -162,7 +162,7 @@ export function capabilitiesPromptBlock(locale: Locale): string {
 
   if (locale === "en") {
     return [
-      "The module for user accounts supports the following abilities, but it is NOT connected to this conversation. Do not offer to execute them or collect account details:",
+      "The module for user accounts supports the following abilities, but it is NOT connected directly to the language model. Live Telegram user operations use the private /users flow. Direct users to /users help; do not collect account details through conversation:",
       list,
       "",
       `${locked} of these change data. Never claim one has happened: describe it and wait for an explicit yes.`,
@@ -170,7 +170,7 @@ export function capabilitiesPromptBlock(locale: Locale): string {
   }
 
   return [
-    "ماژول حساب‌های کاربری قابلیت‌های زیر را دارد، اما به این گفت‌وگو متصل نیست. قول اجرای آن‌ها را نده و مشخصات کاربر جمع نکن:",
+    "ماژول حساب‌های کاربری قابلیت‌های زیر را دارد، اما مستقیماً به مدل متصل نیست. عملیات واقعی تلگرام در مسیر خصوصی /users انجام می‌شود. کاربر را به /users help راهنمایی کن؛ در گفت‌وگوی مدل مشخصات کاربر جمع نکن:",
     list,
     "",
     `${locked} مورد از این‌ها داده را تغییر می‌دهد. هرگز نگو انجام شد: اول توضیح بده و منتظر «بله»ی صریح بمان.`,
