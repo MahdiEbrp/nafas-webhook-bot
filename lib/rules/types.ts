@@ -152,6 +152,29 @@ export type RuleListResult = {
   requestId?: string;
 };
 
+export type User = {
+  id: string;
+  email: string;
+  phone: string | null;
+  fullName: string | null;
+  roleKey: string | null;
+  isActive: boolean;
+  isBanned: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type UserListResult = {
+  users: User[];
+  page: number;
+  perPage: number;
+  total: number;
+  live: boolean;
+  error?: string;
+  status?: number;
+  requestId?: string;
+};
+
 export type RuleCapability = {
   id: string;
   title: Record<RuleLocale, string>;

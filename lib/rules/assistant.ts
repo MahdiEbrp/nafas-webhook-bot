@@ -34,6 +34,21 @@ const RULE_TOOLS: ChatTool[] = [
   {
     type: "function",
     function: {
+      name: "list_users",
+      description: "List registered users. Use only when the user asks to see or list users.",
+      parameters: {
+        type: "object",
+        properties: {
+          page: { type: "integer", minimum: 1, maximum: 100000 },
+          perPage: { type: "integer", minimum: 1, maximum: 100 },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_rules",
       description: "Search and list rules. Use only when the user asks to find or list rules.",
       parameters: {
@@ -150,7 +165,7 @@ const RULE_TOOLS: ChatTool[] = [
 ];
 
 export function isRulesRequestCandidate(message: string): boolean {
-  return /قانون|قوانین|مقررات|rule|rules|polic(?:y|ies)/iu.test(message);
+  return /قانون|قوانین|مقررات|rule|rules|polic(?:y|ies)|کاربران|فهرست.?کاربران|list.?users|users/iu.test(message);
 }
 
 export function rulesCapabilitiesText(locale: "fa" | "en", enabled = false): string {
@@ -353,6 +368,12 @@ export class RulesAssistant {
     locale: "fa" | "en",
     conversationId: string,
   ): Promise<ToolOutcome> {
+    if (name === "list_users") {
+      const result = await this.manager.listUsers(context);
+      return result.error
+        ? { read: true, result: { error: result.error, status: result.status, requestId: result.requestId } }
+        : { read: true, result };
+    }
     if (name === "list_rules") {
       const result = await this.manager.list(args as RuleListQuery, context);
       return result.error

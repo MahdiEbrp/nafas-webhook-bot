@@ -21,6 +21,8 @@ import type {
   RuleRequestContext,
   RuleReadResult,
   RuleStatusFilter,
+  User,
+  UserListResult,
   RuleTranslation,
   RuleTranslationPatch,
   RuleTranslations,
@@ -126,6 +128,7 @@ export function seedRules(): Rule[] {
 }
 
 export const RULE_CAPABILITIES: readonly RuleCapability[] = [
+  { id: "users.list", title: { fa: "فهرست کاربران", en: "List users" }, example: { fa: "لیست کاربران را نشان بده", en: "List users" }, needsConfirm: false },
   { id: "rules.list", title: { fa: "فهرست‌کردن قوانین", en: "List rules" }, example: { fa: "قوانین فعال را نشان بده", en: "List active rules" }, needsConfirm: false },
   { id: "rules.view", title: { fa: "دیدن یک قانون", en: "View one rule" }, example: { fa: "قانون را با شناسه‌اش پیدا کن", en: "Get a rule by its id" }, needsConfirm: false },
   { id: "rules.create", title: { fa: "ساخت قانون", en: "Create a rule" }, example: { fa: "قانونی با نام سیاست نوبت‌دهی بساز", en: "Create an appointment-policy rule" }, needsConfirm: true },
@@ -461,6 +464,33 @@ export class RuleManager {
         : { rule: null, error: "unparsable response", status: result.status, requestId: result.requestId };
     }
     return { rule: this.store.get(id) ?? null };
+  }
+
+  async listUsers(context?: RuleRequestContext): Promise<UserListResult> {
+    if (this.isLive && !validContext(context)) {
+      return { users: [], page: 1, perPage: 10, total: 0, live: true, error: MESSAGES["missing-auth-context"], status: 401 };
+    }
+    if (this.isLive) {
+      const result = await this.request("/api/v1/users", { method: "GET" }, context);
+      if (!result.ok) {
+        return {
+          users: [], page: 1, perPage: 10, total: 0, live: true,
+          error: result.reason, status: result.status, requestId: result.requestId,
+        };
+      }
+      const body = isRecord(result.body) ? result.body : {};
+      const users = Array.isArray(body.users) ? body.users : Array.isArray(body) ? body : [];
+      const pagination = isRecord(body.pagination) ? body.pagination : body;
+      return {
+        users: users.filter((u: unknown) => isRecord(u) && typeof (u as Record<string, unknown>).id === "string") as User[],
+        page: typeof pagination.page === "number" ? pagination.page : 1,
+        perPage: typeof pagination.perPage === "number" ? pagination.perPage : 10,
+        total: typeof pagination.total === "number" ? pagination.total : users.length,
+        live: true,
+        requestId: result.requestId,
+      };
+    }
+    return { users: [], page: 1, perPage: 10, total: 0, live: false };
   }
 
   async proposeCreate(input: RuleCreateInput, context?: RuleRequestContext): Promise<RuleProposal> {
