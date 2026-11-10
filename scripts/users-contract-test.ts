@@ -32,6 +32,25 @@ export async function testUsersContract() {
     assert.equal((call.init.headers as Record<string, string>).Cookie, "session=test");
     assert.equal(call.init.redirect, "error");
   }
+  const invalidOperation = { operation: "not-a-user-operation", input: {} } as unknown as UserCommand;
+  assert.throws(() => validateUserCommand(invalidOperation));
+  assert.deepEqual(await api.execute(invalidOperation, context), { ok: false, code: "INVALID_INPUT" });
+  assert.deepEqual(await api.execute({ operation: "list", input: { perPage: 51 } }, context), { ok: false, code: "INVALID_INPUT" });
+  const beforeInvalidOrigins = calls.length;
+  for (const origin of ["http://clinic.example", "https://user@clinic.example", "https://:secret@clinic.example"]) {
+    assert.deepEqual(await new ClinicUsersApi(fetcher, origin).execute({ operation: "list", input: {} }, context), { ok: false, code: "INVALID_API_ORIGIN" });
+  }
+  assert.equal(calls.length, beforeInvalidOrigins, "invalid origins never reach fetch");
+  for (const malformed of [
+    { status: 200, body: "null" },
+    { status: 200, body: '"not an object"' },
+    { status: 200, body: "{}" },
+    { status: 500, body: JSON.stringify({ error: { code: 123 } }) },
+    { status: 500, body: JSON.stringify({ error: { code: "invalid code" } }) },
+  ]) {
+    const malformedApi = new ClinicUsersApi(async () => new Response(malformed.body, { status: malformed.status }), "https://clinic.example");
+    assert.deepEqual(await malformedApi.execute({ operation: "list", input: {} }, context), { ok: false, status: malformed.status, code: "UPSTREAM_REJECTED" });
+  }
   for (const action of ["activate", "deactivate", "ban", "unban", "change-role", "delete", "reset-password"]) {
     const command: UserCommand = { operation: "bulk", input: { action, scope: "page", ids: [id], ...(action === "change-role" ? { roleKey: "customer" } : {}) } };
     assert.equal((await api.execute(command, context)).ok, true);
@@ -123,6 +142,36 @@ export async function testUsersContract() {
   assert(guarded.reply.includes("کاربر دوم"));
   const unavailable = new ClinicUsersApi(async () => { throw new Error("secret"); }, "https://clinic.example");
   assert.deepEqual(await unavailable.execute({ operation: "list", input: {} }, context), { ok: false, code: "REQUEST_FAILED" });
+
+  const { resetConfigCache } = await import("@/lib/config");
+  const savedFetch = globalThis.fetch;
+  const savedSelection = process.env.MODEL_SELECTION;
+  const savedModels = process.env.OPENROUTER_MODELS;
+  const savedKey = process.env.OPENROUTER_API_KEY;
+  process.env.MODEL_SELECTION = "fixed";
+  process.env.OPENROUTER_MODELS = "test/free-a:free";
+  process.env.OPENROUTER_API_KEY = "test-key";
+  resetConfigCache();
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    assert(url.includes("openrouter.ai/api/v1/chat/completions"), "planner uses the mocked model endpoint");
+    const request = JSON.parse(String(init?.body)) as { messages?: Array<{ role: string; content: string }> };
+    assert(request.messages?.some(message => message.role === "user" && message.content.includes("لیست کاربران")));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ operation: "list", page: 1 }) }, finish_reason: "stop" }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const { planUserRequest } = await import("../lib/users/planner");
+    assert.deepEqual(await planUserRequest("لیست کاربران", []), { operation: "list", page: 1 });
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedSelection === undefined) delete process.env.MODEL_SELECTION;
+    else process.env.MODEL_SELECTION = savedSelection;
+    if (savedModels === undefined) delete process.env.OPENROUTER_MODELS;
+    else process.env.OPENROUTER_MODELS = savedModels;
+    if (savedKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = savedKey;
+    resetConfigCache();
+  }
 }
 
 if (process.argv[1]?.endsWith("users-contract-test.ts")) {
