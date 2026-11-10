@@ -77,10 +77,8 @@ function formatUserList(result: UserListResult, locale: "fa" | "en"): string {
   const bannedCount = users.filter((u) => u.isBanned).length;
 
   const lines: string[] = [];
-  lines.push(locale === "en" ? "Registered Users" : "لیست کاربران");
+  lines.push(locale === "en" ? "📋 *Registered Users*" : "📋 *لیست کاربران*");
   lines.push("");
-  lines.push("| # | نام کامل | ایمیل | نقش | وضعیت | آخرین ورود |");
-  lines.push("|---|----------|--------|------|--------|------------|");
 
   users.forEach((user, i) => {
     const no = toPersianDigits((i + 1).toString());
@@ -91,10 +89,13 @@ function formatUserList(result: UserListResult, locale: "fa" | "en"): string {
     const lastLogin = user.lastLoginAt
       ? jalaliShort(new Date(user.lastLoginAt))
       : "—";
-    lines.push(`| ${no} | ${name} | ${email} | ${role} | ${status} | ${lastLogin} |`);
+    lines.push(`*${no}.* ${name}`);
+    lines.push(`   📧 ${email}`);
+    lines.push(`   👤 ${role} · ${status}`);
+    lines.push(`   🕒 آخرین ورود: ${lastLogin}`);
+    lines.push("");
   });
 
-  lines.push("");
   const summaryFa =
     `کل ${toPersianDigits(users.length)} نفر` +
     (activeCount ? `، ${toPersianDigits(activeCount)} فعال` : "") +
