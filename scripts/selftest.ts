@@ -2183,6 +2183,31 @@ async function main(): Promise<void> {
     assertEqual(ruleCalls[0]?.name, "list_rules", "only the requested read function is selected");
   });
 
+  await test("single rule edits and deletes are not misrouted to bulk tools", async () => {
+    const cases = [
+      { message: "قانون جدید بساز", expected: "create_rule" },
+      { message: "قوانین نوبت‌دهی را ویرایش کن", expected: "update_rule" },
+      { message: "Update the rules description", expected: "update_rule" },
+      { message: "قانون مشخصی را حذف کن", expected: "delete_rule" },
+      { message: "Delete all rules", expected: "bulk_rules" },
+    ] as const;
+
+    for (const [index, testCase] of cases.entries()) {
+      let receivedToolNames: string[] = [];
+      const assistant = new RulesAssistant({ completeImpl: (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+        receivedToolNames = options.tools?.map((tool) => tool.function.name) ?? [];
+        return { content: "", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+      }) as typeof complete });
+      await assistant.handle({ conversationId: `rules-single-route-${index}`, message: testCase.message, context: RULE_CONTEXT });
+      assert(receivedToolNames.includes(testCase.expected), `${testCase.message} exposes ${testCase.expected}`);
+      if (testCase.expected !== "bulk_rules") {
+        assert(!receivedToolNames.includes("bulk_rules"), `${testCase.message} does not expose the bulk tool`);
+      } else {
+        assert(!receivedToolNames.includes("delete_rule"), "Delete all rules does not expose the single-rule delete tool");
+      }
+    }
+  });
+
   await test("rule and user requests receive only their routed tools", async () => {
     assertEqual(classifyRulesRequest("قوانین فعلی چیست؟"), "read", "natural Persian data questions route to a verified read");
     assertEqual(classifyRulesRequest("قوانین رو بگو"), "read", "colloquial read requests also route to the data tool");
@@ -2493,6 +2518,22 @@ async function main(): Promise<void> {
     assertEqual(naturalPublicRead.layer, "rules", "natural-language rule questions are recognized as external-data reads");
     assert(naturalPublicRead.reply.includes("هیچ داده") && naturalPublicRead.reply.includes("تغییری ندادم"), "the public read is refused without an authenticated context");
     assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "natural phrasing also avoids model and admin-tool calls");
+    const publicBookings = await handleChat({ message: "Show my bookings", sessionId: "public-bookings-request", locale: "en" });
+    assertEqual(publicBookings.layer, "none", "operational booking requests are refused before public chat reaches the model");
+    assert(publicBookings.reply.includes("no authenticated clinic") && publicBookings.reply.includes("did not read"), "the public caller is told that protected operations were unavailable");
+    assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "booking requests do not reach the model or clinic tools");
+    const persianPublicBookings = await handleChat({ message: "رزروهای من را نمایش بده", sessionId: "public-persian-bookings-request", locale: "fa" });
+    assertEqual(persianPublicBookings.layer, "none", "Persian personal-booking requests are blocked by the same code guard");
+    assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "Persian booking requests do not reach the model");
+    const unmatchedAuthenticatedBooking = await handleChat({
+      message: "Show my bookings",
+      sessionId: "unmatched-authenticated-bookings-request",
+      locale: "en",
+      rulesAssistant: assistant,
+      ruleContext: RULE_CONTEXT,
+    });
+    assertEqual(unmatchedAuthenticatedBooking.layer, "none", "a rules session alone does not imply clinic booking tools are available");
+    assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "unrouted booking requests remain blocked even with an unrelated rules context");
 
     const activeCapabilities = await handleChat({
       message: "چه کارهایی بلدی؟",
