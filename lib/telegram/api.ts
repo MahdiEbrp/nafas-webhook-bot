@@ -5,9 +5,8 @@
  * A single `call()` wraps the `{ ok, result } / { ok:false, description }`
  * envelope Telegram uses, so callers never deal with HTTP codes.
  *
- * Only text is sent, and only text and shared contacts are received: a chat bot
- * needs `sendMessage` and `sendChatAction`, the reply keyboard that asks for a
- * phone number, and the three calls that register the webhook.
+ * The bot sends text with optional keyboards and receives messages or inline
+ * button callbacks. The transport stays fetch-only for serverless and tests.
  */
 
 import { getConfig } from "@/lib/config";
@@ -48,7 +47,7 @@ export type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
-  /** still in the type on purpose: buttons from an older build can arrive. */
+  /** Inline suggestion selections arrive as callback queries. */
   callback_query?: TelegramCallbackQuery;
 };
 
@@ -116,7 +115,7 @@ export function setWebhook(input: {
     url: input.url,
     ...(input.secretToken ? { secret_token: input.secretToken } : {}),
     ...(input.dropPendingUpdates ? { drop_pending_updates: true } : {}),
-    allowed_updates: input.allowedUpdates ?? ["message"],
+    allowed_updates: input.allowedUpdates ?? ["message", "callback_query"],
     max_connections: 40,
   });
 }
@@ -125,6 +124,7 @@ export type WebhookInfo = {
   url: string;
   has_custom_certificate: boolean;
   pending_update_count: number;
+  allowed_updates?: string[];
   last_error_date?: number;
   last_error_message?: string;
   ip_address?: string;
@@ -147,15 +147,16 @@ export async function sendMessage(input: {
   replyMarkup?: Record<string, unknown>;
 }): Promise<TelegramResult<TelegramMessage>> {
   const formatted = formatTelegramText(input.text);
+  const chunks = telegramChunks(formatted.text, formatted.entities);
   let result!: TelegramResult<TelegramMessage>;
-  for (const chunk of telegramChunks(formatted.text, formatted.entities)) {
+  for (const [index, chunk] of chunks.entries()) {
     result = await call<TelegramMessage>("sendMessage", {
       chat_id: input.chatId,
       text: chunk.text,
       ...(chunk.entities.length ? { entities: chunk.entities } : {}),
       link_preview_options: { is_disabled: true },
       ...(input.replyToMessageId ? { reply_to_message_id: input.replyToMessageId } : {}),
-      ...(input.replyMarkup ? { reply_markup: input.replyMarkup } : {}),
+      ...(input.replyMarkup && index === chunks.length - 1 ? { reply_markup: input.replyMarkup } : {}),
     });
     if (!result.ok) break;
   }
@@ -192,7 +193,7 @@ export function removeKeyboard(): Record<string, unknown> {
   return { remove_keyboard: true };
 }
 
-/** Acknowledges a button press (only reachable from buttons of an older build). */
+/** Acknowledges an inline-button press so Telegram stops showing its spinner. */
 export function answerCallbackQuery(input: { callbackQueryId: string; text?: string }): Promise<TelegramResult<true>> {
   return call<true>("answerCallbackQuery", {
     callback_query_id: input.callbackQueryId,

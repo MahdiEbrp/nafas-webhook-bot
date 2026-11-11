@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { SocialLinksApi, validateSocialCommand, type SocialLink } from "../lib/social-links/api";
 import { TelegramSocialLinks, isSocialLinksRequest, socialCard } from "../lib/telegram/social-links";
+import { inlineSuggestionsForReply, resolveInlineSuggestion } from "../lib/telegram/inline-suggestions";
 import type { SocialPlan } from "../lib/social-links/planner";
 
 export async function testSocialLinks() {
@@ -54,6 +55,10 @@ export async function testSocialLinks() {
     modelCalls++;
     assert(!request.includes(context.sessionCookie));
     if (request.includes("دوم")) assert.equal(rows[1]?.id, second);
+    if (request.includes("توضیح یا انتخاب کاربر: 2")) {
+      assert.equal(rows[1]?.id, second, "the numbered social-link callback maps to the ordered current rows");
+      return { operation: "delete", id: second, input: {} };
+    }
     return plan;
   }, () => now);
   const turn = (text: string, ctx = context) => flow.handle("owner", text, ctx, true);
@@ -83,7 +88,18 @@ export async function testSocialLinks() {
   assert.equal((await turn("لینک اجتماعی را حذف کن"))?.status, "social-invalid");
   plan = { operation: "delete", target: "اینستاگرام", input: {} };
   items = [{ ...row }, { ...other, labelFa: row.labelFa }];
-  assert.equal((await turn("لینک اینستاگرام را حذف کن"))?.status, "social-clarify", "duplicate labels cannot be guessed");
+  const duplicateChoices = await turn("لینک اینستاگرام را حذف کن");
+  assert.equal(duplicateChoices?.status, "social-clarify", "duplicate labels cannot be guessed");
+  const socialButtons = (inlineSuggestionsForReply(duplicateChoices!.status, duplicateChoices!.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  assert.equal(socialButtons.length, 2, "ambiguous social links are presented as numbered buttons");
+  assert.equal(socialButtons[1]?.text, "اینستاگرام", "social choice labels omit IDs and duplicate row numbers");
+  const selectedSocial = resolveInlineSuggestion(socialButtons[1]?.callback_data, "en");
+  assert.equal(selectedSocial, "2");
+  const beforeSocialDelete = deletes();
+  assert.equal((await turn(selectedSocial!))?.status, "social-proposed", "the selected social link still goes through its confirmation proposal");
+  assert.equal(deletes(), beforeSocialDelete, "selecting a social link does not delete it");
+  assert.equal((await turn("تأیید"))?.status, "social-completed");
+  assert.equal(deletes(), beforeSocialDelete + 1);
   flow.clear("owner"); items = [row];
   assert.equal((await turn("لینک اینستاگرام را حذف کن"))?.status, "social-proposed");
   assert.equal((await turn("لغو"))?.status, "social-cancelled");

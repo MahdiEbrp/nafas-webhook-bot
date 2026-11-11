@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { ClinicUsersApi, validateUserCommand, type UserCommand } from "../lib/users/clinic-api";
 import { RulesAssistant } from "../lib/rules/assistant";
 import { TelegramUsers } from "../lib/telegram/users";
+import { inlineSuggestionsForReply, resolveInlineSuggestion } from "../lib/telegram/inline-suggestions";
 
 export async function testUsersContract() {
   const id = "11111111-1111-4111-8111-111111111111";
@@ -119,6 +120,28 @@ export async function testUsersContract() {
   assert.equal(calls.at(-1)?.init.method, "DELETE");
   assert(calls.at(-1)?.url.endsWith(secondId));
   assert.equal(plannerCalls, 1);
+
+  const ambiguousUserFlow = new TelegramUsers(api, () => now, async (request, choices) => {
+    if (request === "کاربر Sam را حذف کن") return { operation: "delete", target: "Sam" };
+    assert(request.includes("نام یا شناسهٔ موردنظر: 2"), "the callback is joined to the original user request");
+    assert.equal(choices[1]?.id, secondId, "the planner receives the same ordered user choices shown to the user");
+    return { operation: "delete", id: secondId };
+  });
+  await ambiguousUserFlow.handle("ambiguous-user", "لیست کاربران", context, true);
+  const ambiguousPrompt = await ambiguousUserFlow.handle("ambiguous-user", "کاربر Sam را حذف کن", context, true);
+  assert.equal(ambiguousPrompt?.status, "users-pending");
+  const userButtons = (inlineSuggestionsForReply(ambiguousPrompt!.status, ambiguousPrompt!.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  assert.equal(userButtons.length, 2);
+  assert.equal(userButtons[1]?.text, "Second", "the user-choice button omits the internal ID");
+  const userChoice = resolveInlineSuggestion(userButtons[1]?.callback_data, "en");
+  assert.equal(userChoice, "2");
+  const deletesBeforeChoice = calls.filter((call) => call.init.method === "DELETE").length;
+  assert((await ambiguousUserFlow.handle("ambiguous-user", userChoice!, context, true))?.reply.includes(secondId), "the ordinal returns through the user workflow's safe proposal");
+  assert.equal(calls.filter((call) => call.init.method === "DELETE").length, deletesBeforeChoice, "selecting a user does not delete without confirmation");
+  assert.equal((await ambiguousUserFlow.handle("ambiguous-user", "تأیید", context, true))?.status, "users-completed");
+  assert.equal(calls.filter((call) => call.init.method === "DELETE").length, deletesBeforeChoice + 1);
+  assert(calls.at(-1)?.url.endsWith(secondId));
+
   const secretFlow = new TelegramUsers(api, () => now, async () => { throw new Error("Password must never reach planner"); });
   await secretFlow.handle("secret", "کاربر جدید بساز", context, true);
   await secretFlow.handle("secret", profile.fullName, context, true);

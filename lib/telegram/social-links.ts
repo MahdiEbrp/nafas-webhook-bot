@@ -91,7 +91,8 @@ export class TelegramSocialLinks {
         const rows = data.items.filter(row => [row.labelFa, row.labelEn, row.url].some(item => normalize(item).toLowerCase() === normalize(plan.target!).toLowerCase()));
         if (rows.length !== 1 || data.total !== 1) {
           state.rows = data.items; state.awaiting = text;
-          return reply(`🔎 لینک یکتایی انتخاب نشد؛ شمارهٔ ردیف یا شناسهٔ دقیق را بفرست.\n\n${data.items.map(socialCard).join("\n\n") || "موردی پیدا نشد."}`, "social-clarify");
+          const choices = data.items.slice(0, 10).map((row, index) => socialCard(row, index)).join("\n\n");
+          return reply(`🔎 لینک یکتایی انتخاب نشد؛ یک گزینه را انتخاب کن یا شناسهٔ دقیق را بفرست.\n\n${choices || "موردی پیدا نشد."}`, "social-clarify");
         }
         id = rows[0]!.id;
       }

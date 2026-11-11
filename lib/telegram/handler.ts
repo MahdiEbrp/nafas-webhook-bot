@@ -6,10 +6,9 @@ import { TelegramSmsAdmin, isSmsAdminRequest } from "@/lib/telegram/sms-admin";
 /**
  * TELEGRAM BRIDGE
  *
- * Incoming Telegram update → `handleChat` → Persian answer. There are no menus
- * and no confirmations: a chat bot reads text and writes text. The one button
- * that exists is Telegram's own "share your number", and it is there because the
- * owner asked for the phone number to come from Telegram rather than from typing.
+ * Incoming Telegram updates use the same text handlers whether the user types
+ * or taps a bounded inline suggestion. Sensitive values and mutations still go
+ * through their existing local collection and explicit-confirmation flows.
  *
  * Flow:
  *   no phone on file → the gate asks for one and nothing else is answered
@@ -46,6 +45,7 @@ import { TelegramWorkingHours, isWorkingHoursRequest } from "@/lib/telegram/work
 import { isUserManagementMessage } from "@/lib/telegram/users";
 import { TelegramUsers } from "@/lib/telegram/users";
 import { RulesAssistant, isRulesRequestCandidate } from "@/lib/rules/assistant";
+import { inlineSuggestionsForReply, resolveInlineSuggestion } from "@/lib/telegram/inline-suggestions";
 
 export type BridgeOutcome = {
   handled: boolean;
@@ -139,12 +139,16 @@ const STALE_BUTTON: Record<Locale, string> = {
 async function replyText(
   chatId: number,
   text: string,
-  options: { replyToMessageId?: number } = {},
+  options: { replyToMessageId?: number; status?: string; locale?: Locale; sensitive?: boolean } = {},
 ): Promise<void> {
+  const markup = options.status
+    ? inlineSuggestionsForReply(options.status, text, options.locale ?? getConfig().defaultLocale, options.sensitive)
+    : undefined;
   await sendMessage({
     chatId,
     text,
     ...(options.replyToMessageId ? { replyToMessageId: options.replyToMessageId } : {}),
+    ...(markup ? { replyMarkup: markup } : {}),
   });
 }
 
@@ -169,7 +173,7 @@ async function processTextMessage(input: {
     ...(ruleContext ? { ruleContext } : {}),
   });
 
-  await replyText(chatId, result.reply, { replyToMessageId });
+  await replyText(chatId, result.reply, { replyToMessageId, status: result.status, locale });
 
   logInfo("telegram.message", { chatId, userId, status: result.status, model: result.model, ms: result.ms });
 
@@ -183,19 +187,41 @@ async function processTextMessage(input: {
   };
 }
 
-export async function handleTelegramUpdate(update: TelegramUpdate): Promise<BridgeOutcome> {
+export async function handleTelegramUpdate(
+  update: TelegramUpdate,
+  options: { fromInlineSuggestion?: boolean } = {},
+): Promise<BridgeOutcome> {
   const locale: Locale = getConfig().defaultLocale;
 
-  /* ── 1. Leftover button presses ────────────────────────────────────── */
+  /* ── 1. Inline suggestion buttons ──────────────────────────────────── */
   if (update.callback_query) {
     const query = update.callback_query;
-    const chatId = query.message?.chat.id;
-    if (!chatId) return { handled: false, reason: "callback without chat" };
-    if (!isAllowed(chatId)) return { handled: false, reason: "chat not allowed", chatId };
+    const sourceMessage = query.message;
+    const chatId = sourceMessage?.chat.id;
+    if (chatId === undefined) {
+      await answerCallbackQuery({ callbackQueryId: query.id });
+      return { handled: false, reason: "callback without chat" };
+    }
+    if (!isAllowed(chatId)) {
+      await answerCallbackQuery({ callbackQueryId: query.id, text: locale === "en" ? "This chat is not allowed." : "این گفت‌وگو مجاز نیست." });
+      return { handled: false, reason: "chat not allowed", chatId };
+    }
 
-    void answerCallbackQuery({ callbackQueryId: query.id });
-    await replyText(chatId, STALE_BUTTON[locale]);
-    return { handled: true, chatId, status: "stale-button" };
+    const selectedText = resolveInlineSuggestion(query.data, locale);
+    if (!selectedText) {
+      await answerCallbackQuery({ callbackQueryId: query.id });
+      await replyText(chatId, STALE_BUTTON[locale]);
+      return { handled: true, chatId, status: "stale-button" };
+    }
+
+    await answerCallbackQuery({ callbackQueryId: query.id });
+    // Treat a button choice like the same user's typed text. The callback data
+    // maps only to fixed, harmless prompts; mutations still need normal preview
+    // and explicit confirmation in the existing workflow handlers.
+    return handleTelegramUpdate({
+      update_id: update.update_id,
+      message: { ...sourceMessage!, from: query.from, text: selectedText },
+    }, { fromInlineSuggestion: true });
   }
 
   /* ── 2. Plain messages ─────────────────────────────────────────────── */
@@ -228,7 +254,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const authOwnerId = `telegram-user-${userId}`;
 
   if (message.chat.type !== "private" && (isOtpLoginIntent(text) || sixDigitCode(text))) {
-    await replyText(chatId, PRIVATE_LOGIN_ONLY[locale], { replyToMessageId: message.message_id });
+    await replyText(chatId, PRIVATE_LOGIN_ONLY[locale], { replyToMessageId: options.fromInlineSuggestion ? undefined : message.message_id });
     return { handled: true, chatId, status: "otp-private-only" };
   }
 
@@ -277,11 +303,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
   const emailResult = clinicSwitch || collectingUser || collectingSocial || collectingSms || collectingSettings || collectingPayment ? null : await emailAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (emailResult) {
-    if (emailResult.deleteSensitiveMessage) {
+    if (emailResult.deleteSensitiveMessage && !options.fromInlineSuggestion) {
       const removed = await deleteMessage(chatId, message.message_id);
       if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام حاوی نشانی، متن یا اطلاعات سرویس ایمیل ممکن نشد؛ لطفاً خودت آن را حذف کن. این مقدار وارد مدل یا تاریخچه نشده است." });
     }
-    await sendMessage({ chatId, text: emailResult.reply });
+    await replyText(chatId, emailResult.reply, { status: emailResult.status, locale, sensitive: emailResult.deleteSensitiveMessage });
     return { handled: true, chatId, status: emailResult.status };
   }
   if (!collectingUser && !collectingSocial && !collectingSms && !collectingSettings && (collectingPayment || paymentSwitch)) {
@@ -294,11 +320,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
   const paymentResult = clinicSwitch || collectingUser || collectingSocial || collectingSms || collectingSettings ? null : await paymentAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (paymentResult) {
-    if (paymentResult.deleteSensitiveMessage) {
+    if (paymentResult.deleteSensitiveMessage && !options.fromInlineSuggestion) {
       const removed = await deleteMessage(chatId, message.message_id);
       if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام اطلاعات پرداخت ممکن نشد؛ خودت آن را حذف کن. مقدار وارد مدل یا تاریخچه نشده است." });
     }
-    await sendMessage({ chatId, text: paymentResult.reply });
+    await replyText(chatId, paymentResult.reply, { status: paymentResult.status, locale, sensitive: paymentResult.deleteSensitiveMessage });
     return { handled: true, chatId, status: paymentResult.status };
   }
   if (!collectingSettings && !isSettingsAdminRequest(text) && (isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) settingsAdmin.clear(authOwnerId);
@@ -311,11 +337,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
   const settingsResult = clinicSwitch || collectingUser || collectingSocial || collectingSms ? null : await settingsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (settingsResult) {
-    if (settingsResult.deleteSensitiveMessage) {
+    if (settingsResult.deleteSensitiveMessage && !options.fromInlineSuggestion) {
       const removed = await deleteMessage(chatId, message.message_id);
       if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام مقدار تنظیم ممکن نشد؛ خودت آن را حذف کن. مقدار وارد مدل یا تاریخچه نشده است." });
     }
-    await sendMessage({ chatId, text: settingsResult.reply });
+    await replyText(chatId, settingsResult.reply, { status: settingsResult.status, locale, sensitive: settingsResult.deleteSensitiveMessage });
     return { handled: true, chatId, status: settingsResult.status };
   }
 
@@ -329,11 +355,11 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   }
   const smsResult = clinicSwitch || collectingUser || collectingSocial ? null : await smsAdmin.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (smsResult) {
-    if (smsResult.deleteSensitiveMessage) {
+    if (smsResult.deleteSensitiveMessage && !options.fromInlineSuggestion) {
       const removed = await deleteMessage(chatId, message.message_id);
       if (!removed.ok) await sendMessage({ chatId, text: "⚠️ حذف پیام حاوی اطلاعات اتصال ممکن نشد؛ لطفاً خودت آن را حذف کن. مقدار وارد مدل یا تاریخچه نشده است." });
     }
-    await sendMessage({ chatId, text: smsResult.reply });
+    await replyText(chatId, smsResult.reply, { status: smsResult.status, locale, sensitive: smsResult.deleteSensitiveMessage });
     return { handled: true, chatId, status: smsResult.status };
   }
   if (!collectingUser && !collectingSocial && isSocialLinksRequest(text)) {
@@ -343,7 +369,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   } else if (!collectingUser && !collectingSocial && (isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) socialLinks.clear(authOwnerId);
   const socialResult = clinicSwitch || collectingUser ? null : await socialLinks.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (socialResult) {
-    await sendMessage({ chatId, text: socialResult.reply });
+    await replyText(chatId, socialResult.reply, { status: socialResult.status, locale });
     return { handled: true, chatId, status: socialResult.status };
   }
 
@@ -355,18 +381,18 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   } else if (isUserManagementMessage(text) || isRulesRequestCandidate(text)) workingHours.clear(authOwnerId);
   const hoursResult = clinicSwitch || collectingUser ? null : await workingHours.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (hoursResult) {
-    await sendMessage({ chatId, text: hoursResult.reply });
+    await replyText(chatId, hoursResult.reply, { status: hoursResult.status, locale });
     return { handled: true, chatId, status: hoursResult.status };
   }
 
   const usersResult = clinicSwitch ? null : await telegramUsers.handle(authOwnerId, message.text ?? "", ruleContext, message.chat.type === "private");
   if (usersResult) {
-    if (usersResult.deleteSensitiveMessage) {
+    if (usersResult.deleteSensitiveMessage && !options.fromInlineSuggestion) {
       const removed = await deleteMessage(chatId, message.message_id);
       if (!removed.ok) await sendMessage({ chatId, text: "⚠️ نتوانستم پیام حاوی رمز را از تلگرام حذف کنم؛ لطفاً خودت آن پیام را حذف کن. رمز در پاسخ یا تاریخچهٔ مدل درج نشده است." });
     }
     // Account details and temporary passwords are never added to model history.
-    await sendMessage({ chatId, text: usersResult.reply });
+    await replyText(chatId, usersResult.reply, { status: usersResult.status, locale, sensitive: usersResult.deleteSensitiveMessage });
     return { handled: true, chatId, status: usersResult.status };
   }
 
@@ -378,14 +404,14 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     && (isRulesRequestCandidate(text) || rulesAssistant.hasPending(rulesConversation, ruleContext.actorId)
       || rulesAssistant.hasFollowup(rulesConversation, ruleContext.actorId, text))) {
     const result = await rulesAssistant.handle({ conversationId: rulesConversation, message: text, locale, context: ruleContext });
-    await sendMessage({ chatId, text: result.reply });
+    await replyText(chatId, result.reply, { status: `rules-${result.kind}`, locale });
     return { handled: true, chatId, status: `rules-${result.kind}` };
   }
 
   if (message.chat.type === "private" && text && !clinicSensitiveInput) {
     const loginResult = await otpLogin.handle(authOwnerId, text, locale);
     if (loginResult.handled) {
-      await replyText(chatId, loginResult.reply, { replyToMessageId: message.message_id });
+      await replyText(chatId, loginResult.reply, { replyToMessageId: options.fromInlineSuggestion ? undefined : message.message_id });
       return { handled: true, chatId, status: loginResult.status, text: loginResult.reply };
     }
   }
@@ -397,7 +423,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const clinicInput = text || (clinicOperations.expectsPhone(authOwnerId) ? trustedContactPhone : "");
   const clinicResult = await clinicOperations.handle(authOwnerId, clinicInput, ruleContext, message.chat.type === "private", locale);
   if (clinicResult) {
-    if (clinicResult.deleteSensitiveMessage) {
+    if (clinicResult.deleteSensitiveMessage && !options.fromInlineSuggestion) {
       const removed = await deleteMessage(chatId, message.message_id);
       if (!removed.ok) {
         const warning = locale === "fa"
@@ -406,7 +432,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         await sendMessage({ chatId, text: warning });
       }
     }
-    await sendMessage({ chatId, text: clinicResult.reply });
+    await replyText(chatId, clinicResult.reply, { status: clinicResult.status, locale, sensitive: clinicResult.deleteSensitiveMessage });
     return { handled: true, chatId, status: clinicResult.status };
   }
 
@@ -425,13 +451,13 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   if (gateActive() && !ruleContext && !/^\/id\b/.test(text)) {
     const say = async (
       line: string,
-      options: { replyMarkup?: Record<string, unknown> } = {},
+      replyOptions: { replyMarkup?: Record<string, unknown> } = {},
     ): Promise<void> => {
       await sendMessage({
         chatId,
         text: truncateAtSentence(line, MAX_TEXT),
-        replyToMessageId: message.message_id,
-        ...(options.replyMarkup ? { replyMarkup: options.replyMarkup } : {}),
+        ...(options.fromInlineSuggestion ? {} : { replyToMessageId: message.message_id }),
+        ...(replyOptions.replyMarkup ? { replyMarkup: replyOptions.replyMarkup } : {}),
       });
     };
 
@@ -457,7 +483,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     const reply = message.chat.type === "private"
       ? locale === "en" ? "Start by saying “I want to log in” before sending a phone number or SMS code." : "پیش از فرستادن شماره یا کد پیامک، بنویس «می‌خواهم لاگین کنم»."
       : PRIVATE_LOGIN_ONLY[locale];
-    await replyText(chatId, reply, { replyToMessageId: message.message_id });
+    await replyText(chatId, reply, { replyToMessageId: options.fromInlineSuggestion ? undefined : message.message_id });
     return { handled: true, chatId, status: "otp-login-required" };
   }
 
@@ -470,7 +496,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
         await sendMessage({
           chatId,
           text: confirmPhoneText(locale, check.normalized),
-          replyToMessageId: message.message_id,
+          ...(options.fromInlineSuggestion ? {} : { replyToMessageId: message.message_id }),
           replyMarkup: removeKeyboard(),
         });
         return { handled: true, chatId, status: "phone-saved" };
@@ -483,7 +509,7 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
   const firstName = message.from?.first_name;
 
   if (/^\/(start|menu)\b/.test(text)) {
-    await replyText(chatId, welcomeText(locale, firstName), { replyToMessageId: message.message_id });
+    await replyText(chatId, welcomeText(locale, firstName), { replyToMessageId: options.fromInlineSuggestion ? undefined : message.message_id });
     logInfo("telegram.start", { chatId });
     return { handled: true, chatId, status: "start" };
   }
@@ -514,5 +540,5 @@ export async function handleTelegramUpdate(update: TelegramUpdate): Promise<Brid
     return { handled: true, chatId, status: "id" };
   }
 
-  return await processTextMessage({ chatId, userId, text, locale, sessionId: await sessionIdFor(userId), ruleContext, replyToMessageId: message.message_id });
+  return await processTextMessage({ chatId, userId, text, locale, sessionId: await sessionIdFor(userId), ruleContext, replyToMessageId: options.fromInlineSuggestion ? undefined : message.message_id });
 }
