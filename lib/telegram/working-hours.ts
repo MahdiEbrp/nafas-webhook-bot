@@ -8,37 +8,84 @@ import { planHoursRequest, hoursPlanSchema, type HoursPlanner } from "@/lib/work
 import { createWorkingHourSchema } from "@/lib/working-hours/validation";
 
 export const DAYS: Record<string, string> = { Saturday: "شنبه", Sunday: "یکشنبه", Monday: "دوشنبه", Tuesday: "سه‌شنبه", Wednesday: "چهارشنبه", Thursday: "پنجشنبه", Friday: "جمعه" };
-export function isWorkingHoursRequest(text: string): boolean { return /ساع(?:ا)?ت\s*(?:کاری|کار)|برنامه\s*کاری|شیفت|الگوی\s*نوبت|working[ -]?hours/iu.test(normalize(text)); }
+
+const BOOKABLE_DAYS = /(?:\b(?:bookable|available)\s+(?:booking\s+)?days?\b|(?:چه\s*)?روز.{0,12}(?:قابل|اماده|موجود).{0,16}(?:رزرو|نوبت))/iu;
+const EXPLICIT_WEEKLY_SCHEDULE = /(?:ساع(?:ا)?ت\s*(?:کاری|کار)|برنامه(?:ٔ)?\s*(?:کاری|هفتگی)|روز.{0,8}کاری|شیفت|الگوی\s*نوبت|working[ -]?hours|work(?:ing)?[ -]?days?|weekly\s+schedule)/iu;
+const DATED_SLOT_TERMS = /(?:\bslots?\b|اسلات|(?:زمان|نوبت|وقت).{0,12}(?:تاریخ|امروز|فردا|پسفردا))/iu;
+const WEEKDAY = /(?:شنبه|یکشنبه|دوشنبه|سه\s*شنبه|چهارشنبه|پنج\s*شنبه|جمعه|\b(?:saturday|sunday|monday|tuesday|wednesday|thursday|friday)\b)/iu;
+const WEEKDAY_SCHEDULE_ACTION = /(?:ساع(?:ا)?ت|hours?|ظرفیت|capacity|فعال|غیرفعال|enable|disable|activate|deactivate|اضافه|افزودن|add|حذف|پاک|ویرایش|تغییر|edit|change|update|الگو|pattern)/iu;
+const WORKING_HOURS_WRITE = /(?:\b(?:create|add|delete|remove|edit|update|change|set|activate|deactivate|disable|enable)\b|بساز|ساخت|ایجاد|اضافه|افزودن|حذف|پاک|ویرایش|تغییر|فعال\s*(?:کن|بکن)|غیرفعال\s*(?:کن|بکن))/iu;
+
+export function isBookableDaysRequest(text: string): boolean {
+  return BOOKABLE_DAYS.test(normalize(text).toLowerCase());
+}
+
+/** Distinguish the recurring weekday schedule from date-specific slots/bookings. */
+export function isWorkingHoursRequest(text: string): boolean {
+  const value = normalize(text).toLowerCase();
+  if (EXPLICIT_WEEKLY_SCHEDULE.test(value) || BOOKABLE_DAYS.test(value)) return true;
+  if (DATED_SLOT_TERMS.test(value)) return false;
+  return WEEKDAY.test(value) && WEEKDAY_SCHEDULE_ACTION.test(value);
+}
+
+function dayFromText(text: string): string | undefined {
+  const words: string[] = normalize(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return Object.entries(DAYS).find(([english, persian]) => {
+    if (words.includes(english.toLowerCase())) return true;
+    const target = normalize(persian).toLowerCase().replace(/\s+/gu, "");
+    return words.some((word, index) => word === target || `${word}${words[index + 1] ?? ""}` === target);
+  })?.[0];
+}
+
+function hoursReadInput(value: string): Record<string, unknown> {
+  const status = adminReadStatus(value, [
+    { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
+    { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
+  ]) ?? (BOOKABLE_DAYS.test(value) ? "active" : undefined);
+  const day = dayFromText(value);
+  return {
+    ...(status ? { status } : {}),
+    ...(day ? { search: day } : {}),
+    ...(BOOKABLE_DAYS.test(value) ? { perPage: 100 } : {}),
+  };
+}
+
 function deterministicHoursRead(text: string) {
-  return matchAdminReadRoute(text, [{
+  const route = matchAdminReadRoute(text, [{
     operation: "list" as const,
-    when: /ساع(?:ا)?ت\s*(?:کاری|کار)|برنامه\s*کاری|شیفت|الگوی\s*نوبت|working[ -]?hours/iu,
-    input: value => {
-      const status = adminReadStatus(value, [
-        { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
-        { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
-      ]);
-      const words = value.split(/[^\p{L}\p{N}]+/u);
-      const day = Object.entries(DAYS).find(([english, persian]) => words.includes(english.toLowerCase()) || words.includes(normalize(persian).toLowerCase()))?.[0];
-      return { ...(status ? { status } : {}), ...(day ? { search: day } : {}) };
-    },
+    when: /ساع(?:ا)?ت\s*(?:کاری|کار)|برنامه(?:ٔ)?\s*(?:کاری|هفتگی)|روز.{0,8}کاری|شیفت|الگوی\s*نوبت|working[ -]?hours|work(?:ing)?[ -]?days?|weekly\s+schedule|bookable\s+(?:booking\s+)?days?|(?:چه\s*)?روز.{0,12}(?:قابل|اماده|موجود).{0,16}(?:رزرو|نوبت)/iu,
+    input: hoursReadInput,
   }]);
+  if (route) return route;
+  const value = normalize(text).toLowerCase();
+  if (BOOKABLE_DAYS.test(value) && !WORKING_HOURS_WRITE.test(value)) {
+    return { operation: "list" as const, input: hoursReadInput(value) };
+  }
+  return null;
+}
+
+function isAddWorkdayRequest(text: string): boolean {
+  const value = normalize(text).toLowerCase();
+  return /(?:\bwork(?:ing)?[ -]?days?\b|روز.{0,8}کاری).{0,32}(?:\badd\b|اضافه|افزودن|ایجاد)|(?:\badd\b|اضافه|افزودن|ایجاد).{0,32}(?:\bwork(?:ing)?[ -]?days?\b|روز.{0,8}کاری)/iu.test(value);
 }
 type State = { actor: string; session: string; expires: number; rows: HourRow[]; query: Record<string, unknown>; command?: HoursCommand; snapshot?: HourRow; target?: HourRow; draft?: Record<string, unknown>; awaiting?: string };
-export function hourCard(row: HourRow, index = 0): string {
-  return `**🗓 ${index + 1}. ${DAYS[row.day] ?? row.day}**\n• ساعت شروع: ${row.opens}\n• ساعت پایان: ${row.closes}\n• ظرفیت: ${row.capacity}\n• وضعیت: ${row.isActive ? "🟢 فعال" : "⚪ غیرفعال"}\n• ترتیب نمایش: ${row.displayOrder}\n• شناسه: ${row.id}${row.slotCount !== undefined ? `\n• تعداد الگوهای نوبت: ${row.slotCount}` : ""}${row.patterns ? `\n${hoursFields({ patterns: row.patterns })}` : ""}`;
+export function hourCard(row: HourRow, index = 0, patternsRequested = false): string {
+  const patterns = Array.isArray(row.patterns)
+    ? `\n${hoursFields({ patterns: row.patterns })}`
+    : patternsRequested ? "\n⚠️ سرویس الگوهای نوبت این روز را در پاسخ ارائه نکرد." : "";
+  return `**🗓 ${index + 1}. ${DAYS[row.day] ?? row.day}**\n• ساعت شروع: ${row.opens}\n• ساعت پایان: ${row.closes}\n• ظرفیت: ${row.capacity}\n• وضعیت: ${row.isActive ? "🟢 فعال" : "⚪ غیرفعال"}\n• ترتیب نمایش: ${row.displayOrder}\n• شناسه: ${row.id}${row.slotCount !== undefined ? `\n• تعداد الگوهای نوبت: ${row.slotCount}` : ""}${patterns}`;
 }
-export function hoursFields(input: Record<string, unknown>): string {
+export function hoursFields(input: Record<string, unknown>, options: { patternsReplace?: boolean } = {}): string {
   const labels: Record<string, string> = { day: "روز هفته", opens: "ساعت شروع", closes: "ساعت پایان", capacity: "ظرفیت", displayOrder: "ترتیب نمایش", isActive: "فعال" };
   const lines = Object.entries(labels).flatMap(([key, label]) => key in input ? [`• ${label}: ${key === "day" ? DAYS[String(input[key])] : typeof input[key] === "boolean" ? input[key] ? "بله" : "خیر" : String(input[key])}`] : []);
   if (Array.isArray(input.patterns)) {
-    lines.push("⚠️ الگوهای نوبت با این فهرست به‌طور کامل جایگزین می‌شوند:");
+    lines.push(options.patternsReplace ? "⚠️ این الگوها به‌طور کامل جایگزین الگوهای فعلی می‌شوند:" : "• الگوهای نوبت:");
     if (!input.patterns.length) lines.push("• بدون الگوی صریح (فهرست خالی)");
     for (const item of input.patterns as Array<{ startTime: string; capacity: number; groupIds?: string[] }>) lines.push(`• ساعت: ${item.startTime}؛ ظرفیت: ${item.capacity}\n• شناسه گروه‌ها: ${item.groupIds?.length ? item.groupIds.join("، ") : "تمام گروه‌ها"}`);
   }
   return lines.join("\n");
 }
-const HELP = "**🕒 مدیریت ساعات کاری**\n\n• «ساعات کاری را نشان بده»\n• «ساعات کاری جدید بساز»\n• «ساعت شروع شنبه را به ۹:۰۰ تغییر بده»\n• «ظرفیت ردیف دوم را ۳ کن»\n• «ساعات کاری جمعه را حذف کن»\n• «همه ساعات کاری غیرفعال را حذف کن»\n\n🔒 تغییرها فقط پس از «تأیید» اجرا می‌شوند. انصراف: «لغو».\nروزِ ردیف ثابت است؛ برای روز دیگری باید ردیف تازه ساخت.";
+const HELP = "**🕒 مدیریت برنامهٔ هفتگی نوبت‌دهی**\n\n• «روزهای قابل رزرو رو نشون بده» (روزهای فعال، ساعت‌ها، ظرفیت و الگوها)\n• «ساعات کاری جدید بساز»\n• «ساعت شروع شنبه را به ۹:۰۰ تغییر بده»\n• «ظرفیت سه‌شنبه را ۳ کن»\n• «جمعه را به روزهای کاری اضافه کن»\n• «روز دوشنبه را غیرفعال کن» یا «ساعات کاری جمعه را حذف کن»\n• الگوهای نوبت هفتگی با درخواست صریحِ همان روز مدیریت می‌شوند.\n\nاسلات‌های تاریخ‌دار، مثل «اسلات‌های فردا»، جدا از برنامهٔ هفتگی‌اند.\n🔒 تغییرها فقط پس از «تأیید» اجرا می‌شوند. انصراف: «لغو». روزِ یک ردیف ثابت است؛ برای روز دیگری باید ردیف تازه ساخت.";
 export class TelegramWorkingHours {
   private states = new Map<string, State>();
   constructor(private api = new WorkingHoursApi(), private planner: HoursPlanner = planHoursRequest, private now = Date.now) {}
@@ -95,11 +142,18 @@ export class TelegramWorkingHours {
       state.draft = undefined;
       return this.propose(command, state);
     }
+    if (isAddWorkdayRequest(value)) {
+      const day = dayFromText(value);
+      state.awaiting = undefined;
+      state.rows = [];
+      state.draft = day ? { day } : {};
+      return reply(this.prompt(day ? "opens" : "day", day));
+    }
     if (/(?:ساع(?:ا)?ت|برنامه).*(?:بساز|ایجاد|جدید|اضافه)|(?:ساخت|افزودن).*(?:ساع(?:ا)?ت|برنامه)/iu.test(value)) { state.draft = {}; return reply(this.prompt("day")); }
     const directRead = deterministicHoursRead(text);
     if (directRead) {
       state.awaiting = undefined;
-      return this.run({ operation: "list", input: directRead.input }, state, context);
+      return this.run({ operation: "list", input: directRead.input }, state, context, isBookableDaysRequest(text));
     }
     try {
       const plan = hoursPlanSchema.parse(await this.planner(state.awaiting ? `${state.awaiting}\nتوضیح یا انتخاب کاربر: ${text}` : text, state.rows, state.query));
@@ -141,26 +195,45 @@ export class TelegramWorkingHours {
       return this.propose(command, state);
     } catch { return reply("⚠️ درخواست معتبر و دقیقی آماده نشد. روز، ساعت و تغییر موردنظر را روشن‌تر بگو؛ روزِ یک ردیف قابل تغییر نیست. هیچ تغییری ارسال نشد.", "hours-invalid"); }
   }
-  private prompt(field: string) {
+  private prompt(field: string, selectedDay?: string) {
     const prompts: Record<string, string> = { day: "۱. روز هفته را بفرست؛ مثلاً شنبه.", opens: "۲. ساعت شروع را با قالب ۰۹:۰۰ بفرست.", closes: "۳. ساعت پایان را با قالب ۱۷:۰۰ بفرست؛ باید بعد از شروع باشد.", capacity: "۴. ظرفیت را بفرست (۱ تا ۵۰۰)؛ برای ظرفیت ۱ بنویس «پیش‌فرض»." };
-    return `**🕒 ساخت ساعات کاری**\n\n${prompts[field]}\n\n🔒 هنوز تغییری انجام نشده. انصراف: «لغو»\n⏳ اعتبار: ۵ دقیقه`;
+    const day = selectedDay ? `\n• روز انتخاب‌شده: ${DAYS[selectedDay] ?? selectedDay}` : "";
+    return `**🕒 ساخت ساعات کاری**${day}\n\n${prompts[field]}\n\n🔒 هنوز تغییری انجام نشده. انصراف: «لغو»\n⏳ اعتبار: ۵ دقیقه`;
   }
   private propose(command: HoursCommand, state: State) {
     command.input = validateHoursCommand(command).input;
     state.command = command;
     const input = command.input as Record<string, unknown>;
     const names = { create: "ساخت ساعات کاری", update: "ویرایش ساعات کاری", delete: "حذف ساعات کاری", bulk: "عملیات گروهی", get: "خواندن", list: "فهرست" };
-    const details = command.operation === "bulk" ? `• عملیات گروهی: ${{ activate: "فعال‌سازی", deactivate: "غیرفعال‌سازی", delete: "حذف" }[String(input.action) as "activate"]}\n• محدوده: ${input.scope === "filtered" ? "⚠️ تمام نتایج مطابق فیلتر" : "ردیف‌های انتخاب‌شده"}\n${Array.isArray(input.ids) ? input.ids.map(id => `• شناسه: ${String(id)}`).join("\n") : `• فیلترها:\n${JSON.stringify(input.filters ?? {})}`}` : hoursFields(input);
+    const details = command.operation === "bulk" ? `• عملیات گروهی: ${{ activate: "فعال‌سازی", deactivate: "غیرفعال‌سازی", delete: "حذف" }[String(input.action) as "activate"]}\n• محدوده: ${input.scope === "filtered" ? "⚠️ تمام نتایج مطابق فیلتر" : "ردیف‌های انتخاب‌شده"}\n${Array.isArray(input.ids) ? input.ids.map(id => `• شناسه: ${String(id)}`).join("\n") : `• فیلترها:\n${JSON.stringify(input.filters ?? {})}`}` : hoursFields(input, { patternsReplace: true });
     return { status: "hours-proposed", reply: `**🔎 تأیید تغییر ساعات کاری**\n\n• عملیات: ${names[command.operation]}${command.id ? `\n• شناسه: ${command.id}` : ""}${state.target && command.id === state.target.id ? `\n• روز: ${DAYS[state.target.day]}\n• بازهٔ فعلی: ${state.target.opens} تا ${state.target.closes}` : ""}\n${details}${command.operation === "delete" || command.operation === "bulk" && input.action === "delete" ? "\n⚠️ حذف شامل الگوهای نوبت وابسته نیز می‌شود." : ""}\n\n🔒 هنوز چیزی ارسال نشده.\n✅ اجرا: «تأیید»\n↩️ انصراف: «لغو»\n⏳ اعتبار: ۵ دقیقه` };
   }
   private failure(code: string, status?: number) { return { status: "hours-error", reply: `**⚠️ درخواست ساعات کاری تأیید نشد**\n\n• کد: ${code}${status ? `\n• وضعیت سرویس: ${status}` : ""}\n🔎 در خطای شبکه، نتیجهٔ اجرا ممکن است نامشخص باشد؛ بدون بررسی دوباره تکرار نکن.` }; }
-  private async run(command: HoursCommand, state: State, context: RuleRequestContext) {
+  private async run(command: HoursCommand, state: State, context: RuleRequestContext, includePatterns = false) {
     const result = await this.api.execute(command, context);
     if (!result.ok) return this.failure(result.code, result.status);
     if (command.operation === "list") {
       const data = result.data as { items: HourRow[]; page: number; total: number };
-      state.rows = data.items; state.query = validateHoursCommand(command).input;
-      return { status: "hours-listed", reply: `**🕒 ساعات کاری کلینیک**\n\n📄 صفحه: ${data.page}\n📊 تعداد کل: ${data.total}\n\n${data.items.map(hourCard).join("\n\n") || "📭 ساعات کاری پیدا نشد."}\n\n💬 مثلاً بگو «ساعت شروع ردیف اول را تغییر بده» یا «ساعات کاری جمعه را حذف کن».` };
+      let items = data.items;
+      if (includePatterns) {
+        const details = await Promise.all(items.map(row => Array.isArray(row.patterns)
+          ? Promise.resolve({ ok: true as const, data: row })
+          : this.api.execute({ operation: "get", id: row.id, input: {} }, context)));
+        const completeItems: HourRow[] = [];
+        for (let index = 0; index < details.length; index++) {
+          const detail = details[index]!;
+          if (!detail.ok) return this.failure(detail.code, detail.status);
+          const row = detail.data as HourRow;
+          if (row.id !== items[index]!.id) return this.failure("INVALID_RESPONSE");
+          completeItems.push(row);
+        }
+        items = completeItems;
+      }
+      state.rows = items; state.query = validateHoursCommand(command).input;
+      const bookable = includePatterns && state.query.status === "active";
+      const heading = bookable ? "روزهای قابل رزرو · برنامهٔ هفتگی" : "ساعات کاری کلینیک";
+      const listing = items.map((row, index) => hourCard(row, index, includePatterns)).join("\n\n");
+      return { status: "hours-listed", reply: `**🕒 ${heading}**\n\n📄 صفحه: ${data.page}\n📊 تعداد کل: ${data.total}\n\n${listing || "📭 ساعات کاری پیدا نشد."}\n\n💬 مثلاً بگو «ساعت شروع ردیف اول را تغییر بده» یا «ساعات کاری جمعه را حذف کن».` };
     }
     if (command.operation === "get") { const row = result.data as HourRow; state.rows = [row]; return { status: "hours-read", reply: hourCard(row) }; }
     state.rows = [];

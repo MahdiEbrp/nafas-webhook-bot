@@ -3886,11 +3886,13 @@ async function main(): Promise<void> {
 
   await test("Telegram working-hours requests require a private authenticated session", async () => {
     const before = calls.length;
-    const result = await handleTelegramUpdate(telegramUpdate({ text: "ساعات کاری را نشان بده" }));
-    assertEqual(result.status, "hours-auth-required", "working-hours route precedes model and OTP handling");
-    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/working-hours")), "no model/API request without authentication");
-    const grouped = await handleTelegramUpdate(telegramUpdate({ text: "ساعات کاری را نشان بده", chat: { id: -100200300, type: "group" } }));
-    assertEqual(grouped.status, "hours-private-only", "no working-hours account data in groups");
+    for (const text of ["ساعات کاری را نشان بده", "روزهای قابل رزرو رو نشون بده", "چه روزهایی آماده رزروه؟", "ظرفیت سه‌شنبه رو ۳ کن"]) {
+      const result = await handleTelegramUpdate(telegramUpdate({ text }));
+      assertEqual(result.status, "hours-auth-required", `${text} routes to the protected weekly schedule, not bookings/slots`);
+    }
+    assert(!calls.slice(before).some(call => call.url.includes("openrouter") || call.url.includes("/working-hours") || call.url.includes("/bookings")), "no model/API request without authentication");
+    const grouped = await handleTelegramUpdate(telegramUpdate({ text: "روزهای قابل رزرو رو نشون بده", chat: { id: -100200300, type: "group" } }));
+    assertEqual(grouped.status, "hours-private-only", "no weekly schedule data in groups");
   });
 
   await test("beauty-clinic rules API contract and conversational flows", async () => {
