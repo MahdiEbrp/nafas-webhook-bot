@@ -98,9 +98,40 @@ export async function testUsersContract() {
   const result = await flow.handle("a", "/users list", context, true);
   assert.equal(result?.status, "users-error");
   assert(!result?.reply.includes("sensitive"));
+  // Natural-language read requests are resolved deterministically; they never
+  // need the intent planner and can only issue the users-list GET.
+  status = 200;
+  const directListCases = [
+    { message: "کاربران رو لیست کن", status: "all" },
+    { message: "کاربران را لیست کن", status: "all" },
+    { message: "List users", status: "all" },
+    { message: "Show all active users", status: "active" },
+    { message: "همه کاربران را نمایش بده", status: "all" },
+    { message: "فهرست کاربران را نشان بده", status: "all" },
+    { message: "کاربران فعال را لیست کن", status: "active" },
+  ] as const;
+  let directListPlannerCalls = 0;
+  const deterministicLists = new TelegramUsers(api, () => now, async () => {
+    directListPlannerCalls++;
+    throw new Error("explicit user lists must not reach the planner");
+  });
+  const directListCallStart = calls.length;
+  for (const [index, testCase] of directListCases.entries()) {
+    assert.equal((await deterministicLists.handle(`direct-list-${index}`, testCase.message, context, true))?.status, "users-listed", testCase.message);
+  }
+  assert.equal(directListPlannerCalls, 0, "clear list requests never call the planner");
+  const directListCalls = calls.slice(directListCallStart);
+  assert.equal(directListCalls.length, directListCases.length, "one API request is made for each explicit list request");
+  for (const [index, call] of directListCalls.entries()) {
+    const url = new URL(call.url);
+    assert.equal(url.pathname, "/api/v1/users", "explicit list uses the users collection endpoint");
+    assert.equal(call.init.method, "GET", "explicit list performs a read-only GET");
+    assert.equal(url.searchParams.get("status"), directListCases[index]?.status, "status filters are preserved, including active users");
+  }
+  assert(directListCalls.every(call => !["POST", "PATCH", "PUT", "DELETE"].includes(String(call.init.method))), "list requests never issue mutations");
+
   // Conversational deletion resolves only server-provided choices and still
   // requires a separate, single-use confirmation.
-  status = 200;
   const secondId = "22222222-2222-4222-8222-222222222222";
   data = { items: [{ id, fullName: "First" }, { id: secondId, fullName: "Second" }], page: 1, total: 2 };
   let plannerCalls = 0;

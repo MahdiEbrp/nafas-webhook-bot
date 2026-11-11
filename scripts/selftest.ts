@@ -258,6 +258,7 @@ function jsonRequest(payload: unknown, headers: Record<string, string> = {}): Re
 async function main(): Promise<void> {
   /* ── 1. Import the real code (after the fetch fake is installed) ────── */
   const { handleChat, resetConversation, conversationLength } = await import("@/lib/bot");
+  const { isProtectedOperationalRequest } = await import("@/lib/bot/operational-intent");
   const { systemPrompt, welcomeText, helpText } = await import("@/lib/bot/prompt");
   const { resetSessionsForTesting, getMessages } = await import("@/lib/bot/session");
   const { handleTelegramUpdate } = await import("@/lib/telegram/handler");
@@ -391,6 +392,24 @@ async function main(): Promise<void> {
     } finally {
       modelToolCalls = null;
     }
+  });
+
+  await test("personal booking questions are guarded without blocking how-to guidance", () => {
+    for (const message of [
+      "What appointments do I have?",
+      "Do I have any appointments tomorrow?",
+      "I want to know if I have an appointment tomorrow",
+      "my upcoming bookings",
+      "من چه نوبت‌هایی دارم؟",
+      "می‌خوام بدونم فردا نوبت دارم یا نه",
+      "رزروهای من را نشان بده",
+    ]) {
+      assert(isProtectedOperationalRequest(message), `personal booking query is protected: ${message}`);
+    }
+    assert(isProtectedOperationalRequest("Book an appointment for me"), "a direct booking request remains operational");
+    assert(!isProtectedOperationalRequest("Can you explain how to book an appointment?"), "an English booking how-to is informational");
+    assert(!isProtectedOperationalRequest("چطور می‌توانم نوبت رزرو کنم؟"), "a Persian booking how-to is informational");
+    assert(!isProtectedOperationalRequest("What is an appointment?"), "a general appointment question remains conversational");
   });
 
   await test("system prompt is a conversation prompt, not an instruction sheet", () => {
@@ -2525,6 +2544,15 @@ async function main(): Promise<void> {
     const persianPublicBookings = await handleChat({ message: "رزروهای من را نمایش بده", sessionId: "public-persian-bookings-request", locale: "fa" });
     assertEqual(persianPublicBookings.layer, "none", "Persian personal-booking requests are blocked by the same code guard");
     assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "Persian booking requests do not reach the model");
+    for (const [index, request] of ([
+      { message: "What appointments do I have?", locale: "en" },
+      { message: "من چه نوبت‌هایی دارم؟", locale: "fa" },
+      { message: "می‌خوام بدونم فردا نوبت دارم یا نه", locale: "fa" },
+    ] as const).entries()) {
+      const result = await handleChat({ ...request, sessionId: `public-booking-query-${index}` });
+      assertEqual(result.layer, "none", `${request.message} is blocked by the public operational guard`);
+    }
+    assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "personal appointment questions never reach the model");
     const unmatchedAuthenticatedBooking = await handleChat({
       message: "Show my bookings",
       sessionId: "unmatched-authenticated-bookings-request",
@@ -2534,6 +2562,10 @@ async function main(): Promise<void> {
     });
     assertEqual(unmatchedAuthenticatedBooking.layer, "none", "a rules session alone does not imply clinic booking tools are available");
     assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "unrouted booking requests remain blocked even with an unrelated rules context");
+    const callsBeforeHowTo = calls.filter((call) => call.url.includes("chat/completions")).length;
+    const bookingHowTo = await handleChat({ message: "Can you explain how to book an appointment?", sessionId: "public-booking-howto", locale: "en" });
+    assertEqual(bookingHowTo.layer, "chat", "booking how-to questions stay in general conversation");
+    assert(calls.filter((call) => call.url.includes("chat/completions")).length > callsBeforeHowTo, "the non-operational how-to question is allowed to reach the model");
 
     const activeCapabilities = await handleChat({
       message: "چه کارهایی بلدی؟",
