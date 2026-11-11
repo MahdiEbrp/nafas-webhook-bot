@@ -109,6 +109,7 @@ export async function testUsersContract() {
     { message: "همه کاربران را نمایش بده", status: "all" },
     { message: "فهرست کاربران را نشان بده", status: "all" },
     { message: "کاربران فعال را لیست کن", status: "active" },
+    { message: "کاربران مسدود رو لیست کن", status: "banned" },
   ] as const;
   let directListPlannerCalls = 0;
   const deterministicLists = new TelegramUsers(api, () => now, async () => {

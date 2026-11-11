@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { normalize } from "@/lib/text";
+import { adminReadStatus, isExplicitAdminReadIntent, matchAdminReadRoute } from "./admin-read-intent";
 import { isOtpLoginIntent } from "@/lib/auth/telegram-login";
 import { jalaliDate } from "./format";
 import type { RuleRequestContext } from "@/lib/rules/types";
@@ -15,7 +16,35 @@ const lists = ["messages", "providers", "templates", "recipients", "received"];
 export function isSmsAdminRequest(text: string): boolean {
   const value = normalize(text);
   if (/(?:کد|رمز|otp|ورود|لاگین)/iu.test(value) && !/مدیریت|سرویس|قالب|گزارش|پنل/iu.test(value)) return false;
-  return /\bsms\b|مدیریت.*پیامک|(?:امار|ارسال|فرستادن|گزارش|قالب|سرویس|ارائه دهنده|اعتبار|پیامهای دریافتی).*پیامک|پیامک.*(?:بفرست|ارسال|بزن|گزارش|قالب|سرویس|دریافتی|گیرنده|امار|وضعیت|حذف)|پنل پیامک/iu.test(value);
+  return /\bsms\b|مدیریت.*پیامک|(?:امار|ارسال|فرستادن|گزارش|قالب|سرویس|ارائه دهنده|اعتبار|پیامهای دریافتی).*پیامک|پیامک.*(?:بفرست|ارسال|بزن|گزارش|قالب|سرویس|دریافتی|گیرنده|امار|وضعیت|حذف)|پنل پیامک/iu.test(value)
+    || /(?:\bsms\b|پیامک)/iu.test(value) && isExplicitAdminReadIntent(value);
+}
+function deterministicSmsRead(text: string) {
+  const status = (value: string) => adminReadStatus(value, [
+    { value: "failed", when: /\b(?:failed|failure|unsuccessful)\b|ناموفق|شکست/iu },
+    { value: "delivered", when: /\bdelivered\b|تحویل/iu },
+    { value: "sending", when: /\bsending\b|در\s*حال\s*ارسال/iu },
+    { value: "queued", when: /\bqueued\b|صف|منتظر/iu },
+    { value: "sent", when: /\bsent\b|ارسال\s*شده/iu },
+  ]);
+  const activeStatus = (value: string) => adminReadStatus(value, [
+    { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
+    { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
+  ]);
+  return matchAdminReadRoute(text, [
+    { operation: "received" as const, when: /\b(?:received|incoming|inbox)\b|دریافتی|دریافت\s*شده|پیامهای\s+دریافتی/iu },
+    { operation: "recipients" as const, when: /\b(?:recipients|contacts)\b|گیرنده(?:ها|های)|گیرندگان|مخاطبین/iu,
+      input: value => /رزرو|\bbookings?\b/iu.test(value) ? { audience: "with_bookings" } : {} },
+    { operation: "templates" as const, when: /\btemplates\b|قالب(?:ها|های)/iu,
+      input: value => { const filter = activeStatus(value); return filter ? { status: filter } : {}; } },
+    { operation: "providers" as const, when: /\b(?:providers?|services?)\b|سرویس|ارائه\s*دهنده/iu,
+      input: value => { const filter = activeStatus(value); return filter ? { status: filter } : {}; } },
+    { operation: "messages" as const, when: /\bmessages?\b|پیامها|پیامک.*(?:ناموفق|شکست|تحویل|ارسال\s*شده|در\s*حال\s*ارسال)|(?:failed|failure|unsuccessful|delivered|sending|queued|sent)/iu,
+      input: value => { const filter = status(value); return filter ? { status: filter } : {}; } },
+    { operation: "overview" as const, when: /\b(?:overview|stats?|statistics|summary|dashboard)\b|امار|گزارش\s*(?:کلی|عمومی)/iu },
+    { operation: "messages" as const, when: /\b(?:sms|messages?)\b|پیامک|پیام/iu,
+      input: value => { const filter = status(value); return filter ? { status: filter } : {}; } },
+  ]);
 }
 const HELP = "**📨 مدیریت پیامک**\n\n• «امار پیامک را نشان بده»\n• «گزارش پیامک‌های ناموفق را نشان بده»\n• «سرویس‌دهنده‌های پیامک را نشان بده»\n• «قالب پیامک جدید بساز»\n• «پیامک بفرست»\n• «سرویس‌دهندهٔ دوم را تست کن»\n• «وضعیت تحویل پیامک اول را بررسی کن»\n\n💳 ارسال و تست ممکن است هزینه داشته باشند و فقط پس از تأیید اجرا می‌شوند. عملیات گروهی در API مرجع وجود ندارد.";
 const resourceOf = (operation: string) => operation.startsWith("provider") || operation === "diagnostics" || operation === "refresh" ? "providers" : operation.startsWith("template") ? "templates" : "messages";
@@ -138,6 +167,12 @@ export class TelegramSmsAdmin {
       }
     }
     if (sensitive) return reply("🔐 اطلاعات اتصال را در درخواست آزاد ننویس. ابتدا ساخت سرویس یا تغییر توکن را بخواه تا مسیر دریافت امن شروع شود.", "sms-invalid");
+    const directRead = deterministicSmsRead(text);
+    if (directRead) {
+      state.awaiting = undefined;
+      const command: SmsCommand = { operation: directRead.operation, input: directRead.input };
+      return this.run(command, state, context);
+    }
     // Deterministic starts keep private bodies/recipients out of model input.
     if (/(?:ارسال|فرستادن|بفرست|send).*(?:پیامک|sms)|(?:پیامک|sms).*(?:بفرست|ارسال|send)/iu.test(value)) return reply(this.start(state, "send"));
     if (/(?:قالب).*پیامک.*(?:بساز|جدید)|(?:قالب).*جدید.*بساز/u.test(value)) return reply(this.start(state, "templateCreate"));

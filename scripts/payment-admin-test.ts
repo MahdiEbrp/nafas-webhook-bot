@@ -42,6 +42,26 @@ export async function testPaymentAdmin() {
     if (operation === "providerGet") { assert(!("apiUrl" in result.data)); assert(!("merchantLast4" in result.data)); }
   }
   const flow = new TelegramPaymentAdmin(api, async (_text, choices) => { plans++; assert(choices.every(item => Object.keys(item).every(key => ["id", "title", "resource"].includes(key)))); return plan; }, () => time);
+  let failedReadPlans = 0;
+  const deterministicReads = new TelegramPaymentAdmin(api, async () => { failedReadPlans++; throw new Error("clear payment reads must bypass the planner"); }, () => time);
+  const readStart = requests.length, writesBeforeReads = writes;
+  const paymentReadCases = [
+    ["آمار پرداخت را نشان بده", "payment-read", "/overview", undefined],
+    ["درگاه‌های غیرفعال را نشان بده", "payment-listed", "/providers", "inactive"],
+    ["تراکنش‌های ناموفق را نشان بده", "payment-listed", "/transactions", "failed"],
+    ["تراکنش‌های درخواست‌شدهٔ NF-12345 را فهرست کن", "payment-listed", "/transactions", "requested"],
+  ] as const;
+  for (const [index, [request, expectedStatus, suffix, filter]] of paymentReadCases.entries()) {
+    assert.equal((await deterministicReads.handle(`payment-read-${index}`, request, context, true))?.status, expectedStatus, request);
+    const call = requests.at(-1)!;
+    assert.equal(call.url.pathname, `/api/v1/admin/payment${suffix}`);
+    assert.equal(call.init.method, "GET", "deterministic payment reads are GET-only");
+    if (filter) assert.equal(call.url.searchParams.get("status"), filter);
+    if (request.includes("NF-12345")) assert.equal(call.url.searchParams.get("search"), "NF-12345");
+  }
+  assert.equal(failedReadPlans, 0, "clear payment reads still work with a throwing planner");
+  assert.equal(writes, writesBeforeReads, "payment read routing never writes");
+  assert(requests.slice(readStart).every(call => call.init.method === "GET"));
   assert(isPaymentAdminRequest("آمار پرداخت")); assert(isPaymentAdminRequest("درگاه جدید بساز")); assert(!isPaymentAdminRequest("کد پیامک برای ورود"));
   const before = calls;
   assert.equal((await flow.handle("anon", "آمار پرداخت", null, true))?.status, "payment-auth-required");
@@ -85,14 +105,14 @@ export async function testPaymentAdmin() {
   plan = { operation: "providers", input: { page: 2 } };
   await flow.handle("pages", "صفحه بعد", context, true);
   assert.equal(requests.at(-1)!.url.searchParams.get("status"), "inactive");
-  assert.equal(requests.at(-1)!.url.searchParams.get("search"), "sample");
+  assert.equal(requests.at(-1)!.url.searchParams.get("search"), null, "the deterministic status filter does not invent a search term");
   plan = { operation: "providerBulk", input: { action: "delete", scope: "filtered" } };
   const bulkProposal = await flow.handle("pages", "همه درگاههای مطابق فیلتر را حذف کن", context, true);
   assert.equal(bulkProposal?.status, "payment-proposed");
   const bulkResult = await flow.handle("pages", "تأیید", context, true);
   assert(bulkResult?.reply.includes("ناموفق: 1"));
   const bulkInput = JSON.parse(String(requests.at(-1)!.init.body));
-  assert.equal(bulkInput.filters.status, "inactive"); assert.equal(bulkInput.filters.search, "sample");
+  assert.equal(bulkInput.filters.status, "inactive"); assert.equal(bulkInput.filters.search, undefined);
   const replayCalls = calls;
   await flow.handle("pages", "تأیید", context, true);
   assert.equal(calls, replayCalls, "a consumed confirmation cannot repeat a payment operation");

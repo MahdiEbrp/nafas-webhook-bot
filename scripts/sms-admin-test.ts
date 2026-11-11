@@ -23,7 +23,46 @@ export async function testSmsAdmin() {
   const planner = async () => { plans++; return { operation: "providerCreate", input: {} }; };
   const flow = new TelegramSmsAdmin(api, planner, () => time);
   assert(isSmsAdminRequest("پیامک بفرست"));
+  assert(isSmsAdminRequest("SMS failed messages show me"));
   assert(!isSmsAdminRequest("کد پیامک برای ورود"));
+  const readRequests: { url: URL; init: RequestInit }[] = [];
+  const readApi = new SmsAdminApi(async (url, init) => {
+    const parsed = new URL(String(url)); readRequests.push({ url: parsed, init: init! });
+    const path = parsed.pathname;
+    const data = path.endsWith("/overview")
+      ? { stats: { total: 2, sent: 1, delivered: 1, failed: 0, deliveryRate: 50 }, providerCount: 1, activeProviderCount: 1, templateCount: 1, activeTemplateCount: 1 }
+      : path.endsWith("/messages")
+        ? { items: [{ id, recipientMasked: "09***", providerName: "Fake", status: "failed", createdAt: "2026-01-01T00:00:00Z" }], page: 1, perPage: 20, total: 1 }
+        : path.endsWith("/templates")
+          ? { items: [{ id, key: "reminder", messageType: "transactional", variables: [], translations: { fa: { name: "یادآوری", content: "متن" } }, isActive: true, displayOrder: 0 }], page: 1, perPage: 10, total: 1 }
+          : path.endsWith("/providers")
+            ? { items: [{ id, name: "Fake", kind: "fake", isActive: false, isDefault: false }], page: 1, perPage: 10, total: 1 }
+            : { items: [{ id, fullName: "Test", phone: "+989120000000" }], page: 1, perPage: 10, total: 1 };
+    return new Response(JSON.stringify({ data }));
+  }, "https://clinic.example");
+  let readPlans = 0;
+  const deterministicReads = new TelegramSmsAdmin(readApi, async () => { readPlans++; throw new Error("clear SMS reads must bypass the planner"); }, () => time);
+  const explicitReadCases = [
+    ["آمار پیامک را نشان بده", "sms-read", "/api/v1/admin/sms/overview", undefined],
+    ["گزارش پیامک‌های ناموفق را نشان بده", "sms-read", "/api/v1/admin/sms/messages", "failed"],
+    ["قالب‌های فعال پیامک را نشان بده", "sms-read", "/api/v1/admin/sms/templates", "active"],
+    ["سرویس‌دهندگان پیامک غیرفعال را نشان بده", "sms-read", "/api/v1/admin/sms/providers", "inactive"],
+    ["گیرندگان پیامک دارای رزرو را نشان بده", "sms-read", "/api/v1/admin/sms/recipients", undefined],
+  ] as const;
+  for (const [index, [request, expectedStatus, path, filter]] of explicitReadCases.entries()) {
+    assert.equal((await deterministicReads.handle(`sms-read-${index}`, request, context, true))?.status, expectedStatus, request);
+    const call = readRequests.at(-1)!;
+    assert.equal(call.url.pathname, path, "clear SMS reads use the matching GET endpoint");
+    assert.equal(call.init.method, "GET", "SMS read routing never writes");
+    if (filter) assert.equal(call.url.searchParams.get("status"), filter);
+    if (path.endsWith("/recipients")) assert.equal(call.url.searchParams.get("audience"), "with_bookings");
+  }
+  assert.equal(readPlans, 0, "clear SMS reads do not invoke a planner that throws");
+  const beforeTargetedRead = readRequests.length;
+  assert.equal((await deterministicReads.handle("sms-targeted-read", "وضعیت تحویل پیامک اول را بررسی کن", context, true))?.status, "sms-invalid", "ordinal delivery checks stay on the contextual planner path rather than becoming a broad list");
+  assert.equal(readPlans, 1);
+  assert.equal(readRequests.length, beforeTargetedRead, "a targeted detail request is not misrouted to the messages collection");
+  assert(readRequests.every(call => call.init.method === "GET"));
   assert.equal((await flow.handle("anon", "آمار پیامک", null, true))?.status, "sms-auth-required");
   assert.equal((await flow.handle("group", "آمار پیامک", context, false))?.status, "sms-private-only");
   assert.equal(calls, 0);

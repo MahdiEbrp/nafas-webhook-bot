@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalize } from "@/lib/text";
+import { adminReadStatus, matchAdminReadRoute } from "./admin-read-intent";
 import { isOtpLoginIntent } from "@/lib/auth/telegram-login";
 import type { RuleRequestContext } from "@/lib/rules/types";
 import { WorkingHoursApi, validateHoursCommand, type HoursCommand, type HourRow } from "@/lib/working-hours/api";
@@ -8,6 +9,21 @@ import { createWorkingHourSchema } from "@/lib/working-hours/validation";
 
 export const DAYS: Record<string, string> = { Saturday: "شنبه", Sunday: "یکشنبه", Monday: "دوشنبه", Tuesday: "سه‌شنبه", Wednesday: "چهارشنبه", Thursday: "پنجشنبه", Friday: "جمعه" };
 export function isWorkingHoursRequest(text: string): boolean { return /ساع(?:ا)?ت\s*(?:کاری|کار)|برنامه\s*کاری|شیفت|الگوی\s*نوبت|working[ -]?hours/iu.test(normalize(text)); }
+function deterministicHoursRead(text: string) {
+  return matchAdminReadRoute(text, [{
+    operation: "list" as const,
+    when: /ساع(?:ا)?ت\s*(?:کاری|کار)|برنامه\s*کاری|شیفت|الگوی\s*نوبت|working[ -]?hours/iu,
+    input: value => {
+      const status = adminReadStatus(value, [
+        { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
+        { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
+      ]);
+      const words = value.split(/[^\p{L}\p{N}]+/u);
+      const day = Object.entries(DAYS).find(([english, persian]) => words.includes(english.toLowerCase()) || words.includes(normalize(persian).toLowerCase()))?.[0];
+      return { ...(status ? { status } : {}), ...(day ? { search: day } : {}) };
+    },
+  }]);
+}
 type State = { actor: string; session: string; expires: number; rows: HourRow[]; query: Record<string, unknown>; command?: HoursCommand; snapshot?: HourRow; target?: HourRow; draft?: Record<string, unknown>; awaiting?: string };
 export function hourCard(row: HourRow, index = 0): string {
   return `**🗓 ${index + 1}. ${DAYS[row.day] ?? row.day}**\n• ساعت شروع: ${row.opens}\n• ساعت پایان: ${row.closes}\n• ظرفیت: ${row.capacity}\n• وضعیت: ${row.isActive ? "🟢 فعال" : "⚪ غیرفعال"}\n• ترتیب نمایش: ${row.displayOrder}\n• شناسه: ${row.id}${row.slotCount !== undefined ? `\n• تعداد الگوهای نوبت: ${row.slotCount}` : ""}${row.patterns ? `\n${hoursFields({ patterns: row.patterns })}` : ""}`;
@@ -80,6 +96,11 @@ export class TelegramWorkingHours {
       return this.propose(command, state);
     }
     if (/(?:ساع(?:ا)?ت|برنامه).*(?:بساز|ایجاد|جدید|اضافه)|(?:ساخت|افزودن).*(?:ساع(?:ا)?ت|برنامه)/iu.test(value)) { state.draft = {}; return reply(this.prompt("day")); }
+    const directRead = deterministicHoursRead(text);
+    if (directRead) {
+      state.awaiting = undefined;
+      return this.run({ operation: "list", input: directRead.input }, state, context);
+    }
     try {
       const plan = hoursPlanSchema.parse(await this.planner(state.awaiting ? `${state.awaiting}\nتوضیح یا انتخاب کاربر: ${text}` : text, state.rows, state.query));
       if (plan.operation === "clarify") { state.awaiting = text; return reply(`${HELP}\n\n🔎 روز، ردیف یا تغییر موردنظر را دقیق‌تر بگو.`); }

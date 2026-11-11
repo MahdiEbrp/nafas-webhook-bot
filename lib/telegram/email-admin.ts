@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { normalize } from "@/lib/text";
+import { adminReadStatus, matchAdminReadRoute } from "./admin-read-intent";
 import { isOtpLoginIntent } from "@/lib/auth/telegram-login";
 import type { RuleRequestContext } from "@/lib/rules/types";
 import {
@@ -75,6 +76,31 @@ export function isEmailAdminRequest(text: string): boolean {
   const value = normalize(text);
   return /ایمیل|پست الکترونیکی|smtp|\bemail\b|\brecipients?\b|\bmail(?:box|ing|er)?\b|emailtemplate|\bfromemail\b|قالب.*(?:ایمیل|نامه)|(?:گزارش|فهرست|آمار|مدیریت|ارسال|تست).*ایمیل|ایمیل.*(?:گزارش|فهرست|آمار|مدیریت|ارسال|تست)/iu.test(value)
     || textHasEmail(text);
+}
+function deterministicEmailRead(text: string) {
+  const activeStatus = (value: string) => adminReadStatus(value, [
+    { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
+    { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
+  ]);
+  const messageStatus = (value: string) => adminReadStatus(value, [
+    { value: "failed", when: /\b(?:failed|failure|unsuccessful)\b|ناموفق|شکست/iu },
+    { value: "delivered", when: /\bdelivered\b|تحویل/iu },
+    { value: "sending", when: /\bsending\b|در\s*حال\s*ارسال/iu },
+    { value: "queued", when: /\bqueued\b|صف|منتظر/iu },
+    { value: "sent", when: /\bsent\b|ارسال\s*شده/iu },
+  ]);
+  return matchAdminReadRoute(text, [
+    { operation: "recipients" as const, when: /\b(?:recipients|contacts)\b|گیرنده(?:ها|های)|گیرندگان|مخاطبین/iu },
+    { operation: "templates" as const, when: /\btemplates\b|قالب(?:ها|های)/iu,
+      input: value => { const filter = activeStatus(value); return filter ? { status: filter } : {}; } },
+    { operation: "providers" as const, when: /\b(?:providers|services|smtp)\b|سرویس(?:ها|های|دهندگان)|ارائه\s*دهندگان/iu,
+      input: value => { const filter = activeStatus(value); return filter ? { status: filter } : {}; } },
+    { operation: "messages" as const, when: /\bmessages\b|\b(?:logs|history)\b|پیام(?:ها|های)|گزارش\s+ارسال/iu,
+      input: value => { const filter = messageStatus(value); return filter ? { status: filter } : {}; } },
+    { operation: "messages" as const, when: /\b(?:failed|failure|unsuccessful|delivered|sending|queued|sent)\b|ناموفق|شکست|تحویل|در\s*حال\s*ارسال|صف/iu,
+      input: value => { const filter = messageStatus(value); return filter ? { status: filter } : {}; } },
+    { operation: "overview" as const, when: /\b(?:overview|stats?|statistics|summary|dashboard|reports?)\b|امار|گزارش/iu },
+  ]);
 }
 
 export { EMAIL_HELP };
@@ -220,6 +246,11 @@ export class TelegramEmailAdmin {
     }
     if (localSensitive(text) && !state.draft) return reply("🔐 اطلاعات ایمیل را مستقیم در درخواست آزاد نفرست. ابتدا عملیات را بخواه تا نشانی، متن یا اطلاعات سرویس در فرم محلی دریافت شود؛ مقدار به مدل سپرده نمی‌شود.", "email-local-input-required", true);
     if (/راهنما|راهنمای ایمیل|help/iu.test(value)) return reply(EMAIL_HELP, "email-help", false);
+    const directRead = deterministicEmailRead(text);
+    if (directRead) {
+      state.awaiting = undefined;
+      return this.run({ operation: directRead.operation, input: directRead.input }, state, context);
+    }
     if (state.awaiting) {
       const prior = state.awaiting;
       state.awaiting = undefined;

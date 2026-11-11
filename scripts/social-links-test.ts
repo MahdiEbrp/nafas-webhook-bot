@@ -62,6 +62,24 @@ export async function testSocialLinks() {
     return plan;
   }, () => now);
   const turn = (text: string, ctx = context) => flow.handle("owner", text, ctx, true);
+  let failedReadPlans = 0;
+  const deterministicReads = new TelegramSocialLinks(api, async () => { failedReadPlans++; throw new Error("clear social-link reads must bypass the planner"); }, () => now);
+  const readStart = calls.length;
+  const socialReadCases = [
+    ["لینک‌های اجتماعی را نشان بده", "all", undefined],
+    ["لینک‌های اجتماعی غیرفعال را نشان بده", "inactive", undefined],
+    ["لینک اجتماعی اینستاگرام را نشان بده", "all", "instagram"],
+  ] as const;
+  for (const [index, [request, expectedStatus, search]] of socialReadCases.entries()) {
+    assert.equal((await deterministicReads.handle(`social-read-${index}`, request, context, true))?.status, "social-listed", request);
+    const call = calls.at(-1)!;
+    assert.equal(call.url.pathname, "/api/v1/admin/social-links");
+    assert.equal(call.init.method, "GET", "deterministic social-link reads use GET only");
+    assert.equal(call.url.searchParams.get("status"), expectedStatus);
+    if (search) assert.equal(call.url.searchParams.get("search"), search, "explicit platform filters stay on the API query");
+  }
+  assert.equal(failedReadPlans, 0, "clear social-link reads do not invoke a throwing planner");
+  assert(calls.slice(readStart).every(call => call.init.method === "GET"));
   assert.equal((await flow.handle("owner", "لینک‌های اجتماعی را نشان بده", null, true))?.status, "social-auth-required");
   assert.equal((await flow.handle("owner", "لینک‌های اجتماعی را نشان بده", context, false))?.status, "social-private-only");
   assert.equal((await turn("لینک‌های اجتماعی را نشان بده"))?.status, "social-listed");
@@ -132,7 +150,7 @@ export async function testSocialLinks() {
   plan = { operation: "list", input: { page: 2 } };
   await turn("صفحه دوم را نشان بده");
   assert.equal(calls.at(-1)!.url.searchParams.get("status"), "inactive");
-  assert.equal(calls.at(-1)!.url.searchParams.get("search"), "Instagram");
+  assert.equal(calls.at(-1)!.url.searchParams.get("search"), null, "an unmentioned search term is never injected into a direct list");
   plan = { operation: "bulk", input: { action: "delete", scope: "filtered", filters: {} } };
   const beforeBulk = calls.filter(call => call.url.pathname.endsWith("/bulk")).length;
   assert.equal((await turn("همه‌شان را پاک کن"))?.status, "social-proposed");
