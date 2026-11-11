@@ -28,6 +28,24 @@ export function isUserManagementMessage(text: string): boolean {
     && /بساز|ساخت|ایجاد|افزودن|اضافه|ثبت|جدید|لیست|فهرست|نمایش|نشون|نشان|حذف|پاک|پیدا|جستجو|جست‌وجو|ویرایش|تغییر|بازنشانی|رمز|مسدود|فعال|reset|password|create|new|list|show|delete|edit|update|block/iu.test(normalize(text));
 }
 
+const USER_COLLECTION = /(?:\busers\b|\baccounts\b|کاربران|کاربرها|حساب(?:های)?\s+کاربری|(?:لیست|فهرست)\s+کاربر(?:ان)?)/iu;
+const USER_LIST_ACTION = /(?:\b(?:list|show|display|view|browse)\b|لیست|فهرست|نمایش|نشان\s*(?:بده|بدهید)?|نشون\s*(?:بده|بدهید)?|مشاهده)/iu;
+const USER_LIST_WRITE_ACTION = /(?:\b(?:create|add|delete|remove|edit|update|change|reset|ban|block|activate|deactivate|disable|enable|assign)\b|بساز|ایجاد|افزودن|اضافه|حذف|پاک|ویرایش|تغییر|بازنشانی|مسدود|(?:غیرفعال|فعال)\s*(?:کن|کردن|سازی))/iu;
+const USER_LIST_LOOKUP = /(?:\b(?:named|called|role|admin|customer|moderator|support)\b|\bby\s+(?:id|uuid|name|email|phone)\b|uuid|شناسه|به\s*نام|با\s*(?:نام|ایمیل|تلفن|شماره)|نقش|مدیر|مشتری|پشتیبانی|ناظر)/iu;
+
+function explicitUserListCommand(text: string): UserCommand | null {
+  const value = normalize(text).toLowerCase();
+  if (!USER_COLLECTION.test(value) || !USER_LIST_ACTION.test(value) || USER_LIST_WRITE_ACTION.test(value) || USER_LIST_LOOKUP.test(value)) return null;
+  const status = /(?:\binactive\b|\bdisabled\b|غیرفعال)/iu.test(value)
+    ? "inactive"
+    : /(?:\bbanned\b|\bblocked\b|مسدود)/iu.test(value)
+      ? "banned"
+      : /(?:\bactive\b|\benabled\b|فعال)/iu.test(value)
+        ? "active"
+        : undefined;
+  return { operation: "list", input: status ? { status } : {} };
+}
+
 /** Passwords and account data stay out of model history and logs. Flows are
  * actor/session-bound, capped and expire; no cookies are retained in the map.
  * Process-local flows fail closed across cold starts (no durable guarantees).
@@ -102,9 +120,12 @@ export class TelegramUsers {
     let command: UserCommand;
     try {
       const match = text.match(/^\/users\s+(list|create|status|role|password|delete|bulk)(?:\s+([0-9a-f-]{36}))?(?:\s+(\{[\s\S]*\}))?\s*$/iu);
+      const directList = match ? null : explicitUserListCommand(text);
       if (match) command = { operation: match[1]!.toLowerCase() as UserCommand["operation"], id: match[2], input: match[3] ? JSON.parse(match[3]) : {} };
-      else if (/^(?:لیست کاربران|فهرست کاربران|list users)$/iu.test(value)) command = { operation: "list", input: {} };
-      else {
+      else if (directList) {
+        this.awaiting.delete(owner);
+        command = directList;
+      } else {
         if (/(?:رمز|password)/iu.test(text) && !/(?:بازنشانی|ریست|reset)/iu.test(text)) return reply("رمز را فقط وقتی در مرحلهٔ دریافت امن رمز هستی بفرست؛ برای ساخت بنویس «کاربر جدید بساز».", "users-help");
         if (sensitive || details) return reply("ابتدا بنویس «کاربر جدید بساز» تا مشخصات را امن و مرحله‌به‌مرحله دریافت کنم.", "users-invalid");
         const request = prior ? `${prior.request}\nنام یا شناسهٔ موردنظر: ${text}` : text;
