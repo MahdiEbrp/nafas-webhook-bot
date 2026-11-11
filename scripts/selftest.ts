@@ -41,6 +41,7 @@ process.env.TELEGRAM_ALLOWED_CHAT_IDS = "777,-100200300,-100999,-100555";
 type Call = { url: string; method: string; body?: unknown; headers: Record<string, string> };
 
 const calls: Call[] = [];
+let webhookAllowedUpdates: string[] | undefined = ["message"];
 
 /** Canned model behaviour. */
 let modelReply = "سلام! خوشحالم که اینجایی. 🙂";
@@ -157,10 +158,17 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       return new Response(
         JSON.stringify({
           ok: true,
-          result: { url: "https://bot.example.com/api/telegram/webhook", has_custom_certificate: false, pending_update_count: 0 },
+          result: { url: "https://bot.example.com/api/telegram/webhook", has_custom_certificate: false, pending_update_count: 0, ...(webhookAllowedUpdates ? { allowed_updates: webhookAllowedUpdates } : {}) },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
+    }
+    if (apiMethod === "setWebhook") {
+      webhookAllowedUpdates = ((body as { allowed_updates?: string[] })?.allowed_updates ?? []).slice();
+      return new Response(JSON.stringify({ ok: true, result: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     if (apiMethod === "sendMessage") {
       return new Response(
@@ -253,6 +261,8 @@ async function main(): Promise<void> {
   const { systemPrompt, welcomeText, helpText } = await import("@/lib/bot/prompt");
   const { resetSessionsForTesting, getMessages } = await import("@/lib/bot/session");
   const { handleTelegramUpdate } = await import("@/lib/telegram/handler");
+  const { ensureWebhook } = await import("@/lib/telegram/setup");
+  const { inlineSuggestionsForReply, resolveInlineSuggestion } = await import("@/lib/telegram/inline-suggestions");
   const { getConfig, resetConfigCache, configWarnings } = await import("@/lib/config");
   const { truncateAtSentence } = await import("@/lib/text");
   const chatRoute = await import("@/app/api/chat/route");
@@ -296,6 +306,66 @@ async function main(): Promise<void> {
     assertEqual(config.modelChain.join(","), "test/free-a:free,test/free-b:free", "model chain");
     assertEqual(config.history.maxMessages, 4, "history window");
     assert(configWarnings(config).some((w) => w.includes("OPENROUTER_API_KEY")) === false, "no API-key warning");
+  });
+
+  await test("Telegram setup enables callback queries and repairs a message-only webhook", async () => {
+    calls.length = 0;
+    webhookAllowedUpdates = ["message"];
+    const first = await ensureWebhook();
+    assertEqual(first.action, "registered", "old message-only webhook is repaired");
+    const setupCall = calls.find((call) => call.url.endsWith("/setWebhook"));
+    const allowedUpdates = (setupCall?.body as { allowed_updates?: string[] } | undefined)?.allowed_updates ?? [];
+    assert(allowedUpdates.includes("message") && allowedUpdates.includes("callback_query"), "webhook receives messages and inline callbacks");
+    const second = await ensureWebhook();
+    assertEqual(second.action, "unchanged", "callback-enabled webhook is idempotent");
+    webhookAllowedUpdates = undefined;
+    calls.length = 0;
+    const unknownUpdates = await ensureWebhook();
+    assertEqual(unknownUpdates.action, "registered", "a webhook with no reported update list is repaired conservatively");
+    const repairedUnknown = calls.find((call) => call.url.endsWith("/setWebhook"));
+    assert((repairedUnknown?.body as { allowed_updates?: string[] } | undefined)?.allowed_updates?.includes("callback_query"), "repair explicitly subscribes to callbacks when Telegram omits the update list");
+  });
+
+  await test("inline suggestion keyboards are contextual, safe, and only use allowlisted callbacks", () => {
+    const emailMarkup = inlineSuggestionsForReply("email-clarify", "🔎 Which email resource do you mean?", "en");
+    const emailRows = emailMarkup?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+    assert(Array.isArray(emailRows) && emailRows.flat().some((button) => button.text === "Email providers"), "email clarification shows contextual inline choices");
+    const socialClarifyMarkup = inlineSuggestionsForReply("social-pending", "🔎 Please be more specific about the social link. Cancel is available.", "en");
+    assert((socialClarifyMarkup?.inline_keyboard as Array<Array<{ text: string }>>).flat().some((button) => button.text === "Social links"), "clarification suggestions are not reduced to cancel just because help text mentions cancellation");
+    const userChoiceMarkup = inlineSuggestionsForReply("users-pending", "Choose a user or cancel:\n1. Alex Example — ID: 11111111-1111-4111-8111-111111111111\n2. Sam Example — ID: 22222222-2222-4222-8222-222222222222", "en");
+    const userChoiceButtons = (userChoiceMarkup?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+    assertEqual(userChoiceButtons.length, 2, "displayed numbered choices take precedence over a cancel hint");
+    assertEqual(userChoiceButtons[1]?.text, "Sam Example", "user-choice buttons omit the internal ID");
+    assertEqual(userChoiceButtons[1]?.callback_data, "nf1:pick:2", "user-choice buttons preserve the displayed ordinal");
+    const sensitiveMarkup = inlineSuggestionsForReply("payment-invalid", "Invalid secret", "en", true);
+    const sensitiveRows = sensitiveMarkup?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+    assertEqual(sensitiveRows.flat().length, 1, "sensitive prompts only offer cancellation");
+    assertEqual(resolveInlineSuggestion("nf1:clinicServices", "fa"), "خدمات کلینیک را نشان بده", "callback resolves to fixed text");
+    assertEqual(resolveInlineSuggestion("nf1:pick:2", "en"), "2", "numbered choice callback resolves only to its bounded ordinal");
+    assertEqual(resolveInlineSuggestion("nf1:pick:999", "en"), null, "out-of-range choice callback is rejected");
+    assertEqual(resolveInlineSuggestion("arbitrary:delete-all", "fa"), null, "arbitrary callback data is rejected");
+    const bookingMarkup = inlineSuggestionsForReply("booking-choose-group", "Choose a service group:\n1. Facial · 11111111-1111-4111-8111-111111111111\n2. Hair · 22222222-2222-4222-8222-222222222222", "en");
+    const bookingRows = bookingMarkup?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+    assertEqual(bookingRows.flat().length, 2, "visible booking options get individual buttons");
+    assertEqual(bookingRows.flat()[0]?.text, "Facial", "button label omits the internal ID");
+    assertEqual(bookingRows.flat()[1]?.callback_data, "nf1:pick:2", "each visible row maps to its displayed ordinal");
+    const confirmationMarkup = inlineSuggestionsForReply("users-pending", "Reply confirm to apply\nor cancel to stop.", "en");
+    assertEqual((confirmationMarkup?.inline_keyboard as Array<Array<unknown>>).flat().length, 2, "pending confirmations have explicit confirm and cancel buttons");
+    const safeProposalMarkup = inlineSuggestionsForReply("settings-proposed", "Confirm to apply\nCancel to stop.", "en", true);
+    assertEqual((safeProposalMarkup?.inline_keyboard as Array<Array<unknown>>).flat().length, 2, "safe previews keep explicit confirmation buttons after sensitive input is deleted");
+    const bookingUpdateMarkup = inlineSuggestionsForReply("booking-update-clarify", "Choose a booking status or field.", "en");
+    assertEqual((bookingUpdateMarkup?.inline_keyboard as Array<Array<unknown>>).flat().length, 10, "booking ambiguity presents status and field options");
+    assertEqual(resolveInlineSuggestion("nf1:bookingPaid", "en"), "Booking status: paid", "booking status callbacks map to fixed workflow input");
+    assertEqual(resolveInlineSuggestion("nf1:bookingFieldEmail", "en"), "Booking field: email", "booking field callbacks map to fixed workflow input");
+    const bookingCancelMarkup = inlineSuggestionsForReply("booking-cancel-route-clarify", "Choose the booking workflow.", "en");
+    const bookingCancelButtons = (bookingCancelMarkup?.inline_keyboard as Array<Array<{ text: string }>>).flat();
+    assert(bookingCancelButtons.some((button) => button.text === "My bookings") && bookingCancelButtons.some((button) => button.text === "Clinic bookings"), "ambiguous cancellation distinguishes customer and admin booking routes");
+    const clinicClarifyMarkup = inlineSuggestionsForReply("clinic-clarify", "Tell me whether you mean services, bookings, slots, care guides, or notifications.", "en");
+    const clinicClarifyButtons = (clinicClarifyMarkup?.inline_keyboard as Array<Array<{ text: string }>>).flat();
+    assert(clinicClarifyButtons.some((button) => button.text === "Available slots") && clinicClarifyButtons.some((button) => button.text === "Care guides") && clinicClarifyButtons.some((button) => button.text === "Notifications"), "generic clinic clarification offers the stated clinic domains");
+    assertEqual(resolveInlineSuggestion("nf1:availableSlots", "en"), "Show available slots", "clinic-domain callbacks use fixed request text");
+    assertEqual((inlineSuggestionsForReply("booking-phone", "Send a phone number", "en")?.inline_keyboard as Array<Array<{ text: string }>>).flat()[0]?.text, "Cancel", "sensitive booking prompts only offer cancellation");
+    assert(inlineSuggestionsForReply("answered", "I don't understand; please clarify.", "en")?.inline_keyboard, "generic uncertainty also gets suggestions");
   });
 
   await test("OpenRouter accepts a function-tool response without text content", async () => {
@@ -556,6 +626,42 @@ async function main(): Promise<void> {
       calls.some((call) => call.url.endsWith("/sendChatAction")),
       "typing indicator sent",
     );
+  });
+
+  await test("Telegram: uncertain answers show inline suggestions", async () => {
+    resetSessionsForTesting();
+    calls.length = 0;
+    const previousReply = modelReply;
+    modelReply = "I don't understand. Please clarify.";
+    try {
+      const outcome = await handleTelegramUpdate(telegramUpdate({ text: "این جمله مبهم است" }));
+      const markup = lastMarkup();
+      const rows = markup?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>> | undefined;
+      assertEqual(outcome.status, "answered", "normal chat still answers");
+      assert(Array.isArray(rows) && rows.flat().length >= 2, "an inline keyboard appears for an unclear answer");
+      assert(rows?.flat().every((button) => button.callback_data.startsWith("nf1:")), "buttons contain only bounded suggestion ids");
+    } finally {
+      modelReply = previousReply;
+    }
+  });
+
+  await test("Telegram: inline suggestions are acknowledged and handled as the clicking user's message", async () => {
+    resetSessionsForTesting();
+    calls.length = 0;
+    const modelCallsBefore = calls.filter((call) => call.url.includes("openrouter.ai/api/v1/chat/completions")).length;
+    const outcome = await handleTelegramUpdate({
+      update_id: 82,
+      callback_query: {
+        id: "cb-suggestion-1",
+        from: { id: 777, is_bot: false, first_name: "کاربر" },
+        data: "nf1:clinicServices",
+        message: { message_id: 700, date: 1, chat: { id: 777, type: "private" } },
+      },
+    });
+    assertEqual(outcome.status, "clinic-auth-required", "selection enters the same authenticated clinic workflow");
+    assert(calls.some((call) => call.url.endsWith("/answerCallbackQuery")), "Telegram's button spinner is acknowledged");
+    assert(lastSent().includes("می‌خواهم لاگین کنم"), "the clinic auth requirement is returned");
+    assertEqual(calls.filter((call) => call.url.includes("openrouter.ai/api/v1/chat/completions")).length, modelCallsBefore, "button selection is not sent to the general chat model");
   });
 
   await test("Telegram: /clear resets the conversation", async () => {

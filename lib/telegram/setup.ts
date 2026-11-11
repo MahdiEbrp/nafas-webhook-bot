@@ -8,8 +8,8 @@
  *   3. getWebhookInfo()→ read back the registration ("did it stick?")
  *
  * `ensureWebhook()` is idempotent and cheap enough to call on every boot: it
- * only calls setWebhook when the registered URL/secret differ from the config,
- * so a restart does not churn the registration.
+ * only calls setWebhook when the URL or required update types differ, so a
+ * restart does not churn the registration and inline-button callbacks arrive.
  */
 
 import { getConfig } from "@/lib/config";
@@ -77,9 +77,12 @@ export async function ensureWebhook(options: { force?: boolean; dropPendingUpdat
   const info = await getWebhookInfo();
   const current: WebhookInfo | null = info.ok ? info.result : null;
 
+  const allowedUpdates = current?.allowed_updates ?? [];
+  const receivesRequiredUpdates = allowedUpdates.includes("message") && allowedUpdates.includes("callback_query");
   const matches =
     current?.url === desiredUrl &&
-    (!telegram.webhookSecret || info.ok) && // secret cannot be read back; re-register only if URL changed
+    receivesRequiredUpdates &&
+    (!telegram.webhookSecret || info.ok) && // Telegram does not expose the secret in getWebhookInfo
     !options.force;
 
   if (matches && current) {
@@ -102,8 +105,8 @@ export async function ensureWebhook(options: { force?: boolean; dropPendingUpdat
     url: desiredUrl,
     secretToken: telegram.webhookSecret || undefined,
     dropPendingUpdates: options.dropPendingUpdates ?? false,
-    // Plain messages only: this bot has no inline buttons to press.
-    allowedUpdates: ["message"],
+    // Inline suggestion buttons send callback_query updates.
+    allowedUpdates: ["message", "callback_query"],
   });
 
   if (!registered.ok) {

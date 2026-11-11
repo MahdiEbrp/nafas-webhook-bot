@@ -10,6 +10,7 @@ import {
 } from "@/lib/clinic-operations/api";
 import { scrubClinicPlannerText, type ClinicPlan, type ClinicPlanner } from "@/lib/clinic-operations/planner";
 import { TelegramClinicOperations } from "@/lib/telegram/clinic-operations";
+import { inlineSuggestionsForReply, resolveInlineSuggestion } from "@/lib/telegram/inline-suggestions";
 import type { RuleRequestContext } from "@/lib/rules/types";
 
 const ID = "11111111-1111-4111-8111-111111111111";
@@ -18,6 +19,7 @@ const CATEGORY_ID = "33333333-3333-4333-8333-333333333333";
 const SLOT_ID = "44444444-4444-4444-8444-444444444444";
 const GUIDE_ID = "55555555-5555-4555-8555-555555555555";
 const BOOKING_ID = "66666666-6666-4666-8666-666666666666";
+const SECOND_ID = "77777777-7777-4777-8777-777777777777";
 const context: RuleRequestContext = {
   actorId: "clinic-user",
   sessionCookie: "clinic_session=private-test-cookie",
@@ -291,10 +293,23 @@ async function testTelegramWorkflows() {
 
   const start = await flow.handle("booking", "I want to book an appointment", context, true, "en");
   assert.equal(start?.status, "booking-choose-group");
-  assert.equal((await flow.handle("booking", "1", context, true, "en"))?.status, "booking-date");
-  assert.equal((await flow.handle("booking", "2026-12-01", context, true, "en"))?.status, "booking-choose-slot");
+  const groupButtons = (inlineSuggestionsForReply(start.status, start.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  assert.equal(groupButtons[0]?.text, "Skin care", "the booking group choice label omits its internal ID");
+  const invalidGroup = await flow.handle("booking", "99", context, true, "en");
+  assert.equal(invalidGroup?.status, "booking-group-invalid", "an invalid group ordinal keeps the booking flow open and re-shows choices");
+  const groupRetryButtons = (inlineSuggestionsForReply(invalidGroup.status, invalidGroup.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  const groupChoice = resolveInlineSuggestion(groupRetryButtons[0]?.callback_data, "en");
+  assert.equal((await flow.handle("booking", groupChoice!, context, true, "en"))?.status, "booking-date");
+  const slotPrompt = await flow.handle("booking", "2026-12-01", context, true, "en");
+  assert.equal(slotPrompt?.status, "booking-choose-slot");
   assert.equal(calls.at(-1)?.url.searchParams.get("from"), "2026-12-01");
-  assert.equal((await flow.handle("booking", "1", context, true, "en"))?.status, "booking-name");
+  const slotButtons = (inlineSuggestionsForReply(slotPrompt.status, slotPrompt.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  assert(slotButtons[0]?.text.startsWith("2026-12-01"), "the time choice is labeled with its displayed date and time");
+  const invalidSlot = await flow.handle("booking", "99", context, true, "en");
+  assert.equal(invalidSlot?.status, "booking-slot-invalid", "an invalid slot ordinal re-shows the current availability options");
+  const slotRetryButtons = (inlineSuggestionsForReply(invalidSlot.status, invalidSlot.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  const slotChoice = resolveInlineSuggestion(slotRetryButtons[0]?.callback_data, "en");
+  assert.equal((await flow.handle("booking", slotChoice!, context, true, "en"))?.status, "booking-name");
   const name = await flow.handle("booking", "Services Example", context, true, "en");
   assert.equal(name?.status, "booking-phone");
   assert(name?.deleteSensitiveMessage, "name is kept out of the planner and marked for deletion");
@@ -404,6 +419,129 @@ async function testTelegramWorkflows() {
   assert.equal(plannerCalls, 0);
 }
 
+async function testAmbiguousClinicAndBookingFollowups() {
+  const calls: Call[] = [];
+  const writes: Call[] = [];
+  const services = [
+    { ...serviceRow },
+    { ...serviceRow, id: SECOND_ID, slug: "facial-massage", title: "Facial massage", translations: { en: { title: "Facial massage" }, fa: { title: "ماساژ صورت" } } },
+  ];
+  let bookings: Array<Record<string, unknown>> = [
+    { ...ownBooking },
+    { ...ownBooking, id: SECOND_ID, fullName: "Sam Example", groupTitle: "Hair care", status: "waiting", email: "sam@example.test" },
+  ];
+  const api = new ClinicOperationsApi(async (input, init = {}) => {
+    const url = new URL(String(input));
+    const call = { url, init };
+    calls.push(call);
+    if (["POST", "PATCH", "DELETE"].includes(init.method ?? "GET")) writes.push(call);
+
+    if (init.method === "GET" && url.pathname === "/api/v1/services") return envelope({ items: services, page: 1, total: services.length });
+    if (init.method === "GET" && url.pathname.startsWith("/api/v1/services/")) {
+      return envelope(services.find((row) => row.id === url.pathname.split("/").at(-1)) ?? {});
+    }
+    if (init.method === "DELETE" && url.pathname.startsWith("/api/v1/services/")) return envelope({ deleted: 1 });
+
+    if (init.method === "GET" && url.pathname === "/api/v1/bookings") return envelope({ items: bookings, page: 1, total: bookings.length });
+    if (init.method === "GET" && url.pathname.startsWith("/api/v1/bookings/")) {
+      return envelope(bookings.find((row) => row.id === url.pathname.split("/").at(-1)) ?? {});
+    }
+    if (init.method === "PATCH" && url.pathname.startsWith("/api/v1/bookings/")) {
+      const id = url.pathname.split("/").at(-1);
+      const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const index = bookings.findIndex((row) => row.id === id);
+      if (index >= 0) bookings[index] = { ...bookings[index], ...patch };
+      return envelope(bookings[index] ?? { ok: true });
+    }
+    return envelope({ ok: true });
+  }, BASE_URL);
+
+  const plannerRequests: string[] = [];
+  const planner: ClinicPlanner = async (resource, request, rows) => {
+    plannerRequests.push(request);
+    if (resource === "services" && /show services/iu.test(request)) return { operation: "list", input: { page: 1, perPage: 10 } };
+    if (resource === "services" && /delete facial service/iu.test(request) && !request.includes("کاربر ردیف")) {
+      return { operation: "delete", target: "facial", input: {} };
+    }
+    if (resource === "services" && request.includes("کاربر ردیف 2 را انتخاب کرد")) {
+      assert(request.includes("Facial massage"), "the numbered follow-up keeps the chosen row's visible label");
+      assert(rows.some((row) => row.id === SECOND_ID), "only safe, current list rows accompany the clarification");
+      return { operation: "delete", id: SECOND_ID, input: {} };
+    }
+    throw new Error(`Unexpected planner request: ${resource}: ${request}`);
+  };
+  const flow = new TelegramClinicOperations(api, planner);
+
+  const genericClinicFlow = new TelegramClinicOperations(api, planner);
+  const genericClarify = await genericClinicFlow.handle("clinic-topic", "مدیریت کلینیک", context, true, "en");
+  assert.equal(genericClarify?.status, "clinic-clarify");
+  const genericButtons = (inlineSuggestionsForReply("clinic-clarify", genericClarify!.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  const slotsText = resolveInlineSuggestion(genericButtons.find((button) => button.text === "Available slots")?.callback_data, "en");
+  assert.equal(slotsText, "Show available slots");
+  assert.equal((await genericClinicFlow.handle("clinic-topic", slotsText!, context, true, "en"))?.status, "clinic-date-required", "a generic clinic-clarification suggestion enters its date-specific workflow");
+
+  assert.equal((await flow.handle("ambiguous-service", "Show services", context, true, "en"))?.status, "services-listed");
+  const ambiguous = await flow.handle("ambiguous-service", "Delete facial service", context, true, "en");
+  assert.equal(ambiguous?.status, "clinic-target-ambiguous");
+  const serviceChoices = inlineSuggestionsForReply("clinic-target-ambiguous", ambiguous!.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+  assert.equal(serviceChoices.flat().length, 2, "an ambiguous clinic target exposes the displayed rows as numbered buttons");
+  assert.equal(serviceChoices.flat()[1]?.text, "Facial massage", "a clinic target button labels the row without its internal ID");
+  const selectedService = resolveInlineSuggestion(serviceChoices.flat()[1]?.callback_data, "en");
+  assert.equal(selectedService, "2");
+  const beforeServiceDelete = writes.length;
+  const servicePreview = await flow.handle("ambiguous-service", selectedService!, context, true, "en");
+  assert.equal(servicePreview?.status, "clinic-proposed", servicePreview?.reply ?? "the button choice returns through the normal mutation preview");
+  assert.equal(writes.length, beforeServiceDelete, "choosing a row does not execute its deletion");
+  assert(plannerRequests.at(-1)?.includes("Delete facial service") && plannerRequests.at(-1)?.includes("Facial massage"), "the clarification preserves the original request and selected row context");
+  assert.equal((await flow.handle("ambiguous-service", "confirm", context, true, "en"))?.status, "clinic-deleted");
+  assert.equal(writes.at(-1)?.url.pathname, `/api/v1/services/${SECOND_ID}`);
+  assert.equal(writes.at(-1)?.init.method, "DELETE");
+
+  const cancelRouteFlow = new TelegramClinicOperations(api, planner);
+  const cancelClarification = await cancelRouteFlow.handle("booking-route", "Cancel booking", context, true, "en");
+  assert.equal(cancelClarification?.status, "booking-cancel-route-clarify");
+  const cancelRouteButtons = (inlineSuggestionsForReply("booking-cancel-route-clarify", cancelClarification!.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  const myBookingsText = resolveInlineSuggestion(cancelRouteButtons.find((button) => button.text === "My bookings")?.callback_data, "en");
+  assert.equal(myBookingsText, "Show my bookings");
+  assert.equal((await cancelRouteFlow.handle("booking-route", myBookingsText!, context, true, "en"))?.status, "my-bookings-listed", "the cancellation clarification callback enters the customer-owned booking workflow");
+
+  assert.equal((await flow.handle("booking-status", "List clinic bookings", context, true, "en"))?.status, "bookings-listed");
+  const bookingAmbiguous = await flow.handle("booking-status", "Update booking", context, true, "en");
+  assert.equal(bookingAmbiguous?.status, "booking-select", "an unspecified booking target asks the user to choose from the current list");
+  const bookingChoices = inlineSuggestionsForReply("booking-select", bookingAmbiguous!.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+  assert.equal(bookingChoices.flat().length, 2);
+  assert.equal(bookingChoices.flat()[1]?.text, "Hair care", "booking selection labels omit the booking's internal ID");
+  const selectedBooking = resolveInlineSuggestion(bookingChoices.flat()[1]?.callback_data, "en");
+  assert.equal(selectedBooking, "2");
+  assert.equal((await flow.handle("booking-status", selectedBooking!, context, true, "en"))?.status, "booking-update-clarify", "the ordinal enters the pending booking-update workflow");
+  const paidChoice = resolveInlineSuggestion("nf1:bookingPaid", "en");
+  assert.equal(paidChoice, "Booking status: paid");
+  const beforeStatusConfirm = writes.length;
+  const statusPreview = await flow.handle("booking-status", paidChoice!, context, true, "en");
+  assert.equal(statusPreview?.status, "booking-update", "a suggested status follows the existing preview workflow");
+  assert.equal(writes.length, beforeStatusConfirm, "a status button never skips explicit confirmation");
+  assert(calls.some((call) => call.init.method === "GET" && call.url.pathname === `/api/v1/bookings/${SECOND_ID}`), "the selected booking is reloaded before proposing its update");
+  assert.equal((await flow.handle("booking-status", "confirm", context, true, "en"))?.status, "clinic-updated");
+  assert.equal(writes.at(-1)?.url.pathname, `/api/v1/bookings/${SECOND_ID}`);
+  assert.deepEqual(JSON.parse(String(writes.at(-1)?.init.body)), { status: "paid" });
+
+  assert.equal((await flow.handle("booking-field", "List clinic bookings", context, true, "en"))?.status, "bookings-listed");
+  assert.equal((await flow.handle("booking-field", "Update the first booking", context, true, "en"))?.status, "booking-update-clarify");
+  const emailChoice = resolveInlineSuggestion("nf1:bookingFieldEmail", "en");
+  assert.equal(emailChoice, "Booking field: email");
+  assert.equal((await flow.handle("booking-field", emailChoice!, context, true, "en"))?.status, "booking-edit-value");
+  assert(flow.expectsSensitiveInput("booking-field"), "the new field value is collected by the local sensitive-input workflow");
+  const beforeEmailConfirm = writes.length;
+  const emailPreview = await flow.handle("booking-field", "new@example.test", context, true, "en");
+  assert.equal(emailPreview?.status, "booking-update");
+  assert(emailPreview?.deleteSensitiveMessage, "the new email is marked for deletion");
+  assert(!emailPreview?.reply.includes("new@example.test"), "the email is masked in the confirmation preview");
+  assert.equal(writes.length, beforeEmailConfirm, "the sensitive field edit remains confirmation-gated");
+  assert.equal((await flow.handle("booking-field", "confirm", context, true, "en"))?.status, "clinic-updated");
+  assert.equal(writes.at(-1)?.url.pathname, `/api/v1/bookings/${BOOKING_ID}`);
+  assert.deepEqual(JSON.parse(String(writes.at(-1)?.init.body)), { email: "new@example.test" });
+}
+
 async function testPlannerPrivacyAndFreshReads() {
   const calls: Call[] = [];
   const writes: Call[] = [];
@@ -456,6 +594,7 @@ async function testPlannerPrivacyAndFreshReads() {
 export async function testClinicOperations() {
   await testAllowListAndHttpContract();
   await testTelegramWorkflows();
+  await testAmbiguousClinicAndBookingFollowups();
   await testPlannerPrivacyAndFreshReads();
 }
 

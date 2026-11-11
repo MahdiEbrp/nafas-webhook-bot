@@ -46,6 +46,8 @@ type State = {
   pending?: Pending;
   target?: Row;
   booking?: BookingDraft;
+  bookingAction?: "get" | "update" | "delete";
+  bookingUpdate?: { id: string };
   passwordDraft?: PasswordDraft;
   bookingEdit?: BookingEditDraft;
   awaiting?: string;
@@ -170,8 +172,10 @@ export function clinicResourceFromText(textInput: string): ClinicResource | null
 }
 
 export function isClinicOperationsRequest(text: string): boolean {
-  const resource = clinicResourceFromText(text);
-  if (!resource) return false;
+  const normalized = normalize(text);
+  const resource = clinicResourceFromText(normalized);
+  if (!resource) return /^(?:clinic|کلینیک)$/iu.test(normalized)
+    || /(?:\bclinic\b.{0,32}\b(?:help|manage(?:ment)?|operations?|workflow|options|menu)\b|\b(?:help|manage(?:ment)?|operations?|workflow|options|menu)\b.{0,32}\bclinic\b|(?:مدیریت|راهنما|راهنمایی|کمک).{0,24}کلینیک|کلینیک.{0,24}(?:مدیریت|راهنما|راهنمایی|کمک))/iu.test(normalized);
   if (["notifications", "profile", "auth-session", "sessions", "password", "my-bookings"].includes(resource)) return true;
   if (["bookings", "slots", "service-catalog", "services"].includes(resource)) return true;
   return CRUD_WORDS.test(normalize(text)) || /(?:خدمات کلینیک|محتوای صفحه|مدیریت کلینیک|care guide|service group|landing page)/iu.test(normalize(text));
@@ -367,11 +371,12 @@ function statusFromText(textInput: string): string | null {
 function adminBookingIntent(textInput: string): ClinicOperation | null {
   const text = normalize(textInput).toLowerCase();
   if (LIST_WORDS.test(text) || /(?:رزروها|نوبتها|appointments|bookings)/iu.test(text) && !RESOURCE_ACTIONS.test(text)) return "list";
+  if (/(?:عملیات گروهی|bulk)/iu.test(text)) return "bulk";
   if (DELETE_WORDS.test(text)) return "delete";
   if (STATUS_WORDS.test(text) || statusFromText(text)) return "update";
   if (/(?:جزئیات|اطلاعات|نمایش|show|details|get|read)/iu.test(text)) return "get";
   if (/ویرایش|تغییر|edit|update|change/iu.test(text)) return "update";
-  if (/همه|تمام|all|bulk/iu.test(text)) return "bulk";
+  if (/همه|تمام|all|every|filtered|matching/iu.test(text)) return "bulk";
   return null;
 }
 function dateForApi(text: string): string | null {
@@ -425,7 +430,7 @@ export class TelegramClinicOperations {
   }
   isCollecting(owner: string): boolean {
     const state = this.states.get(owner);
-    return Boolean(state && (state.pending || state.booking || state.passwordDraft || state.bookingEdit || state.awaiting));
+    return Boolean(state && (state.pending || state.booking || state.bookingAction || state.bookingUpdate || state.passwordDraft || state.bookingEdit || state.awaiting));
   }
   hasConversation(owner: string): boolean { return this.states.has(owner); }
   expectsSensitiveInput(owner: string): boolean { return sensitiveClinicInputPending(this.states.get(owner)); }
@@ -450,14 +455,14 @@ export class TelegramClinicOperations {
         deleteSensitiveMessage: true,
       };
     }
-    const hasLocalDraft = Boolean(state?.booking || state?.passwordDraft || state?.bookingEdit);
+    const hasLocalDraft = Boolean(state?.booking || state?.bookingAction || state?.bookingUpdate || state?.passwordDraft || state?.bookingEdit);
     const ownBookingCancelFollowup = state?.resource === "my-bookings"
       && MY_BOOKINGS_DIRECT.test(value)
       && /(?:لغو|کنسل|cancel)/iu.test(value)
       && !/(?:مدیریت|مدیر|admin)/iu.test(value);
     const explicitResource = hasLocalDraft ? null : ownBookingCancelFollowup ? "my-bookings" : clinicResourceFromText(value);
     const explicit = hasLocalDraft ? false : isClinicOperationsRequest(value);
-    const follows = Boolean(state && (state.pending || state.booking || state.passwordDraft || state.bookingEdit || state.awaiting || CRUD_WORDS.test(value) || /(?:ردیف|مورد|گزینه|اول|دوم|سوم|چهارم|پنجم|شناسه|صفحه|بعد|لغو|تایید|تأیید|confirm|cancel|next|first|second|third|fourth|fifth|#?\d{1,3}|active|inactive|status|price|slug)/iu.test(value)));
+    const follows = Boolean(state && (state.pending || state.booking || state.bookingAction || state.bookingUpdate || state.passwordDraft || state.bookingEdit || state.awaiting || CRUD_WORDS.test(value) || /(?:ردیف|مورد|گزینه|اول|دوم|سوم|چهارم|پنجم|شناسه|صفحه|بعد|لغو|تایید|تأیید|confirm|cancel|next|first|second|third|fourth|fifth|#?\d{1,3}|active|inactive|status|price|slug)/iu.test(value)));
     const expiredConfirm = Boolean(previous && previous.expires <= now && CONFIRM.test(value));
     if (!explicit && !follows && !expiredConfirm) return null;
 
@@ -511,6 +516,7 @@ export class TelegramClinicOperations {
     state.expires = this.now() + TTL_MS;
 
     if (state.passwordDraft) return this.passwordStep(state, value, locale);
+    if (state.bookingUpdate) return this.bookingUpdateStep(state, value, context, locale);
     if (state.bookingEdit) return this.bookingEditStep(state, value, context, locale);
     if (state.booking) return this.bookingStep(state, value, context, locale);
 
@@ -572,7 +578,10 @@ export class TelegramClinicOperations {
     const draft = state.booking!;
     if (draft.stage === "group") {
       const group = chooseRow(value, draft.groups, "service-groups", locale);
-      if (!group) return { reply: locale === "fa" ? "🔎 یک گروه معتبر از فهرست بالا را با شماره، نام دقیق یا شناسه انتخاب کن." : "🔎 Choose a group from the list by number, exact name, or ID.", status: "booking-group-invalid" };
+      if (!group) {
+        const listing = draft.groups.slice(0, 20).map((item, index) => `${index + 1}. ${rowTitle("service-groups", item, locale)}${item.id ? ` · ${item.id}` : ""}`).join("\n");
+        return { reply: locale === "fa" ? `🔎 یک گروه معتبر را از فهرست انتخاب کن:\n${listing}\n\nشماره یا شناسه را بفرست؛ برای انصراف «لغو» را بزن.` : `🔎 Choose a valid group from the list:\n${listing}\n\nSend its number or ID, or cancel.`, status: "booking-group-invalid" };
+      }
       draft.group = group;
       draft.stage = "date";
       return { reply: locale === "fa" ? `✅ گروه «${rowTitle("service-groups", group, locale)}» انتخاب شد.\n📅 حالا تاریخ موردنظر را بفرست؛ می‌توانی تاریخ میلادی، شمسی، «امروز» یا «فردا» بنویسی.` : `✅ Selected “${rowTitle("service-groups", group, locale)}”.\n📅 Send the date: Gregorian, Jalali, “today”, or “tomorrow”.`, status: "booking-date" };
@@ -593,7 +602,10 @@ export class TelegramClinicOperations {
     }
     if (draft.stage === "slot") {
       const slot = chooseRow(value, draft.slots, "slots", locale);
-      if (!slot) return { reply: locale === "fa" ? "🔎 یک زمان آزاد را با شماره یا شناسه از فهرست بالا انتخاب کن." : "🔎 Choose an available time from the list by number or ID.", status: "booking-slot-invalid" };
+      if (!slot) {
+        const listing = draft.slots.slice(0, 20).map((item, index) => `${index + 1}. ${str(item.slotDate)} · ${str(item.startTime)}–${str(item.endTime)} · ${Math.max(0, num(item.capacity) - num(item.bookedCount))} ${locale === "fa" ? "ظرفیت باقی‌مانده" : "places left"}${item.id ? ` · ${item.id}` : ""}`).join("\n");
+        return { reply: locale === "fa" ? `🔎 یک زمان آزاد را از فهرست انتخاب کن:\n${listing}\n\nشماره یا شناسه را بفرست؛ برای انصراف «لغو» را بزن.` : `🔎 Choose an available time from the list:\n${listing}\n\nSend its number or ID, or cancel.`, status: "booking-slot-invalid" };
+      }
       draft.slot = slot;
       draft.stage = "name";
       return { reply: locale === "fa" ? "👤 نام و نام خانوادگی برای رزرو را بفرست. این پیام به مدل ارسال نمی‌شود و برای حذفش از تلگرام تلاش می‌کنم." : "👤 Send the full name for the booking. This message is not sent to the model; I will try to delete it.", status: "booking-name" };
@@ -657,9 +669,13 @@ export class TelegramClinicOperations {
 
   private async adminBookings(state: State, text: string, context: RuleRequestContext, locale: "fa" | "en"): Promise<ClinicWorkflowReply> {
     if (/(?:لغو|کنسل|cancel)/iu.test(text) && !DELETE_WORDS.test(text)) {
+      state.bookingAction = undefined;
+      state.bookingUpdate = undefined;
       return { reply: locale === "fa" ? "لغو مشتری از مسیر «رزروهای من» انجام می‌شود. اگر مدیر هستی، رزرو را با وضعیت مناسب به‌روزرسانی یا پس از بررسی صریحاً حذف کن." : "Customers cancel through “my bookings.” Admins can update a booking status or explicitly delete it after review.", status: "booking-cancel-route-clarify" };
     }
-    const operation = adminBookingIntent(text);
+    const explicitOperation = adminBookingIntent(text);
+    const operation = explicitOperation ?? state.bookingAction ?? null;
+    if (explicitOperation && state.bookingAction) state.bookingAction = undefined;
     if (operation === "list" || state.rows.length === 0 && !operation) {
       const status = statusFromText(text);
       return this.runRead({ resource: "bookings", operation: "list", input: { page: 1, perPage: 20, status: status ?? "all" } }, state, context, locale);
@@ -677,8 +693,11 @@ export class TelegramClinicOperations {
       return this.propose({ resource: "bookings", operation: "bulk", input }, state, undefined, locale, "booking-bulk");
     }
     if (["get", "delete", "update"].includes(operation ?? "") && !targetId) {
-      return { reply: locale === "fa" ? "🔎 رزرو یکتایی انتخاب نشد. ابتدا فهرست رزروها را بخواه و بعد شماره یا شناسهٔ همان صفحه را بفرست." : "🔎 I couldn't identify one booking. List bookings, then send a row number or exact ID.", status: "booking-select" };
+      state.bookingAction = operation as "get" | "delete" | "update";
+      const choices = state.rows.slice(0, 10).map((row, index) => rowCard("bookings", row, index, locale)).join("\n\n");
+      return { reply: locale === "fa" ? `🔎 رزرو یکتایی انتخاب نشد؛ یکی از این موارد را انتخاب کن یا فهرست رزروها را دوباره بخواه.\n\n${choices || "📭 رزروی در فهرست فعلی نیست."}` : `🔎 I couldn't identify one booking. Choose one of these or list bookings again.\n\n${choices || "📭 There are no bookings in the current list."}`, status: "booking-select" };
     }
+    if (targetId && state.bookingAction === operation) state.bookingAction = undefined;
     if (operation === "get" && targetId) return this.runRead({ resource: "bookings", operation: "get", id: targetId, input: {} }, state, context, locale);
     if (operation === "delete" && targetId) {
       const current = await this.api.execute({ resource: "bookings", operation: "get", id: targetId, input: {} }, context);
@@ -704,9 +723,38 @@ export class TelegramClinicOperations {
         state.target = row;
         return this.propose({ resource: "bookings", operation: "update", id: targetId, input: { status } }, state, row, locale, "booking-update");
       }
-      return { reply: locale === "fa" ? "برای تغییر رزرو، وضعیت مقصد را بگو (در انتظار، پرداخت‌شده، در انتظار پرداخت، انجام‌شده یا بازپرداخت‌شده)، یا مشخص کن کدام فیلد تماس را می‌خواهی عوض کنی." : "For a booking update, specify the new status or say whether you want to change the name, phone, email, or note.", status: "booking-update-clarify" };
+      state.bookingUpdate = { id: targetId };
+      return { reply: locale === "fa" ? "برای تغییر رزرو، وضعیت مقصد را انتخاب کن؛ یا نام، شماره تماس، ایمیل یا یادداشت را تغییر بده." : "Choose a new booking status, or select whether to change the name, phone, email, or note.", status: "booking-update-clarify" };
     }
     return this.planAndRun(state, "bookings", text, context, locale);
+  }
+
+  private async bookingUpdateStep(state: State, value: string, context: RuleRequestContext, locale: "fa" | "en"): Promise<ClinicWorkflowReply> {
+    const draft = state.bookingUpdate!;
+    const status = statusFromText(value);
+    if (status) {
+      const current = await this.api.execute({ resource: "bookings", operation: "get", id: draft.id, input: {} }, context);
+      state.bookingUpdate = undefined;
+      if (!current.ok) return this.failure(current.code, current.status, locale);
+      const target = asRecord(current.data) ?? {};
+      state.target = target;
+      return this.propose({ resource: "bookings", operation: "update", id: draft.id, input: { status } }, state, target, locale, "booking-update");
+    }
+
+    const field: BookingEditDraft["field"] | null = /(?:تلفن|شماره تماس|phone)/iu.test(value) ? "phone"
+      : /(?:ایمیل|email)/iu.test(value) ? "email"
+        : /(?:یادداشت|notes?)/iu.test(value) ? "notes"
+          : /(?:نام|name)/iu.test(value) ? "fullName" : null;
+    if (field) {
+      state.bookingUpdate = undefined;
+      state.bookingEdit = { id: draft.id, field };
+      const label = field === "phone" ? (locale === "fa" ? "شمارهٔ تماس" : "phone")
+        : field === "email" ? (locale === "fa" ? "ایمیل" : "email")
+          : field === "notes" ? (locale === "fa" ? "یادداشت" : "note")
+            : (locale === "fa" ? "نام" : "name");
+      return { reply: locale === "fa" ? `✏️ مقدار جدید ${label} را در پیام بعدی بفرست. پیام خصوصی است و به مدل ارسال نمی‌شود؛ برای حذفش تلاش می‌کنم.` : `✏️ Send the new ${label} in your next message. It stays local and is not sent to the model; I will try to delete it.`, status: "booking-edit-value" };
+    }
+    return { reply: locale === "fa" ? "برای تغییر رزرو، وضعیت مقصد را انتخاب کن؛ یا نام، شماره تماس، ایمیل یا یادداشت را تغییر بده." : "Choose a new booking status, or select whether to change the name, phone, email, or note.", status: "booking-update-clarify" };
   }
 
   private async bookingEditStep(state: State, value: string, context: RuleRequestContext, locale: "fa" | "en"): Promise<ClinicWorkflowReply> {
@@ -745,7 +793,11 @@ export class TelegramClinicOperations {
 
   private async planAndRun(state: State, resource: ClinicResource, text: string, context: RuleRequestContext, locale: "fa" | "en"): Promise<ClinicWorkflowReply> {
     try {
-      const request = state.awaiting ? `${state.awaiting}\nتوضیح تکمیلی کاربر: ${text}` : text;
+      const selectedRow = state.awaiting ? chooseRow(text, state.rows, resource, locale) : null;
+      const followup = selectedRow
+        ? `کاربر ردیف ${state.rows.indexOf(selectedRow) + 1} را انتخاب کرد: ${rowTitle(resource, selectedRow, locale)}`
+        : `توضیح تکمیلی کاربر: ${text}`;
+      const request = state.awaiting ? `${state.awaiting}\n${followup}` : text;
       const rows = isSensitiveResource(resource) ? [] : safePlannerRows(resource, state.rows, locale);
       const plan = clinicPlanSchema.parse(await this.planner(resource, scrubClinicPlannerText(request), rows, safePlannerQuery(state.query)));
       if (plan.operation === "clarify") {
@@ -767,7 +819,10 @@ export class TelegramClinicOperations {
           return title === target || title.includes(target) || target.includes(title);
         });
         if (matches.length === 1) id = String(matches[0]!.id);
-        else return { reply: locale === "fa" ? `🔎 یک مورد یکتا پیدا نشد؛ ابتدا فهرست را بخواه یا شماره/شناسه را دقیق بفرست.\n${state.rows.slice(0, 10).map((row, i) => `${i + 1}. ${rowTitle(resource, row, locale)} · ${str(row.id)}`).join("\n")}` : `🔎 I couldn't resolve one item. List entries or send an exact number/ID.\n${state.rows.slice(0, 10).map((row, i) => `${i + 1}. ${rowTitle(resource, row, locale)} · ${str(row.id)}`).join("\n")}`, status: "clinic-target-ambiguous" };
+        else {
+          state.awaiting = request;
+          return { reply: locale === "fa" ? `🔎 یک مورد یکتا پیدا نشد؛ ابتدا فهرست را بخواه یا شماره/شناسه را دقیق بفرست.\n${state.rows.slice(0, 10).map((row, i) => `${i + 1}. ${rowTitle(resource, row, locale)} · ${str(row.id)}`).join("\n")}` : `🔎 I couldn't resolve one item. List entries or send an exact number/ID.\n${state.rows.slice(0, 10).map((row, i) => `${i + 1}. ${rowTitle(resource, row, locale)} · ${str(row.id)}`).join("\n")}`, status: "clinic-target-ambiguous" };
+        }
       }
       if (["get", "update", "delete"].includes(operation) && !id) {
         const selected = chooseRow(text, state.rows, resource, locale);

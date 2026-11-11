@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { SettingsAdminApi, validateSettingCommand, type AdminSetting } from "../lib/settings-admin/api";
 import { TelegramSettingsAdmin, isSettingsAdminRequest, settingCard } from "../lib/telegram/settings-admin";
+import { inlineSuggestionsForReply, resolveInlineSuggestion } from "../lib/telegram/inline-suggestions";
 import { explainSetting, settingsGuide, settingHelp } from "../lib/settings-admin/help";
 import type { SettingPlan } from "../lib/settings-admin/planner";
 export async function testSettingsAdmin() {
-  const id = "11111111-1111-4111-8111-111111111111";
+  const id = "11111111-1111-4111-8111-111111111111", secondId = "22222222-2222-4222-8222-222222222222";
   let row: AdminSetting = { id, key: "booking.reminder_hours", type: "number", value: 24, isActive: true, displayOrder: 0, translations: {}, createdAt: "2026-03-21T12:00:00Z", updatedAt: "2026-03-21T12:00:00Z" };
+  let secondRow: AdminSetting = { ...row, id: secondId, key: "booking.max_appointments", value: 3 };
+  let rows = [row];
   const context = { actorId: "admin", sessionCookie: "session=test", csrfToken: "csrf" };
   let calls = 0, mutations = 0, plans = 0, time = 0, status = 200, malformed = false;
   let plan: SettingPlan = { operation: "list", input: {} };
@@ -21,11 +24,18 @@ export async function testSettingsAdmin() {
     if (status !== 200) return new Response(JSON.stringify({ error: { code: "FORBIDDEN", message: "private error" } }), { status });
     let data: unknown;
     if (malformed) data = { ok: true };
-    else if (init!.method === "GET") data = path.endsWith(id) ? { setting: row } : { items: [row], total: 1, page: 1, perPage: 10, totalPages: 1 };
-    else { mutations++; data = path.endsWith("/bulk") ? { requested: 1, succeeded: 1, failures: [] } : init!.method === "PATCH" ? { updated: true } : init!.method === "DELETE" ? { deleted: true } : { id }; }
+    else if (init!.method === "GET") {
+      const selected = rows.find((item) => path.endsWith(item.id));
+      data = selected ? { setting: selected } : { items: rows, total: rows.length, page: 1, perPage: 10, totalPages: 1 };
+    } else { mutations++; data = path.endsWith("/bulk") ? { requested: 1, succeeded: 1, failures: [] } : init!.method === "PATCH" ? { updated: true } : init!.method === "DELETE" ? { deleted: true } : { id }; }
     return new Response(JSON.stringify({ data }));
   }, "https://clinic.example");
-  const flow = new TelegramSettingsAdmin(api, async (_text, rows) => { plans++; assert(rows.every(item => !("value" in item) && !("translations" in item))); return plan; }, () => time);
+  const flow = new TelegramSettingsAdmin(api, async (request, choices) => {
+    plans++;
+    assert(choices.every(item => !("value" in item) && !("translations" in item)));
+    if (request.includes("انتخاب: 2")) return { operation: "delete", id: secondId, input: {} };
+    return plan;
+  }, () => time);
   assert(isSettingsAdminRequest("راهنمای تنظیمات"));
   assert(isSettingsAdminRequest("booking.reminder_hours چیست"));
   assert(!isSettingsAdminRequest("تنظیمات سرویس پیامک"));
@@ -49,6 +59,7 @@ export async function testSettingsAdmin() {
   await flow.handle("conflict", `تنظیم ${id} را ویرایش کن`, context, true);
   await flow.handle("conflict", '{"value":12}', context, true);
   row = { ...row, value: 99 };
+  rows[0] = row;
   assert.equal((await flow.handle("conflict", "تأیید", context, true))?.status, "settings-conflict"); assert.equal(mutations, 1);
   // Local creation values never reach planner and secrets never appear in preview.
   await flow.handle("create", "تنظیم جدید بساز", context, true);
@@ -66,6 +77,25 @@ export async function testSettingsAdmin() {
   assert.equal(mutations, 1);
   assert.equal((await flow.handle("bulk", "تأیید", context, true))?.status, "settings-completed"); assert.equal(mutations, 2);
   const bulk = JSON.parse(String(requests.at(-1)!.init.body)); assert.equal(bulk.scope, "filtered"); assert.equal(bulk.filters.status, "inactive");
+
+  rows = [row, secondRow];
+  plan = { operation: "list", input: {} };
+  assert.equal((await flow.handle("ambiguous-setting", "تنظیمات را نشان بده", context, true))?.status, "settings-listed");
+  plan = { operation: "delete", target: "booking.", input: {} };
+  const clarification = await flow.handle("ambiguous-setting", "تنظیمات booking را حذف کن", context, true);
+  assert.equal(clarification?.status, "settings-clarify");
+  const settingButtons = (inlineSuggestionsForReply(clarification!.status, clarification!.reply, "en")?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
+  assert.equal(settingButtons.length, 2, "ambiguous settings are presented as numbered buttons");
+  assert.equal(settingButtons[1]?.text, secondRow.key, "setting choice labels omit internal IDs");
+  const settingChoice = resolveInlineSuggestion(settingButtons[1]?.callback_data, "en");
+  assert.equal(settingChoice, "2");
+  const beforeSettingConfirmation = mutations;
+  assert.equal((await flow.handle("ambiguous-setting", settingChoice!, context, true))?.status, "settings-proposed", "the setting choice enters the existing proposal workflow");
+  assert.equal(mutations, beforeSettingConfirmation, "choosing a setting does not delete it");
+  assert.equal((await flow.handle("ambiguous-setting", "تأیید", context, true))?.status, "settings-completed");
+  assert.equal(mutations, beforeSettingConfirmation + 1);
+  assert(requests.at(-1)?.url.pathname.endsWith(secondId));
+
   for (const input of [{ key: "Bad-key", value: "x" }, { key: "a", value: null }, { key: "a", type: "localized" }, { key: "a", value: "x", scope: "user" }]) assert.throws(() => validateSettingCommand({ operation: "create", input }));
   for (const input of [{}, { key: "new" }, { type: "number" }, { value: null }, { displayOrder: -1 }]) assert.throws(() => validateSettingCommand({ operation: "update", id, input }));
   assert.throws(() => validateSettingCommand({ operation: "bulk", input: { action: "delete", scope: "page", ids: [] } }));
