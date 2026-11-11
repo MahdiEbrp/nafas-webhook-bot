@@ -9,7 +9,8 @@ import {
   type ClinicResource,
 } from "@/lib/clinic-operations/api";
 import { scrubClinicPlannerText, type ClinicPlan, type ClinicPlanner } from "@/lib/clinic-operations/planner";
-import { TelegramClinicOperations } from "@/lib/telegram/clinic-operations";
+import { extractDates } from "@/lib/dates/parse";
+import { clinicResourceFromText, TelegramClinicOperations } from "@/lib/telegram/clinic-operations";
 import { inlineSuggestionsForReply, resolveInlineSuggestion } from "@/lib/telegram/inline-suggestions";
 import type { RuleRequestContext } from "@/lib/rules/types";
 
@@ -419,6 +420,101 @@ async function testTelegramWorkflows() {
   assert.equal(plannerCalls, 0);
 }
 
+async function testPersianDatedSlotWorkflow() {
+  const tomorrow = extractDates("فردا")[0]!.date;
+  const tomorrowIso = `${String(tomorrow.getFullYear()).padStart(4, "0")}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+  let slot: Record<string, unknown> = { ...slotRow, isActive: true, bookedCount: 1, capacity: 2 };
+  const calls: Call[] = [];
+  const writes: Call[] = [];
+  const api = new ClinicOperationsApi(async (input, init = {}) => {
+    const url = new URL(String(input));
+    const call = { url, init };
+    calls.push(call);
+    if (["POST", "PATCH", "DELETE"].includes(init.method ?? "GET")) writes.push(call);
+    if (init.method === "GET" && url.pathname === "/api/v1/bookings/slots/list") {
+      return envelope({ items: [{ ...slot, slotDate: url.searchParams.get("search") ?? slot.slotDate }], page: 1, perPage: Number(url.searchParams.get("perPage") ?? 20), total: 1 });
+    }
+    if (init.method === "GET" && url.pathname === `/api/v1/bookings/slots/${SLOT_ID}`) return envelope(slot);
+    if (init.method === "PATCH" && url.pathname === `/api/v1/bookings/slots/${SLOT_ID}`) {
+      slot = { ...slot, ...(JSON.parse(String(init.body)) as Record<string, unknown>) };
+      return envelope(slot);
+    }
+    if (init.method === "DELETE" && url.pathname === `/api/v1/bookings/slots/${SLOT_ID}`) return envelope({ ok: true });
+    if (init.method === "POST" && url.pathname === "/api/v1/bookings/slots") return envelope({ id: SECOND_ID }, 201);
+    return envelope({ ok: true });
+  }, BASE_URL);
+  const plannerRequests: string[] = [];
+  const plannerResources: ClinicResource[] = [];
+  const planner: ClinicPlanner = async (resource, request) => {
+    plannerResources.push(resource);
+    plannerRequests.push(request);
+    assert.equal(resource, "slots", "date-specific slot operations never reach booking or weekly-hours planning");
+    if (/بساز|create/iu.test(request)) return { operation: "create", input: { slots: [{ slotDate: "2026-12-03", startTime: "09:00", endTime: "10:00", capacity: 2 }] } };
+    if (/ظرفیت/iu.test(request) && /\b3\b/u.test(request)) return { operation: "update", id: SLOT_ID, input: { capacity: 3 } };
+    if (/ظرفیت/iu.test(request)) return { operation: "clarify", input: {} };
+    if (/غیرفعال/iu.test(request)) return { operation: "update", id: SLOT_ID, input: { isActive: false } };
+    if (/فعال/iu.test(request)) return { operation: "update", id: SLOT_ID, input: { isActive: true } };
+    if (/حذف|پاک|delete/iu.test(request)) return { operation: "delete", id: SLOT_ID, input: {} };
+    return { operation: "clarify", input: {} };
+  };
+  const flow = new TelegramClinicOperations(api, planner);
+  const list = async (owner: string) => flow.handle(owner, "اسلات‌های فردا رو نشون بده", context, true, "fa");
+
+  const listed = await list("dated-slot-list");
+  assert.equal(listed?.status, "slots-listed");
+  assert.equal(plannerRequests.length, 0, "clear dated-slot collection reads bypass the planner");
+  const listCall = calls.at(-1)!;
+  assert.equal(listCall.url.pathname, "/api/v1/bookings/slots/list");
+  assert.equal(listCall.init.method, "GET");
+  assert.equal(listCall.url.searchParams.get("search"), tomorrowIso, "«فردا» is converted into a date filter on the dated-slot list");
+  assert(listed?.reply.includes("ظرفیت باقی‌مانده: 1"), "dated-slot list shows capacity remaining after bookings");
+  assert.equal(clinicResourceFromText("اسلات‌های فردا رو نشون بده"), "slots");
+
+  await list("slot-capacity-missing-value");
+  const beforeClarification = writes.length;
+  const missingCapacity = await flow.handle("slot-capacity-missing-value", "ظرفیت اسلات ردیف اول رو تغییر بده", context, true, "fa");
+  assert.equal(missingCapacity?.status, "clinic-clarify", "an unspecified new slot capacity is clarified rather than guessed");
+  assert.equal(plannerResources.at(-1), "slots");
+  assert.equal(writes.length, beforeClarification);
+
+  await list("slot-capacity-update");
+  const beforeCapacityPreview = writes.length;
+  const capacityPreview = await flow.handle("slot-capacity-update", "ظرفیت اسلات ردیف اول رو به ۳ تغییر بده", context, true, "fa");
+  assert.equal(capacityPreview?.status, "clinic-proposed");
+  assert.equal(writes.length, beforeCapacityPreview, "slot capacity edit requires confirmation");
+  assert.equal((await flow.handle("slot-capacity-update", "تأیید", context, true, "fa"))?.status, "clinic-updated");
+  assert.deepEqual(JSON.parse(String(writes.at(-1)?.init.body)), { capacity: 3 });
+
+  await list("slot-deactivate");
+  const beforeDeactivate = writes.length;
+  assert.equal((await flow.handle("slot-deactivate", "اسلات ردیف اول رو غیرفعال کن", context, true, "fa"))?.status, "clinic-proposed");
+  assert.equal(writes.length, beforeDeactivate);
+  assert.equal((await flow.handle("slot-deactivate", "تأیید", context, true, "fa"))?.status, "clinic-updated");
+  assert.deepEqual(JSON.parse(String(writes.at(-1)?.init.body)), { isActive: false });
+
+  await list("slot-activate");
+  const beforeActivate = writes.length;
+  assert.equal((await flow.handle("slot-activate", "اسلات ردیف اول رو فعال کن", context, true, "fa"))?.status, "clinic-proposed");
+  assert.equal(writes.length, beforeActivate);
+  assert.equal((await flow.handle("slot-activate", "تأیید", context, true, "fa"))?.status, "clinic-updated");
+  assert.deepEqual(JSON.parse(String(writes.at(-1)?.init.body)), { isActive: true });
+
+  const beforeCreate = writes.length;
+  assert.equal((await flow.handle("slot-create", "یک اسلات برای 2026-12-03 از 09:00 تا 10:00 با ظرفیت 2 بساز", context, true, "fa"))?.status, "clinic-proposed");
+  assert.equal(writes.length, beforeCreate, "dated slot creation is previewed first");
+  assert.equal((await flow.handle("slot-create", "تأیید", context, true, "fa"))?.status, "clinic-created");
+  assert.equal(writes.at(-1)?.url.pathname, "/api/v1/bookings/slots");
+  assert.deepEqual(JSON.parse(String(writes.at(-1)?.init.body)), { slots: [{ slotDate: "2026-12-03", startTime: "09:00", endTime: "10:00", capacity: 2 }] });
+
+  await list("slot-delete");
+  const beforeDelete = writes.length;
+  assert.equal((await flow.handle("slot-delete", "اسلات ردیف اول رو حذف کن", context, true, "fa"))?.status, "clinic-proposed");
+  assert.equal(writes.length, beforeDelete, "dated slot deletion is previewed first");
+  assert.equal((await flow.handle("slot-delete", "تأیید", context, true, "fa"))?.status, "clinic-deleted");
+  assert.equal(writes.at(-1)?.url.pathname, `/api/v1/bookings/slots/${SLOT_ID}`);
+  assert.equal(writes.at(-1)?.init.method, "DELETE");
+}
+
 async function testAmbiguousClinicAndBookingFollowups() {
   const calls: Call[] = [];
   const writes: Call[] = [];
@@ -594,6 +690,7 @@ async function testPlannerPrivacyAndFreshReads() {
 export async function testClinicOperations() {
   await testAllowListAndHttpContract();
   await testTelegramWorkflows();
+  await testPersianDatedSlotWorkflow();
   await testAmbiguousClinicAndBookingFollowups();
   await testPlannerPrivacyAndFreshReads();
 }

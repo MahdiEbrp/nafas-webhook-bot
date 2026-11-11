@@ -13,6 +13,7 @@ import {
 import { planClinicRequest, scrubClinicPlannerText, clinicPlanSchema, type ClinicPlanner } from "@/lib/clinic-operations/planner";
 import { createBookingSchema, updateBookingAdminSchema } from "@/lib/validation/bookings";
 import { changePasswordSchema } from "@/lib/users/clinic-validation";
+import { isWorkingHoursRequest } from "./working-hours";
 
 export type ClinicWorkflowReply = {
   reply: string;
@@ -79,8 +80,8 @@ const DELETE_WORDS = /(?:حذف|پاک کن|پاکسازی|delete|remove)/iu;
 const BULK_WORDS = /(?:همه|تمام|همگی|all|every|filtered|matching)/iu;
 const STATUS_WORDS = /(?:وضعیت|حالت|status|پرداخت|پرداخت شد|تکمیل|انجام شد|بازپرداخت)/iu;
 
-const HELP_FA = "**🗂 مدیریت کلینیک در تلگرام**\n\n• «خدمات کلینیک را نشان بده»\n• «گروه‌های خدمات را فهرست کن»\n• «راهنماهای مراقبت را نمایش بده»\n• «آیتم‌های گالری صفحه اصلی را نشان بده»\n• «رزروهای من را نمایش بده» یا «برای من وقت رزرو کن»\n• «اعلان‌های اخیر را نشان بده»\n• مدیریت رزروها، اسلات‌ها و محتوا با فهرست، ویرایش یا حذف\n\n🔐 این کارها فقط در گفت‌وگوی خصوصی و با نشست واردشده انجام می‌شوند. همهٔ تغییرها و رزروها پیش از اجرا، پیش‌نمایش دارند و به «تأیید» نیاز دارند. لغو: «لغو».";
-const HELP_EN = "**🗂 Clinic workflows in Telegram**\n\n• “Show the clinic service catalog”\n• “List service groups”\n• “Show care guides”\n• “Show the home-page gallery”\n• “Show my bookings” or “Book an appointment for me”\n• “Show recent notifications”\n• Manage bookings, slots, and content with list, edit, or delete requests\n\n🔐 Available only in a private chat with an authenticated session. Every booking and change is previewed and requires explicit confirmation. Cancel: “cancel”.";
+const HELP_FA = "**🗂 مدیریت کلینیک در تلگرام**\n\n• «روزهای قابل رزرو رو نشون بده» برای برنامهٔ هفتگی، ساعت‌ها، ظرفیت و الگوهای نوبت\n• «اسلات‌های فردا رو نشون بده» برای زمان‌های تاریخ‌دار و ظرفیت باقی‌مانده؛ این فهرست از برنامهٔ هفتگی جداست\n• «خدمات کلینیک را نشان بده» یا «گروه‌های خدمات را فهرست کن»\n• «راهنماهای مراقبت را نمایش بده» و «آیتم‌های گالری صفحه اصلی را نشان بده»\n• «رزروهای من را نمایش بده» یا «برای من وقت رزرو کن»\n• «اعلان‌های اخیر را نشان بده»\n• مدیریت رزروها، اسلات‌های تاریخ‌دار و محتوا با فهرست، ویرایش یا حذف\n\n🔐 این کارها فقط در گفت‌وگوی خصوصی و با نشست واردشده انجام می‌شوند. همهٔ تغییرها و رزروها پیش از اجرا، پیش‌نمایش دارند و به «تأیید» نیاز دارند. لغو: «لغو».";
+const HELP_EN = "**🗂 Clinic workflows in Telegram**\n\n• “Show bookable days” for the recurring weekly schedule, hours, capacity, and slot patterns\n• “Show dated slots tomorrow” for real date-specific slots and remaining capacity; these are separate from the weekly schedule\n• “Show the clinic service catalog” or “List service groups”\n• “Show care guides” or “Show the home-page gallery”\n• “Show my bookings” or “Book an appointment for me”\n• “Show recent notifications”\n• Manage bookings, dated slots, and content with list, edit, or delete requests\n\n🔐 Available only in a private chat with an authenticated session. Every booking and change is previewed and requires explicit confirmation. Cancel: “cancel”.";
 
 function asRecord(value: unknown): Row | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Row : null;
@@ -148,6 +149,9 @@ function safePlannerQuery(query: Record<string, unknown>): Record<string, unknow
 export function clinicResourceFromText(textInput: string): ClinicResource | null {
   const text = normalize(textInput).toLowerCase();
   if (!text) return null;
+  // Recurring weekday schedules belong to the working-hours workflow, even
+  // when the wording contains «booking» or «capacity». Dated slots remain here.
+  if (isWorkingHoursRequest(text)) return null;
   if (MY_WORDS.test(text) || /(?:رزروهای? خودم|نوبتهای? خودم|نوبت های خودم)/iu.test(text)) return "my-bookings";
   if (/(?:میخواهم|میخوام|میخواستم|رزرو کنم|وقت بگیرم|نوبت بگیرم|\bbook\s+(?:an?\s+)?(?:appointment|booking|slot)|\bbook\s+me\b|\bbook\s+me\s+(?:an?\s+)?(?:appointment|booking|slot)|\bschedule\s+(?:an?\s+)?appointment|\bmake\s+an?\s+appointment|\breserve\s+(?:an?\s+)?(?:appointment|slot))/iu.test(text) && BOOKING_WORDS.test(text)) return "bookings";
   if (/اعلان|اطلاعیه|notification/iu.test(text)) return "notifications";
@@ -174,6 +178,7 @@ export function clinicResourceFromText(textInput: string): ClinicResource | null
 export function isClinicOperationsRequest(text: string): boolean {
   const normalized = normalize(text);
   const resource = clinicResourceFromText(normalized);
+  if (!resource && isWorkingHoursRequest(normalized)) return false;
   if (!resource) return /^(?:clinic|کلینیک)$/iu.test(normalized)
     || /(?:\bclinic\b.{0,32}\b(?:help|manage(?:ment)?|operations?|workflow|options|menu)\b|\b(?:help|manage(?:ment)?|operations?|workflow|options|menu)\b.{0,32}\bclinic\b|(?:مدیریت|راهنما|راهنمایی|کمک).{0,24}کلینیک|کلینیک.{0,24}(?:مدیریت|راهنما|راهنمایی|کمک))/iu.test(normalized);
   if (["notifications", "profile", "auth-session", "sessions", "password", "my-bookings"].includes(resource)) return true;
@@ -283,8 +288,11 @@ function rowCard(resource: ClinicResource, row: Row, index: number, locale: "fa"
     return `**${index + 1}. ${truncate(title, 100)}**${name}\n• زمان: ${when}\n• وضعیت: ${status}${canCancel}\n• شناسه: ${id}`;
   }
   if (resource === "slots") {
-    const available = row.available === true ? "✅ آزاد" : row.available === false ? "⛔ پر/غیرفعال" : statusFa(row.status);
-    return `**${index + 1}. ${str(row.slotDate)} · ${str(row.startTime)}–${str(row.endTime)}**\n• ظرفیت: ${num(row.capacity)} · رزروشده: ${num(row.bookedCount)}\n• وضعیت: ${available}\n• شناسه: ${id}`;
+    const available = row.available === true ? "✅ آزاد" : row.available === false ? "⛔ پر/غیرفعال" : row.isActive === true ? "🟢 فعال" : row.isActive === false ? "⚪ غیرفعال" : statusFa(row.status);
+    const capacity = num(row.capacity);
+    const booked = num(row.bookedCount);
+    const remaining = Math.max(0, capacity - booked);
+    return `**${index + 1}. ${str(row.slotDate)} · ${str(row.startTime)}–${str(row.endTime)}**\n• ظرفیت: ${capacity} · رزروشده: ${booked} · ظرفیت باقی‌مانده: ${remaining}\n• وضعیت: ${available}\n• شناسه: ${id}`;
   }
   const translations = tr(row, locale);
   const summary = str(row.description ?? translations.description ?? row.shortDesc ?? translations.shortDesc ?? row.caption ?? translations.caption, "");
@@ -556,7 +564,19 @@ export class TelegramClinicOperations {
       return this.runRead({ resource, operation: "availability", input: { from: date, to: date, ...(groupId ? { groupId } : {}) } }, state, context, locale);
     }
     if (resource === "slots" && /(?:اسلات|slot)/iu.test(value) && !RESOURCE_ACTIONS.test(value)) {
-      const query = { ...state.query, ...(idFromRequest(value) ? { groupId: idFromRequest(value) } : {}) };
+      const date = dateForApi(value);
+      const status = /\b(?:inactive|disabled)\b|غیرفعال/iu.test(value)
+        ? "inactive"
+        : /\bexpired\b|منقضی/iu.test(value)
+          ? "expired"
+          : /\b(?:active|enabled)\b|فعال/iu.test(value) ? "active" : undefined;
+      const groupId = idFromRequest(value);
+      const query = {
+        ...state.query,
+        ...(date ? { search: date, perPage: 100 } : {}),
+        ...(status ? { status } : {}),
+        ...(groupId ? { groupId } : {}),
+      };
       return this.runRead({ resource, operation: "list", input: query }, state, context, locale);
     }
     return this.planAndRun(state, resource, value, context, locale);

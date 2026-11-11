@@ -273,7 +273,8 @@ export async function handleTelegramUpdate(
   const clinicSensitiveInput = clinicOperations.expectsSensitiveInput(authOwnerId);
   const clinicSlashReset = /^\/(?:clear|reset|new)\b/iu.test(text);
   const clinicReset = clinicSlashReset || (!clinicSensitiveInput && isOtpLoginIntent(text));
-  const clinicSwitch = !clinicSlashReset && (clinicSensitiveInput || isClinicOperationsRequest(text));
+  const workingHoursSwitch = !clinicSensitiveInput && isWorkingHoursRequest(text);
+  const clinicSwitch = !clinicSlashReset && (clinicSensitiveInput || (!workingHoursSwitch && isClinicOperationsRequest(text)));
   if (clinicSwitch) {
     // An explicit domain switch discards any other workflow's pending proposal;
     // clinic confirmations must never approve stale email/provider/user changes.
