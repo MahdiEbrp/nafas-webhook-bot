@@ -277,7 +277,7 @@ const RULES_READ_QUERY = /(?:\b(?:how many|which|current|existing|available|acti
 const USER_DOMAIN = /(?:\busers?\b|\baccounts?\b|کاربر(?:ان)?|حساب(?:های)? کاربری)/iu;
 const USER_LIST_REQUEST = /(?:\b(?:list|show|display|browse)\b.{0,32}\b(?:users?|accounts?)\b|\b(?:users?|accounts?)\b.{0,32}\b(?:list|show|display|browse)\b|\b(?:all|every|registered)\s+(?:users?|accounts?)\b|(?:همه|تمام|فهرست|لیست|نمایش).{0,32}(?:کاربر(?:ان)?|حساب(?:های)? کاربری)|(?:کاربر(?:ان)?|حساب(?:های)? کاربری).{0,32}(?:فهرست|لیست|نمایش|همه|تمام))/iu;
 const USER_SPECIFIC_LOOKUP = /(?:\b(?:find|search|get|view|lookup|specific|one user|by id|by uuid)\b|\b(?:active|inactive|banned|role)\s+(?:users?|accounts?)\b|uuid|شناسه|شماره|نام|ایمیل|تلفن|جست|پیدا|فعال|غیرفعال|مسدود|نقش)/iu;
-const RULES_BULK_REQUEST = /(?:\b(?:all|every|bulk|matching|multiple)\b|همه|تمام|همگی|گروهی|دسته(?:ای|جمعی)|\brules\b|قوانین)/iu;
+const RULES_BULK_REQUEST = /(?:\b(?:all|every|bulk|matching|multiple)\b|همه|تمام|همگی|گروهی|دسته(?:ای|جمعی))/iu;
 const RULE_CONTEXT_REFERENCE = /(?:\b(?:it|its|that|this|same|one|first|second|third|fourth|fifth|next|previous|more|selected|them|those|#?\d{1,3})\b|این|همین|اون|آن|اینها|آنها|همه|اول|دوم|سوم|چهارم|پنجم|بعدی|قبلی|بیشتر|شناسه|uuid|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/iu;
 const RULES_UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/iu;
 

@@ -29,6 +29,7 @@ import { nowFacts } from "@/lib/dates/engine";
 import { clearSession, countMessages, getMessages, pushMessage } from "./session";
 import { classifyRulesRequest, isRulesAssistantRequestCandidate, type RulesAssistant } from "@/lib/rules/assistant";
 import type { RuleRequestContext } from "@/lib/rules/types";
+import { isProtectedOperationalRequest } from "./operational-intent";
 
 export type ChatInput = {
   message: string;
@@ -168,6 +169,32 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
     };
   }
 
+  // General chat has no clinic/booking toolset. Block those requests in code,
+  // even if a separate rules-only integration happens to be authenticated.
+  const rulesIntent = classifyRulesRequest(message);
+  const hasAuthenticatedRulesContext = Boolean(input.rulesAssistant && input.ruleContext);
+  const unsupportedOperationalRequest = rulesIntent === "discussion" && isProtectedOperationalRequest(message);
+  if ((!hasAuthenticatedRulesContext && rulesIntent !== "discussion") || unsupportedOperationalRequest) {
+    const reply = locale === "en"
+      ? "This chat has no authenticated clinic, booking, or account tools enabled. I did not read protected data, change anything, or make a booking. Sign in and use a private Telegram chat for those workflows."
+      : "ابزار احراز هویت‌شدهٔ کلینیک، رزرو یا حساب در این گفت‌وگو فعال نیست؛ هیچ دادهٔ محافظت‌شده‌ای نخواندم، تغییری ندادم و رزروی انجام ندادم. برای این کارها پس از ورود در گفت‌وگوی خصوصی تلگرام پیام بده.";
+    pushMessage(input.sessionId, "user", message, config.history.maxMessages);
+    pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);
+    logInfo("chat.operational_tool_unavailable", {
+      sessionId: input.sessionId,
+      intent: rulesIntent === "discussion" ? "protected_operational" : rulesIntent,
+    });
+    return {
+      status: "answered",
+      reply,
+      model: null,
+      layer: rulesIntent === "discussion" ? "none" : "rules",
+      ms: Date.now() - startedAt,
+      contextMessages: 0,
+      truncated: false,
+    };
+  }
+
   /* ── 2. Calendar — computed here, worded by the model ──────────────── */
   const facts = answerDateQuestion(message);
 
@@ -202,7 +229,6 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
 
   const memory = getMessages(input.sessionId, config.history.ttlMs);
 
-  const rulesIntent = classifyRulesRequest(message);
   const shouldHandleRules = input.rulesAssistant && (
     isRulesAssistantRequestCandidate(message)
     || Boolean(input.ruleContext && (
@@ -237,27 +263,6 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
       contextMessages: memory.length,
       truncated: false,
       ...(rulesResult.sensitive ? { sensitive: true } : {}),
-    };
-  }
-
-  // The public chat adapter intentionally has no account identity or admin
-  // context. Refuse clear read/write requests in code rather than letting a
-  // general model guess that it queried or changed protected data.
-  if (!input.rulesAssistant && rulesIntent !== "discussion") {
-    const reply = locale === "en"
-      ? "This chat does not have authenticated admin tools enabled. I did not read or change any account or rules data. Sign in in a private Telegram chat to use those workflows."
-      : "ابزار مدیریتیِ احراز هویت‌شده در این گفت‌وگو فعال نیست؛ هیچ دادهٔ کاربر یا قانونی نخواندم و تغییری ندادم. برای این کارها در گفت‌وگوی خصوصی تلگرام وارد شو.";
-    pushMessage(input.sessionId, "user", message, config.history.maxMessages);
-    pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);
-    logInfo("chat.admin_tool_unavailable", { sessionId: input.sessionId, intent: rulesIntent });
-    return {
-      status: "answered",
-      reply,
-      model: null,
-      layer: "rules",
-      ms: Date.now() - startedAt,
-      contextMessages: memory.length,
-      truncated: false,
     };
   }
 
