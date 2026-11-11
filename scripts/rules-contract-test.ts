@@ -44,7 +44,10 @@ export async function testRulesContract() {
     modelCalls++;
     assert(!JSON.stringify(options.messages).includes(context.sessionCookie));
     if (tool === "delete_rule") assert(JSON.stringify(options.messages).includes(rules[1]!.id), "trusted choices supplied to model");
-    return { content: "", model: "test", attempts: [], selection: "fixed", finishReason: "tool_calls", toolCalls: [{ id: "call", type: "function", function: { name: tool, arguments: JSON.stringify(args) } }] } satisfies CompletionResult;
+    if (options.messages.at(-1)?.role === "tool") {
+      return { content: "📚 قوانین دریافت شد: قانون نوبت‌دهی.", model: "test", attempts: [], selection: "fixed", finishReason: "stop" } satisfies CompletionResult;
+    }
+    return { content: "", model: "test", attempts: [], selection: "fixed", finishReason: "tool_calls", toolCalls: [{ id: `call-${modelCalls}`, type: "function", function: { name: tool, arguments: JSON.stringify(args) } }] } satisfies CompletionResult;
   } });
   const turn = (message: string, ctx = context) => assistant.handle({ conversationId: "private", message, context: ctx });
   const list = await turn("قوانین رو نشان بده");

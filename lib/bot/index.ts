@@ -27,7 +27,7 @@ import { dateInstruction, systemPrompt } from "./prompt";
 import { answerDateQuestion } from "@/lib/dates/intent";
 import { nowFacts } from "@/lib/dates/engine";
 import { clearSession, countMessages, getMessages, pushMessage } from "./session";
-import { isRulesRequestCandidate, type RulesAssistant } from "@/lib/rules/assistant";
+import { classifyRulesRequest, isRulesAssistantRequestCandidate, type RulesAssistant } from "@/lib/rules/assistant";
 import type { RuleRequestContext } from "@/lib/rules/types";
 
 export type ChatInput = {
@@ -60,6 +60,8 @@ export type ChatResult = {
   contextMessages: number;
   /** true when the model hit max_tokens and the answer may end mid-sentence */
   truncated: boolean;
+  /** Sensitive direct tool output must not be retained in chat memory. */
+  sensitive?: boolean;
 };
 
 const FALLBACK_FA = "الان یک مشکل کوچک پیش آمد و نتوانستم جواب بدهم. یک لحظهٔ دیگر دوباره بنویس. 🙏";
@@ -200,9 +202,13 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
 
   const memory = getMessages(input.sessionId, config.history.ttlMs);
 
+  const rulesIntent = classifyRulesRequest(message);
   const shouldHandleRules = input.rulesAssistant && (
-    isRulesRequestCandidate(message)
-    || Boolean(input.ruleContext && input.rulesAssistant.hasPending(input.sessionId, input.ruleContext.actorId))
+    isRulesAssistantRequestCandidate(message)
+    || Boolean(input.ruleContext && (
+      input.rulesAssistant.hasPending(input.sessionId, input.ruleContext.actorId)
+      || input.rulesAssistant.hasFollowup(input.sessionId, input.ruleContext.actorId, message)
+    ))
   );
   if (shouldHandleRules && input.rulesAssistant) {
     const rulesResult = input.ruleContext
@@ -217,13 +223,37 @@ export async function handleChat(input: ChatInput): Promise<ChatResult> {
           kind: "error" as const,
           reply: locale === "en" ? "Rules management requires an authenticated session." : "مدیریت قوانین به نشست احراز هویت‌شده نیاز دارد.",
         };
-    pushMessage(input.sessionId, "user", message, config.history.maxMessages);
-    pushMessage(input.sessionId, "assistant", rulesResult.reply, config.history.maxMessages);
+    if (!rulesResult.sensitive) {
+      pushMessage(input.sessionId, "user", message, config.history.maxMessages);
+      pushMessage(input.sessionId, "assistant", rulesResult.reply, config.history.maxMessages);
+    }
     logInfo("chat.rules", { sessionId: input.sessionId, kind: rulesResult.kind, ...(rulesResult.model ? { model: rulesResult.model } : {}) });
     return {
       status: "answered",
       reply: rulesResult.reply,
       model: rulesResult.model ?? null,
+      layer: "rules",
+      ms: Date.now() - startedAt,
+      contextMessages: memory.length,
+      truncated: false,
+      ...(rulesResult.sensitive ? { sensitive: true } : {}),
+    };
+  }
+
+  // The public chat adapter intentionally has no account identity or admin
+  // context. Refuse clear read/write requests in code rather than letting a
+  // general model guess that it queried or changed protected data.
+  if (!input.rulesAssistant && rulesIntent !== "discussion") {
+    const reply = locale === "en"
+      ? "This chat does not have authenticated admin tools enabled. I did not read or change any account or rules data. Sign in in a private Telegram chat to use those workflows."
+      : "ابزار مدیریتیِ احراز هویت‌شده در این گفت‌وگو فعال نیست؛ هیچ دادهٔ کاربر یا قانونی نخواندم و تغییری ندادم. برای این کارها در گفت‌وگوی خصوصی تلگرام وارد شو.";
+    pushMessage(input.sessionId, "user", message, config.history.maxMessages);
+    pushMessage(input.sessionId, "assistant", reply, config.history.maxMessages);
+    logInfo("chat.admin_tool_unavailable", { sessionId: input.sessionId, intent: rulesIntent });
+    return {
+      status: "answered",
+      reply,
+      model: null,
       layer: "rules",
       ms: Date.now() - startedAt,
       contextMessages: memory.length,

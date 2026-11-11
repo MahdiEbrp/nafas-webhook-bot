@@ -45,7 +45,11 @@ export type CompletionOptions = {
   json?: boolean;
   /** OpenAI-compatible function tools, used by library-level assistants. */
   tools?: ChatTool[];
-  toolChoice?: "auto" | "none";
+  /**
+   * `required` is used only when a deterministic intent router has already
+   * decided that this turn needs a tool. Ordinary conversation stays `auto`.
+   */
+  toolChoice?: "auto" | "none" | "required";
   temperature?: number;
   maxTokens?: number;
   /** Override the configured free-model chain. */

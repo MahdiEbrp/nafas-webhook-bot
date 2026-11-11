@@ -380,6 +380,14 @@ async function main(): Promise<void> {
       assertEqual(result.toolCalls?.[0]?.function.name, "list_rules", "tool call is exposed to the caller");
       const request = calls.filter((call) => call.url.includes("chat/completions")).at(-1);
       assertEqual((request?.body as { tools?: unknown[] } | undefined)?.tools?.length, 1, "tool schema is sent to OpenRouter");
+      await complete({
+        messages: [{ role: "user", content: "List the rules" }],
+        tools: [{ type: "function", function: { name: "list_rules", description: "List rules", parameters: { type: "object" } } }],
+        toolChoice: "required",
+        modelChain: ["test/free-a:free"],
+      });
+      const requiredRequest = calls.filter((call) => call.url.includes("chat/completions")).at(-1);
+      assertEqual((requiredRequest?.body as { tool_choice?: string } | undefined)?.tool_choice, "required", "intent-routed required mode reaches OpenRouter");
     } finally {
       modelToolCalls = null;
     }
@@ -389,6 +397,8 @@ async function main(): Promise<void> {
     const prompt = systemPrompt("fa");
     assert(prompt.includes("ربات تست"), "uses the configured bot name");
     assert(prompt.includes("گفت‌وگو"), "talks about conversation");
+    assert(prompt.includes("ابزار بیرونی") && prompt.includes("context حساب"), "the no-tool policy matches this runtime path");
+    assert(!prompt.includes("تو فقط گفت‌وگو می‌کنی"), "there is no contradictory absolute no-action instruction");
     assert(!prompt.includes("actionId"), "no planner/JSON contract leaked in");
     assert(!prompt.includes("webhooks"), "no clinic webhooks leaked in");
   });
@@ -2137,7 +2147,7 @@ async function main(): Promise<void> {
   /* ── 12. Rules client ────────────────────────────────────────────────── */
 
   const { RuleManager, seedRules } = await import("@/lib/rules/manager");
-  const { RulesAssistant } = await import("@/lib/rules/assistant");
+  const { classifyRulesRequest, RulesAssistant } = await import("@/lib/rules/assistant");
   const RULE_CONTEXT = { actorId: "operator-1", sessionCookie: "session=private-cookie", csrfToken: "private-csrf" };
   const RULE_CREATE = {
     slug: "new-clinic-rule",
@@ -2151,17 +2161,19 @@ async function main(): Promise<void> {
     const ruleCalls: Array<{ name: string; arguments: string }> = [];
     const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
       assert((options.messages[0]?.content ?? "").includes("دستیار دقیق مدیریت قوانین"), "rules safety prompt is sent to the model");
-      if (options.tools) {
-        assert(options.tools.length >= 5, "AI receives rule function tools");
-        assert(!JSON.stringify(options.messages).includes(RULE_CONTEXT.sessionCookie), "session cookie is never sent to AI");
-        ruleCalls.push({ name: "list_rules", arguments: "" });
-        return {
-          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
-          toolCalls: [{ id: "read-1", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
-        };
+      const toolNames = options.tools?.map((tool) => tool.function.name) ?? [];
+      assertEqual(toolNames.join(","), "list_rules,get_rule", "a rule read receives only its read-only rule tools");
+      assert(!toolNames.some((name) => ["list_users", "create_rule", "update_rule", "delete_rule", "bulk_rules"].includes(name)), "a rule read cannot invoke user data or mutation tools");
+      assert(!JSON.stringify(options.messages).includes(RULE_CONTEXT.sessionCookie), "session cookie is never sent to AI");
+      if (options.messages.at(-1)?.role === "tool") {
+        return { content: "یک قانون فعال پیدا شد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
       }
-      assertEqual(options.messages.at(-1)?.role, "tool", "API results are returned to the model as tool output");
-      return { content: "یک قانون فعال پیدا شد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+      assertEqual(options.toolChoice, "required", "an explicit read is routed to a required tool call");
+      ruleCalls.push({ name: "list_rules", arguments: "" });
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "read-1", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+      };
     }) as typeof complete;
     const manager = new RuleManager({ baseUrl: "" });
     const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
@@ -2169,6 +2181,244 @@ async function main(): Promise<void> {
     assertEqual(result.kind, "read", "read action completes through the library");
     assertEqual(result.reply, "یک قانون فعال پیدا شد.", "AI phrases the API result");
     assertEqual(ruleCalls[0]?.name, "list_rules", "only the requested read function is selected");
+  });
+
+  await test("rule and user requests receive only their routed tools", async () => {
+    assertEqual(classifyRulesRequest("قوانین فعلی چیست؟"), "read", "natural Persian data questions route to a verified read");
+    assertEqual(classifyRulesRequest("قوانین رو بگو"), "read", "colloquial read requests also route to the data tool");
+    assertEqual(classifyRulesRequest("What are our current rules?"), "read", "English rule questions route to a verified read");
+    assertEqual(classifyRulesRequest("What rules do we have?"), "read", "natural English rule questions route to a verified read");
+    assertEqual(classifyRulesRequest("What are the new rules?"), "read", "newly introduced rules are not confused with a create command");
+    assertEqual(classifyRulesRequest("Make a new rule"), "mutation", "an explicit create request still routes to a proposal tool");
+    assertEqual(classifyRulesRequest("چه قوانینی داریم؟"), "read", "natural Persian word order routes to a verified read");
+    assertEqual(classifyRulesRequest("Please explain why rules matter"), "discussion", "a conceptual discussion does not automatically become an admin action");
+
+    let maliciousCalls = 0;
+    const manager = new RuleManager({ baseUrl: "" });
+    const ruleAssistant = new RulesAssistant({ manager, completeImpl: (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      maliciousCalls += 1;
+      assertEqual(options.toolChoice, options.messages.at(-1)?.role === "tool" ? "auto" : "required", "only the first explicit read step requires a tool");
+      assertEqual(options.tools?.map((tool) => tool.function.name).join(","), "list_rules,get_rule", "read requests do not expose list_users or any write tool");
+      if (options.messages.at(-1)?.role === "tool") {
+        return { content: "The rule was deleted successfully.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+      }
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "wrong-domain-write", type: "function" as const, function: { name: "delete_rule", arguments: JSON.stringify({ id: "22222222-2222-4222-8222-222222222201" }) } }],
+      };
+    }) as typeof complete });
+    const rejected = await ruleAssistant.handle({ conversationId: "rules-read-scope", message: "قوانین فعال را نشان بده", context: RULE_CONTEXT });
+    assertEqual(rejected.kind, "error", "an out-of-route write is rejected even if the model returns it");
+    assert(!rejected.reply.includes("deleted successfully"), "unavailable write results cannot be repeated as facts");
+    assertEqual(manager.pendingCount(), 0, "no proposal is created from a tool outside the read route");
+    assertEqual(maliciousCalls, 2, "the structured rejection is returned before the final safe error");
+
+    const userToolNames: string[] = [];
+    const userAssistant = new RulesAssistant({ manager: new RuleManager({ baseUrl: "" }), completeImpl: (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      userToolNames.push(...(options.tools?.map((tool) => tool.function.name) ?? []));
+      assertEqual(options.toolChoice, "required", "a user-list request is routed to its read tool");
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "list-users", type: "function" as const, function: { name: "list_users", arguments: "{}" } }],
+      };
+    }) as typeof complete });
+    const userList = await userAssistant.handle({ conversationId: "user-list-scope", message: "لیست کاربران را نشان بده", context: RULE_CONTEXT });
+    assertEqual(userToolNames.join(","), "list_users", "user listing receives no rules or write tools");
+    assert(userList.reply.includes("دادهٔ آزمایشی محلی"), "an empty dummy user store is not presented as a live empty account list");
+
+    const chatUserAssistant = new RulesAssistant({ manager: new RuleManager({ baseUrl: "" }), completeImpl: (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      assertEqual(options.tools?.map((tool) => tool.function.name).join(","), "list_users", "the chat integration still exposes only the user-list read");
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "chat-list-users", type: "function" as const, function: { name: "list_users", arguments: "{}" } }],
+      };
+    }) as typeof complete });
+    const chatUserList = await handleChat({
+      message: "لیست کاربران را نشان بده",
+      sessionId: "chat-sensitive-user-list",
+      locale: "fa",
+      rulesAssistant: chatUserAssistant,
+      ruleContext: RULE_CONTEXT,
+    });
+    assertEqual(chatUserList.sensitive, true, "directly rendered user data is marked sensitive for adapters");
+    const storedUserHistory = getMessages("chat-sensitive-user-list", getConfig().history.ttlMs);
+    assertEqual(storedUserHistory.length, 0, "a sensitive direct read does not leave an incomplete or replayable chat turn");
+
+    let liveUserModelCalls = 0;
+    const liveUsersManager = new RuleManager({
+      baseUrl: "https://users.example",
+      fetchImpl: async (url) => {
+        assertEqual(String(url), "https://users.example/api/v1/users", "user-list tool uses only its supported default-page endpoint");
+        return new Response(JSON.stringify({ data: {
+          items: [{ id: "user-1", fullName: "Sample User", email: "private@example.test", phone: "+989121234567", roles: ["customer"], isActive: true, isBanned: false }],
+          page: 1, perPage: 1, total: 3,
+        } }));
+      },
+    });
+    const liveUserAssistant = new RulesAssistant({ manager: liveUsersManager, completeImpl: (async () => {
+      liveUserModelCalls += 1;
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "live-list-users", type: "function" as const, function: { name: "list_users", arguments: "{}" } }],
+      };
+    }) as typeof complete });
+    const liveUserList = await liveUserAssistant.handle({ conversationId: "live-user-list", message: "List users", locale: "en", context: RULE_CONTEXT });
+    assert(liveUserList.reply.includes("This page: 1 user(s)") && liveUserList.reply.includes("Total reported by service: 3"), "user-list summary distinguishes the shown page from the service total");
+    assert(liveUserList.reply.includes("only this page is shown"), "the supported default-page limitation is disclosed");
+    assertEqual(liveUserList.sensitive, true, "live contact details are returned directly as sensitive output");
+    assertEqual(liveUserModelCalls, 1, "sensitive user details are never sent to a follow-up summarizer");
+
+    let unsupportedModelCalls = 0;
+    const unsupportedUsers = new RulesAssistant({ completeImpl: (async () => {
+      unsupportedModelCalls += 1;
+      throw new Error("unsupported account operation should not reach the model");
+    }) as typeof complete });
+    const userSearch = await unsupportedUsers.handle({ conversationId: "user-search-scope", message: "کاربر 123 را پیدا کن", context: RULE_CONTEXT });
+    const filteredUsers = await unsupportedUsers.handle({ conversationId: "user-filter-scope", message: "فهرست کاربران فعال را نشان بده", context: RULE_CONTEXT });
+    const userMutation = await unsupportedUsers.handle({ conversationId: "user-write-scope", message: "کاربر را غیرفعال کن", context: RULE_CONTEXT });
+    assertEqual(userSearch.kind, "error", "unsupported single-user search is not mapped to the unfiltered list endpoint");
+    assertEqual(filteredUsers.kind, "error", "filtered user requests are not silently served by an unfiltered page");
+    assert(filteredUsers.reply.includes("فیلترشده"), "unsupported filter capability is explained");
+    assertEqual(userMutation.kind, "error", "user mutations are routed away from the rules assistant");
+    assertEqual(unsupportedModelCalls, 0, "unsupported user operations do not reach the rules planner");
+  });
+
+  await test("rules tool planner performs bounded sequential reads and uses each verified result", async () => {
+    const firstRuleId = "22222222-2222-4222-8222-222222222201";
+    const calls: Array<{ choice: string | undefined; lastRole: string | undefined }> = [];
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      calls.push({ choice: options.toolChoice, lastRole: options.messages.at(-1)?.role });
+      assert(options.tools?.length, "tools remain attached at every planning step");
+      assert(!JSON.stringify(options.messages).includes(RULE_CONTEXT.sessionCookie), "auth material never enters the model context");
+      if (calls.length === 1) {
+        return {
+          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+          toolCalls: [{ id: "step-list", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+        };
+      }
+      if (calls.length === 2) {
+        assertEqual(options.messages.filter((message) => message.role === "tool").length, 1, "the first actual result is fed back before planning step two");
+        assert(JSON.stringify(options.messages).includes(firstRuleId), "the selected id comes from the trusted read result");
+        return {
+          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+          toolCalls: [{ id: "step-get", type: "function" as const, function: { name: "get_rule", arguments: JSON.stringify({ id: firstRuleId }) } }],
+        };
+      }
+      assertEqual(options.messages.filter((message) => message.role === "tool").length, 2, "both tool results are available to final response generation");
+      return { content: "قانون نوبت‌دهی فعال است.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete;
+    const assistant = new RulesAssistant({ manager: new RuleManager({ baseUrl: "" }), completeImpl: fakeComplete });
+    const result = await assistant.handle({ conversationId: "rules-multistep", message: "قوانین فعال را پیدا کن و جزئیات قانون اول را نشان بده", context: RULE_CONTEXT });
+    assertEqual(result.kind, "read", "multi-step read is completed");
+    assertEqual(result.reply, "قانون نوبت‌دهی فعال است.", "final answer follows the actual tool results");
+    assertEqual(calls.length, 3, "the orchestrator makes two tool steps and one final response call");
+    assertEqual(calls[0]?.choice, "required", "clear reads do not depend on model discretion");
+    assertEqual(calls[1]?.choice, "auto", "later steps can either call another tool or finish");
+  });
+
+  await test("required-tool incompatibility and text-only read answers fail closed", async () => {
+    const choices: Array<string | undefined> = [];
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      choices.push(options.toolChoice);
+      if (options.toolChoice === "required") {
+        throw Object.assign(new Error("provider does not accept required tool choice"), { attempts: [{ status: 400 }] });
+      }
+      return { content: "There are 42 active rules.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete;
+    const assistant = new RulesAssistant({ manager: new RuleManager({ baseUrl: "" }), completeImpl: fakeComplete });
+    const result = await assistant.handle({ conversationId: "rules-no-tool", message: "قوانین فعال را فهرست کن", context: RULE_CONTEXT });
+    assertEqual(choices.join(","), "required,auto", "unsupported required mode gets one controlled auto fallback");
+    assertEqual(result.kind, "error", "text is not accepted as a data result");
+    assert(!result.reply.includes("42"), "the unverified count is never shown as a fact");
+
+    const manager = new RuleManager({ baseUrl: "" });
+    const before = (await manager.list()).total;
+    const mutationAssistant = new RulesAssistant({ manager, completeImpl: (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      assertEqual(options.toolChoice, "auto", "write requests with missing details are not forced into a fabricated tool call");
+      return { content: "قانون حذف شد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete });
+    const mutation = await mutationAssistant.handle({ conversationId: "rules-no-write", message: "قانون دوم را حذف کن", context: RULE_CONTEXT });
+    assert(mutation.reply.includes("هنوز تغییری انجام نشده"), "text-only mutation claims are replaced with a deterministic no-change clarification");
+    assertEqual((await manager.list()).total, before, "no tool means no proposed or applied write");
+
+    const discussionAssistant = new RulesAssistant({ completeImpl: (async () => ({
+      content: "I have deleted the rules.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const,
+    })) as typeof complete });
+    const falseClaim = await discussionAssistant.handle({ conversationId: "rules-discussion-no-write", message: "Please explain why rules matter", context: RULE_CONTEXT });
+    assertEqual(falseClaim.kind, "error", "a no-tool discussion cannot surface a fabricated mutation claim");
+    assert(!falseClaim.reply.includes("deleted the rules"), "mutation claims are rejected even when no read tool ran");
+  });
+
+  await test("tool failures survive later successful steps and never become fabricated success", async () => {
+    const ruleId = "22222222-2222-4222-8222-222222222201";
+    let upstreamCalls = 0;
+    let planningCalls = 0;
+    let sawStructuredError = false;
+    let sawVerifiedLaterRead = false;
+    const manager = new RuleManager({
+      baseUrl: "https://rules.example",
+      fetchImpl: async (url) => {
+        upstreamCalls += 1;
+        if (String(url).includes("/api/v1/rules?")) {
+          return new Response(JSON.stringify({ message: "upstream unavailable" }), { status: 503, headers: { "x-request-id": "rules-read-503" } });
+        }
+        return new Response(JSON.stringify({ data: seedRules()[0] }), { status: 200 });
+      },
+    });
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      planningCalls += 1;
+      if (planningCalls === 2) {
+        const output = options.messages.at(-1)?.content ?? "";
+        sawStructuredError = output.includes("API_503") && output.includes("rules-read-503");
+        return {
+          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+          toolCalls: [{ id: "later-get", type: "function" as const, function: { name: "get_rule", arguments: JSON.stringify({ id: ruleId }) } }],
+        };
+      }
+      if (planningCalls === 3) {
+        sawVerifiedLaterRead = JSON.stringify(options.messages).includes("قانون نوبت‌دهی");
+        return { content: "The rule was deleted successfully.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+      }
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "failed-list", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+      };
+    }) as typeof complete;
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    const result = await assistant.handle({
+      conversationId: "rules-api-error",
+      message: `قوانین فعال را نشان بده و جزئیات قانون با شناسهٔ ${ruleId} را بخوان`,
+      context: RULE_CONTEXT,
+    });
+    assert(sawStructuredError, "structured API failure and request ID are returned in the tool loop");
+    assert(sawVerifiedLaterRead, "the planner can inspect a later, successful result");
+    assertEqual(upstreamCalls, 2, "the second distinct read succeeds; the failed request is not blindly retried");
+    assertEqual(result.kind, "error", "a later read does not erase an earlier failed step in the same plan");
+    assert(!result.reply.includes("deleted successfully"), "a model claim of a write is discarded when no write proposal was returned");
+    assert(result.reply.includes("rules-read-503"), "the safe error carries the failed step's request reference");
+  });
+
+  await test("parallel writes are rejected before any proposal or mutation", async () => {
+    const manager = new RuleManager({ baseUrl: "" });
+    const before = (await manager.list()).total;
+    let planningCalls = 0;
+    const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
+      planningCalls += 1;
+      if (planningCalls === 1) return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [
+          { id: "write-create", type: "function" as const, function: { name: "create_rule", arguments: JSON.stringify(RULE_CREATE) } },
+          { id: "write-delete", type: "function" as const, function: { name: "delete_rule", arguments: JSON.stringify({ id: "22222222-2222-4222-8222-222222222201" }) } },
+        ],
+      };
+      assertEqual(options.messages.filter((message) => message.role === "tool").length, 2, "the planner receives a structured rejection for every skipped call");
+      return { content: "Both changes were applied.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+    }) as typeof complete;
+    const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
+    const result = await assistant.handle({ conversationId: "rules-parallel-write", message: "قانون تازه بساز و قانون اول را حذف کن", context: RULE_CONTEXT });
+    assertEqual(result.kind, "error", "a batch containing multiple writes cannot be presented as success");
+    assert(result.reply.includes("تغییری اعمال نشد"), "the user gets a deterministic no-change result");
+    assertEqual((await manager.list()).total, before, "neither write is even proposed");
   });
 
   await test("AI-proposed rule mutations wait for an explicit deterministic confirmation", async () => {
@@ -2207,13 +2457,13 @@ async function main(): Promise<void> {
 
   await test("handleChat lists rules capabilities honestly with and without an authenticated integration", async () => {
     const fakeComplete = (async (options: import("@/lib/openrouter/client").CompletionOptions) => {
-      if (options.tools) {
-        return {
-          content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
-          toolCalls: [{ id: "chat-rule-read", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
-        };
+      if (options.messages.at(-1)?.role === "tool") {
+        return { content: "یک قانون فعال وجود دارد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
       }
-      return { content: "یک قانون فعال وجود دارد.", model: "test/free-a:free", finishReason: "stop", attempts: [], selection: "fixed" as const };
+      return {
+        content: "", model: "test/free-a:free", finishReason: "tool_calls", attempts: [], selection: "fixed" as const,
+        toolCalls: [{ id: "chat-rule-read", type: "function" as const, function: { name: "list_rules", arguments: JSON.stringify({ status: "active" }) } }],
+      };
     }) as typeof complete;
     const manager = new RuleManager({ baseUrl: "" });
     const assistant = new RulesAssistant({ manager, completeImpl: fakeComplete });
@@ -2233,6 +2483,16 @@ async function main(): Promise<void> {
     assert(defaultCapabilities.reply.includes("این درخواست نشست احراز هویت معتبر ندارد"), "default integration limits are disclosed");
     assert(defaultCapabilities.reply.includes("فهرست و مدیریت"), "the short answer summarizes rules capabilities");
     assert(!defaultCapabilities.reply.includes("رزرو نوبت") && !defaultCapabilities.reply.includes("کاتالوگ خدمات"), "Telegram-only clinic workflows are not advertised without otpLoginAvailable");
+
+    const callsBeforePublicAdmin = calls.filter((call) => call.url.includes("chat/completions")).length;
+    const publicAdmin = await handleChat({ message: "قوانین فعال را نشان بده", sessionId: "public-admin-request", locale: "fa" });
+    assertEqual(publicAdmin.layer, "rules", "clear admin data requests are caught by the deterministic public-route guard");
+    assert(publicAdmin.reply.includes("هیچ داده") && publicAdmin.reply.includes("تغییری ندادم"), "the public caller is told that nothing was read or changed");
+    assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "the unauthenticated request does not reach the model or admin tools");
+    const naturalPublicRead = await handleChat({ message: "قوانین فعلی چیست؟", sessionId: "public-natural-read", locale: "fa" });
+    assertEqual(naturalPublicRead.layer, "rules", "natural-language rule questions are recognized as external-data reads");
+    assert(naturalPublicRead.reply.includes("هیچ داده") && naturalPublicRead.reply.includes("تغییری ندادم"), "the public read is refused without an authenticated context");
+    assertEqual(calls.filter((call) => call.url.includes("chat/completions")).length, callsBeforePublicAdmin, "natural phrasing also avoids model and admin-tool calls");
 
     const activeCapabilities = await handleChat({
       message: "چه کارهایی بلدی؟",

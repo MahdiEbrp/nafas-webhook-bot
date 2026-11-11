@@ -44,7 +44,7 @@ import { TelegramSocialLinks, isSocialLinksRequest } from "@/lib/telegram/social
 import { TelegramWorkingHours, isWorkingHoursRequest } from "@/lib/telegram/working-hours";
 import { isUserManagementMessage } from "@/lib/telegram/users";
 import { TelegramUsers } from "@/lib/telegram/users";
-import { RulesAssistant, isRulesRequestCandidate } from "@/lib/rules/assistant";
+import { RulesAssistant, isRulesAssistantRequestCandidate } from "@/lib/rules/assistant";
 import { inlineSuggestionsForReply, resolveInlineSuggestion } from "@/lib/telegram/inline-suggestions";
 
 export type BridgeOutcome = {
@@ -173,7 +173,7 @@ async function processTextMessage(input: {
     ...(ruleContext ? { ruleContext } : {}),
   });
 
-  await replyText(chatId, result.reply, { replyToMessageId, status: result.status, locale });
+  await replyText(chatId, result.reply, { replyToMessageId, status: result.status, locale, sensitive: result.sensitive });
 
   logInfo("telegram.message", { chatId, userId, status: result.status, model: result.model, ms: result.ms });
 
@@ -183,7 +183,7 @@ async function processTextMessage(input: {
     status: result.status,
     model: result.model,
     ms: result.ms,
-    text: result.reply,
+    ...(!result.sensitive ? { text: result.reply } : {}),
   };
 }
 
@@ -285,11 +285,11 @@ export async function handleTelegramUpdate(
     telegramUsers.clear(authOwnerId);
     workingHours.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
-  } else if (clinicReset || emailSwitch || paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text)) {
+  } else if (clinicReset || emailSwitch || paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesAssistantRequestCandidate(text)) {
     clinicOperations.clear(authOwnerId);
   }
-  const otherPaymentDomain = isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text) || emailSwitch || clinicSwitch;
-  const otherEmailDomain = paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text) || clinicSwitch;
+  const otherPaymentDomain = isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesAssistantRequestCandidate(text) || emailSwitch || clinicSwitch;
+  const otherEmailDomain = paymentSwitch || isSettingsAdminRequest(text) || isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesAssistantRequestCandidate(text) || clinicSwitch;
   if (!collectingEmail && otherEmailDomain && !emailSwitch) emailAdmin.clear(authOwnerId);
   if (!collectingPayment && otherPaymentDomain && !paymentSwitch) paymentAdmin.clear(authOwnerId);
   if (!collectingUser && !collectingSocial && !collectingSms && !collectingSettings && !collectingPayment && (collectingEmail || emailSwitch)) {
@@ -327,7 +327,7 @@ export async function handleTelegramUpdate(
     await replyText(chatId, paymentResult.reply, { status: paymentResult.status, locale, sensitive: paymentResult.deleteSensitiveMessage });
     return { handled: true, chatId, status: paymentResult.status };
   }
-  if (!collectingSettings && !isSettingsAdminRequest(text) && (isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) settingsAdmin.clear(authOwnerId);
+  if (!collectingSettings && !isSettingsAdminRequest(text) && (isSmsAdminRequest(text) || isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesAssistantRequestCandidate(text))) settingsAdmin.clear(authOwnerId);
   if (!collectingUser && !collectingSocial && !collectingSms && (collectingSettings || isSettingsAdminRequest(text))) {
     smsAdmin.clear(authOwnerId);
     socialLinks.clear(authOwnerId);
@@ -345,7 +345,7 @@ export async function handleTelegramUpdate(
     return { handled: true, chatId, status: settingsResult.status };
   }
 
-  const otherDomain = isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text);
+  const otherDomain = isSocialLinksRequest(text) || isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesAssistantRequestCandidate(text);
   if (!collectingSms && otherDomain && !isSmsAdminRequest(text)) smsAdmin.clear(authOwnerId);
   if (!collectingUser && !collectingSocial && (collectingSms || isSmsAdminRequest(text))) {
     telegramUsers.clear(authOwnerId);
@@ -366,7 +366,7 @@ export async function handleTelegramUpdate(
     telegramUsers.clear(authOwnerId);
     workingHours.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
-  } else if (!collectingUser && !collectingSocial && (isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesRequestCandidate(text))) socialLinks.clear(authOwnerId);
+  } else if (!collectingUser && !collectingSocial && (isWorkingHoursRequest(text) || isUserManagementMessage(text) || isRulesAssistantRequestCandidate(text))) socialLinks.clear(authOwnerId);
   const socialResult = clinicSwitch || collectingUser ? null : await socialLinks.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (socialResult) {
     await replyText(chatId, socialResult.reply, { status: socialResult.status, locale });
@@ -378,7 +378,7 @@ export async function handleTelegramUpdate(
   if (!collectingUser && isWorkingHoursRequest(text)) {
     telegramUsers.clear(authOwnerId);
     rulesAssistant.clear(`telegram-rules-${authOwnerId}`, ruleContext?.actorId ?? authOwnerId);
-  } else if (isUserManagementMessage(text) || isRulesRequestCandidate(text)) workingHours.clear(authOwnerId);
+  } else if (isUserManagementMessage(text) || isRulesAssistantRequestCandidate(text)) workingHours.clear(authOwnerId);
   const hoursResult = clinicSwitch || collectingUser ? null : await workingHours.handle(authOwnerId, text, ruleContext, message.chat.type === "private");
   if (hoursResult) {
     await replyText(chatId, hoursResult.reply, { status: hoursResult.status, locale });
@@ -401,10 +401,10 @@ export async function handleTelegramUpdate(
     rulesAssistant.clear(rulesConversation, ruleContext?.actorId ?? authOwnerId);
   } else if (!clinicSwitch && !clinicOperations.hasConversation(authOwnerId) && message.chat.type === "private" && ruleContext && text
     && !sensitiveOtpInput(text) && !/^(?:رمز|password)\s*[:：]/iu.test(text)
-    && (isRulesRequestCandidate(text) || rulesAssistant.hasPending(rulesConversation, ruleContext.actorId)
+    && (isRulesAssistantRequestCandidate(text) || rulesAssistant.hasPending(rulesConversation, ruleContext.actorId)
       || rulesAssistant.hasFollowup(rulesConversation, ruleContext.actorId, text))) {
     const result = await rulesAssistant.handle({ conversationId: rulesConversation, message: text, locale, context: ruleContext });
-    await replyText(chatId, result.reply, { status: `rules-${result.kind}`, locale });
+    await replyText(chatId, result.reply, { status: `rules-${result.kind}`, locale, sensitive: result.sensitive });
     return { handled: true, chatId, status: `rules-${result.kind}` };
   }
 
