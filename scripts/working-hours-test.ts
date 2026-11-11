@@ -54,6 +54,16 @@ export async function testWorkingHours() {
   assert(isWorkingHoursRequest("ساعات کاری را نشان بده"));
   assert(!isWorkingHoursRequest("قوانین را نشان بده"));
   assert.equal((await turn("ساعات کاری را نشان بده"))?.status, "hours-listed");
+  const directReadFlow = new TelegramWorkingHours(api, async () => { throw new Error("clear working-hours reads must bypass the planner"); }, () => now);
+  const directReadStart = calls.length;
+  assert.equal((await directReadFlow.handle("hours-direct", "ساعات کاری پنجشنبهٔ غیرفعال را نشان بده", context, true))?.status, "hours-listed");
+  assert.equal(calls.at(-1)?.url.pathname, "/api/v1/working-hours/list");
+  assert.equal(calls.at(-1)?.init.method, "GET");
+  assert.equal(calls.at(-1)?.url.searchParams.get("status"), "inactive");
+  assert.equal(calls.at(-1)?.url.searchParams.get("search"), "Thursday", "the weekday filter is translated to the API's canonical value");
+  assert.equal((await directReadFlow.handle("hours-direct-all", "ساعات کاری را فهرست کن", context, true))?.status, "hours-listed");
+  assert.equal(calls.at(-1)?.url.searchParams.get("status"), "all");
+  assert(calls.slice(directReadStart).every(call => call.init.method === "GET"), "deterministic working-hours reads never mutate");
   plan = { operation: "delete", id, input: {} };
   const deletes = () => calls.filter(call => call.init.method === "DELETE").length;
   const beforeDelete = deletes();

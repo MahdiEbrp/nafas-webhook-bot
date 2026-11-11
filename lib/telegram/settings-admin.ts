@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalize } from "@/lib/text";
+import { adminReadStatus, matchAdminReadRoute } from "./admin-read-intent";
 import { isOtpLoginIntent } from "@/lib/auth/telegram-login";
 import type { RuleRequestContext } from "@/lib/rules/types";
 import { SettingsAdminApi, validateSettingCommand, type AdminSetting, type SettingCommand } from "@/lib/settings-admin/api";
@@ -10,6 +11,20 @@ import { jalaliDate } from "./format";
 type State = { actor: string; session: string; expires: number; rows: AdminSetting[]; query: Record<string, unknown>; command?: SettingCommand; snapshot?: AdminSetting; draft?: "create" | "edit"; target?: AdminSetting; awaiting?: string };
 export function isSettingsAdminRequest(text: string) { return /تنظیمات|تنظیم\s+(?:سیستم|سامانه|سایت|رزرو|کلینیک|جدید|بساز|ایجاد|[a-f0-9]{8}-)|\bsettings\b|\b(?:booking|contact|clinic|pricing)\.[a-z_]+/iu.test(normalize(text)) && !/تنظیمات.*(?:پیامک|سرویس پیامک|sms)/iu.test(normalize(text)); }
 const display = (value: unknown) => JSON.stringify(value, null, 2) ?? "تعریف‌نشده";
+function deterministicSettingRead(text: string) {
+  return matchAdminReadRoute(text, [{
+    operation: "list" as const,
+    when: /تنظیمات?|\bsettings?\b|\b(?:booking|contact|clinic|pricing)\.[a-z_]+/iu,
+    input: value => {
+      const status = adminReadStatus(value, [
+        { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
+        { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
+      ]);
+      const key = value.match(/\b[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_.-]*)+\b/iu)?.[0];
+      return { ...(status ? { status } : {}), ...(key ? { search: key } : {}) };
+    },
+  }]);
+}
 export function settingCard(row: AdminSetting, index = 0) {
   const hidden = sensitiveSetting(row.key);
   return `**⚙️ ${index + 1}. ${row.key}**\n💡 کاربرد: ${explainSetting(row.key)}\n• نوع: ${row.type ?? "نامشخص"}\n• مقدار پایه:\n${hidden ? "🔒 مقدار محرمانه نمایش داده نمی‌شود" : display(row.value)}\n• ترجمه‌ها:\n${hidden ? "🔒 پنهان" : display(row.translations)}\n• وضعیت: ${row.isActive ? "فعال" : "غیرفعال"}\n• ترتیب: ${row.displayOrder}\n• شناسه: ${row.id}\n• آخرین تغییر: ${jalaliDate(row.updatedAt)}`;
@@ -76,6 +91,11 @@ export class TelegramSettingsAdmin {
     if (localValue || /https?:\/\/|\b\d{7,}\b/u.test(text.replace(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/giu, ""))) return reply("🔐 مقدار را در درخواست آزاد نفرست؛ ابتدا بگو «تنظیم موردنظر را ویرایش کن» تا مقدار به‌صورت محلی و بدون مدل دریافت شود.", "settings-invalid");
     if (/راهنما|توضیح.*همه|همه.*توضیح|هر تنظیم|چه.*کار|help/iu.test(value) && !/\b(?:booking|contact|clinic|pricing)\./u.test(value)) return reply(settingsGuide(), "settings-help");
     if (/(?:تنظیم).*?(?:بساز|جدید|ایجاد)|(?:ساخت|ایجاد).*تنظیم/iu.test(value)) { state.draft = "create"; state.target = undefined; return reply(formHelp("create")); }
+    const directRead = deterministicSettingRead(text);
+    if (directRead) {
+      state.awaiting = undefined;
+      return this.run({ operation: "list", input: directRead.input }, state, context);
+    }
     try {
       const plan = settingPlanSchema.parse(await this.planner(state.awaiting ? `${state.awaiting}\nانتخاب: ${text}` : text, state.rows.map(row => ({ id: row.id, key: row.key, type: row.type })), state.query));
       if (plan.operation === "help") return reply(settingsGuide(), "settings-help");

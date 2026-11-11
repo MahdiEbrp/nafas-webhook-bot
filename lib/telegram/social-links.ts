@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalize } from "@/lib/text";
+import { adminReadStatus, matchAdminReadRoute } from "./admin-read-intent";
 import { isOtpLoginIntent } from "@/lib/auth/telegram-login";
 import type { RuleRequestContext } from "@/lib/rules/types";
 import { SocialLinksApi, validateSocialCommand, type SocialCommand, type SocialLink } from "@/lib/social-links/api";
@@ -11,6 +12,25 @@ export function isSocialLinksRequest(text: string): boolean {
   const value = normalize(text);
   return /(?:لینک|پیوند).*(?:اجتماعی|اینستاگرام|تلگرام|واتساپ|فیسبوک|فیس بوک|یوتیوب|لینکدین)|(?:شبکه|شبکههای|شبکه های)\s*اجتماعی|social[ -]?links|سوشال.*لینک/iu.test(value)
     || /لینک|پیوند/u.test(value) && /بساز|ایجاد|افزودن|اضافه|جدید|حذف|پاک|ویرایش|تغییر|فعال|لیست|فهرست|نمایش|نشان|نشون/u.test(value);
+}
+function deterministicSocialRead(text: string) {
+  return matchAdminReadRoute(text, [{
+    operation: "list" as const,
+    when: /(?:لینک|پیوند).*(?:اجتماعی|اینستاگرام|تلگرام|واتساپ|فیسبوک|فیس\s*بوک|یوتیوب|لینکدین)|(?:شبکه|شبکههای|شبکه های)\s*اجتماعی|social[ -]?links|سوشال.*لینک/iu,
+    input: value => {
+      const status = adminReadStatus(value, [
+        { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
+        { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
+      ]);
+      const platforms = [
+        ["instagram", /\binstagram\b|اینستاگرام/iu], ["telegram", /\btelegram\b|تلگرام/iu],
+        ["whatsapp", /\bwhatsapp\b|واتساپ/iu], ["facebook", /\bfacebook\b|فیسبوک|فیس\s*بوک/iu],
+        ["youtube", /\byoutube\b|یوتیوب/iu], ["linkedin", /\blinkedin\b|لینکدین/iu],
+      ] as const;
+      const search = platforms.find(([, pattern]) => pattern.test(value))?.[0];
+      return { ...(status ? { status } : {}), ...(search ? { search } : {}) };
+    },
+  }]);
 }
 type State = { actor: string; session: string; expires: number; rows: SocialLink[]; query: Record<string, unknown>; command?: SocialCommand; snapshot?: SocialLink; target?: SocialLink; draft?: Record<string, unknown>; awaiting?: string };
 export function socialCard(row: SocialLink, index = 0): string {
@@ -77,6 +97,11 @@ export class TelegramSocialLinks {
     if (/(?:لینک|پیوند).*(?:بساز|ایجاد|جدید|اضافه)|(?:ساخت|افزودن).*(?:لینک|پیوند)/iu.test(value)) { state.draft = {}; return reply(this.prompt("labelFa")); }
     // Do not send URLs containing embedded credentials to the intent model.
     if (/https?:\/\/[^/\s]+@/iu.test(text)) return reply("🔐 نام کاربری یا رمز را داخل آدرس نفرست؛ یک آدرس عمومی بدون اطلاعات ورود لازم است.", "social-invalid");
+    const directRead = deterministicSocialRead(text);
+    if (directRead) {
+      state.awaiting = undefined;
+      return this.run({ operation: "list", input: directRead.input }, state, context);
+    }
     try {
       const plan = socialPlanSchema.parse(await this.planner(state.awaiting ? `${state.awaiting}\nتوضیح یا انتخاب کاربر: ${text}` : text, state.rows, state.query));
       if (plan.operation === "clarify") { state.awaiting = text; return reply(`${HELP}\n\n🔎 عنوان، شمارهٔ ردیف یا تغییر موردنظر را دقیق‌تر بگو.`); }

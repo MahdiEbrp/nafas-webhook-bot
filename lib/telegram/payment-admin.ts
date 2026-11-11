@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { createHash } from "node:crypto";
 import { normalize } from "@/lib/text";
+import { adminReadStatus, matchAdminReadRoute } from "./admin-read-intent";
 import { isOtpLoginIntent } from "@/lib/auth/telegram-login";
 import type { RuleRequestContext } from "@/lib/rules/types";
 import { PaymentAdminApi, paymentOperations, validatePaymentCommand, type PaymentCommand, type PaymentOperation } from "@/lib/payment-admin/api";
@@ -11,7 +12,33 @@ type Draft = { operation: PaymentOperation; id?: string; values: Row; step: numb
 type State = { actor: string; session: string; expires: number; rows: { providers: Row[]; transactions: Row[] }; query: Record<string, unknown>; draft?: Draft; command?: PaymentCommand; snapshot?: Row; awaiting?: string };
 export function isPaymentAdminRequest(text: string): boolean {
   const value = normalize(text);
-  return /\bpayments?\b|درگاه|مرچنت|تراکنش|(?:مدیریت|امار|گزارش|درخواست|لینک|وضعیت|فهرست|لیست|تست).*پرداخت|پرداخت.*(?:بساز|مدیریت|گزارش|تست|درخواست|لینک|وضعیت)/iu.test(value);
+  return /\bpayments?\b|\btransactions?\b|درگاه|مرچنت|تراکنش|(?:مدیریت|امار|گزارش|درخواست|لینک|وضعیت|فهرست|لیست|تست).*پرداخت|پرداخت.*(?:بساز|مدیریت|گزارش|تست|درخواست|لینک|وضعیت)/iu.test(value);
+}
+function deterministicPaymentRead(text: string) {
+  const transactionStatus = (value: string) => adminReadStatus(value, [
+    { value: "failed", when: /\b(?:failed|failure|unsuccessful)\b|ناموفق|شکست/iu },
+    { value: "verified", when: /\bverified\b|تایید\s*شده|تایید\s*گردیده/iu },
+    { value: "refunded", when: /\brefunded\b|بازپرداخت\s*شده|مسترد/iu },
+    { value: "cancelled", when: /\bcancelled\b|لغو\s*شده/iu },
+    { value: "requested", when: /\brequested\b|درخواست\s*شده/iu },
+    { value: "pending", when: /\bpending\b|در\s*انتظار/iu },
+  ]);
+  const providerStatus = (value: string) => adminReadStatus(value, [
+    { value: "inactive", when: /\b(?:inactive|disabled)\b|غیرفعال/iu },
+    { value: "active", when: /\b(?:active|enabled)\b|فعال/iu },
+  ]);
+  return matchAdminReadRoute(text, [
+    { operation: "transactions" as const, when: /\btransactions?\b|تراکنش/iu,
+      input: value => {
+        const status = transactionStatus(value);
+        const bookingRef = value.match(/\bnf-\d{5}\b/iu)?.[0];
+        return { ...(status ? { status } : {}), ...(bookingRef ? { search: bookingRef.toUpperCase() } : {}) };
+      } },
+    { operation: "providers" as const, when: /\b(?:providers?|gateways?)\b|درگاه|مرچنت/iu,
+      input: value => { const status = providerStatus(value); return status ? { status } : {}; } },
+    { operation: "overview" as const, when: /\b(?:overview|stats?|statistics|summary|dashboard)\b|امار|گزارش\s*(?:کلی|عمومی)/iu },
+    { operation: "overview" as const, when: /\bpayments?\b|پرداخت/iu },
+  ]);
 }
 export const PAYMENT_HELP = "**💳 مدیریت پرداخت**\n\n• «آمار پرداخت را نشان بده»\n• «درگاه‌های پرداخت را نشان بده»\n• «درگاه پرداخت جدید بساز»\n• «درگاه دوم را ویرایش کن»\n• «درگاه اول را تست کن»\n• «تراکنش‌های ناموفق را نشان بده»\n• «درخواست پرداخت بساز»\n• «تراکنش دوم را ویرایش کن»\n\n🔒 فقط در خصوصی و با نشست مجاز؛ تغییرها با تأیید صریح.\n⚠️ تست درگاه درخواست واقعی ۱۰۰۰ ریالی ایجاد می‌کند؛ تغییر وضعیت تراکنش فقط ثبت مدیریتی است، نه تأیید بانک، بازپرداخت یا تغییر وضعیت رزرو.\nℹ️ این API عملیات بازپرداخت بانکی، تأیید بانکی، حذف تراکنش یا عملیات گروهی تراکنش ندارد.";
 const steps: Record<string, string[]> = { providerCreate: ["name", "kind", "merchantId", "apiUrl", "callbackUrl", "options"], providerUpdate: ["patch"], transactionCreate: ["bookingGroupRef", "amount", "description", "providerId"], transactionUpdate: ["patch"] };
@@ -98,6 +125,12 @@ export class TelegramPaymentAdmin {
     if (/راهنما|help/iu.test(value) || /بازپرداخت|استرداد|refund|تایید بانکی|تأیید بانکی|حذف.*تراکنش/iu.test(value)) return reply(PAYMENT_HELP, "payment-help");
     if (/(?:درگاه).*(?:بساز|جدید|ایجاد)|(?:ساخت|ایجاد).*درگاه/iu.test(value)) return reply(this.start(state, "providerCreate"));
     if (/(?:درخواست|لینک).*پرداخت.*(?:بساز|ایجاد|جدید)|(?:ساخت|ایجاد).*(?:پرداخت|تراکنش)/iu.test(value)) return reply(this.start(state, "transactionCreate"));
+    const directRead = deterministicPaymentRead(text);
+    if (directRead) {
+      state.awaiting = undefined;
+      const command: PaymentCommand = { operation: directRead.operation, input: directRead.input };
+      return this.run(command, state, context);
+    }
     try {
       const plan = paymentPlanSchema.parse(await this.planner(state.awaiting ? `${state.awaiting}\nانتخاب: ${text}` : text, this.choices(state), state.query));
       if (plan.operation === "help") return reply(PAYMENT_HELP, "payment-help");

@@ -149,6 +149,28 @@ export async function testEmailAdmin() {
   }, () => clock);
   let clock = 1_000_000;
 
+  let failedReadPlans = 0;
+  const deterministicReads = new TelegramEmailAdmin(api, async () => { failedReadPlans++; throw new Error("clear email reads must bypass the planner"); }, () => clock);
+  const deterministicReadStart = calls.length, writesBeforeReads = writes;
+  const emailReadCases = [
+    ["آمار ایمیل را نشان بده", "email-overview", "/overview", undefined],
+    ["گزارش ایمیل", "email-overview", "/overview", undefined],
+    ["سرویس‌های ایمیل غیرفعال را فهرست کن", "email-listed", "/providers", "inactive"],
+    ["گزارش ایمیل‌های ناموفق را نشان بده", "email-listed", "/messages", "failed"],
+    ["قالب‌های ایمیل فعال را نشان بده", "email-listed", "/templates", "active"],
+    ["گیرنده‌های ایمیل را نشان بده", "email-listed", "/recipients", undefined],
+  ] as const;
+  for (const [request, expectedStatus, suffix, filter] of emailReadCases) {
+    assert.equal((await deterministicReads.handle(`email-read-${calls.length}`, request, context, true))?.status, expectedStatus, request);
+    const call = calls.at(-1)!;
+    assert.equal(call.url.pathname, `/api/v1/admin/email${suffix}`);
+    assert.equal(call.init.method, "GET", "deterministic email reads are GET-only");
+    if (filter) assert.equal(call.url.searchParams.get("status"), filter, "email list status filters are preserved");
+  }
+  assert.equal(failedReadPlans, 0, "clear email reads still work when the planner throws");
+  assert.equal(writes, writesBeforeReads, "deterministic email reads do not send or mutate");
+  assert(calls.slice(deterministicReadStart).every(call => call.init.method === "GET"));
+
   assert(isEmailAdminRequest("ایمیل‌ها را نشان بده"));
   assert(isEmailAdminRequest("sara@example.test"));
   assert(!isEmailAdminRequest("سلام، امروز چندمه؟"));

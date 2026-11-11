@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isOtpLoginIntent } from "@/lib/auth/telegram-login";
 import { jalaliDate } from "./format";
 import { normalize } from "@/lib/text";
+import { isExplicitAdminCollectionRead } from "./admin-read-intent";
 import type { RuleRequestContext } from "@/lib/rules/types";
 import { ClinicUsersApi, validateUserCommand, type UserCommand } from "@/lib/users/clinic-api";
 import { planUserRequest, type UserPlanner, type UserChoice } from "@/lib/users/planner";
@@ -30,12 +31,12 @@ export function isUserManagementMessage(text: string): boolean {
 
 const USER_COLLECTION = /(?:\busers\b|\baccounts\b|کاربران|کاربرها|حساب(?:های)?\s+کاربری|(?:لیست|فهرست)\s+کاربر(?:ان)?)/iu;
 const USER_LIST_ACTION = /(?:\b(?:list|show|display|view|browse)\b|لیست|فهرست|نمایش|نشان\s*(?:بده|بدهید)?|نشون\s*(?:بده|بدهید)?|مشاهده)/iu;
-const USER_LIST_WRITE_ACTION = /(?:\b(?:create|add|delete|remove|edit|update|change|reset|ban|block|activate|deactivate|disable|enable|assign)\b|بساز|ایجاد|افزودن|اضافه|حذف|پاک|ویرایش|تغییر|بازنشانی|مسدود|(?:غیرفعال|فعال)\s*(?:کن|کردن|سازی))/iu;
+const USER_LIST_WRITE_ACTION = /(?:\b(?:create|add|delete|remove|edit|update|change|reset|ban|block|activate|deactivate|disable|enable|assign)\b|بساز|ایجاد|افزودن|اضافه|حذف|پاک|ویرایش|تغییر|بازنشانی|مسدود\s*(?:کن|کردن|سازی)|(?:غیرفعال|فعال)\s*(?:کن|کردن|سازی))/iu;
 const USER_LIST_LOOKUP = /(?:\b(?:named|called|role|admin|customer|moderator|support)\b|\bby\s+(?:id|uuid|name|email|phone)\b|uuid|شناسه|به\s*نام|با\s*(?:نام|ایمیل|تلفن|شماره)|نقش|مدیر|مشتری|پشتیبانی|ناظر)/iu;
 
 function explicitUserListCommand(text: string): UserCommand | null {
   const value = normalize(text).toLowerCase();
-  if (!USER_COLLECTION.test(value) || !USER_LIST_ACTION.test(value) || USER_LIST_WRITE_ACTION.test(value) || USER_LIST_LOOKUP.test(value)) return null;
+  if (!USER_COLLECTION.test(value) || !USER_LIST_ACTION.test(value) || !isExplicitAdminCollectionRead(value) || USER_LIST_WRITE_ACTION.test(value) || USER_LIST_LOOKUP.test(value)) return null;
   const status = /(?:\binactive\b|\bdisabled\b|غیرفعال)/iu.test(value)
     ? "inactive"
     : /(?:\bbanned\b|\bblocked\b|مسدود)/iu.test(value)
